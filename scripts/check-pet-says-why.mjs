@@ -3139,17 +3139,33 @@ console.log("A160. 第一次打開她、一直待在她視窗上問：空手的�
       }
     }
   }
-  // 以前暫停過：先講現在卡在哪裡，過去的原因照樣接在後面。
-  const p = await open({
-    ask: answer({ blind: blind({ ever_recorded: true, ever_stored: true, recording_now: true, her_window_in_front: true, paused_episodes: 2 }) }),
-  });
-  await p.type("我剛剛在幹嘛");
-  const reasons = p.hits().querySelectorAll(".hits-why").map((line) => line.textContent);
-  check("A160.3 暫停過的：第一句是前景，暫停那句接在後面", reasons[0] === HERS && reasons.slice(1).some((line) => line.includes("暫停")), reasons);
+  // 被擋過（暫停、排除、全停）：標題照舊講過去，前景那件排在原因的第一行，過去的
+  // 原因接在後面。從她的視窗上問的時候前景幾乎一定是她自己，所以它不能搶標題——
+  // 一小時的網銀全被排除、回到她這裡問的人，會讀成「是因為前景是她」。
+  const HERSELF = "（我上一次看的時候，前景是我自己的視窗，而我不錄自己。切到你要我記的程式，我才會開始記。）";
+  const BLOCKED = "（我錄過，但那段時間一張畫面都沒留下來——底下是我查得出來的原因。）";
+  check("A160.3 前提：前景那一條是沒被擋過時那句的後半", HERS.endsWith(HERSELF.slice(1)), HERSELF);
+  for (const [label, needle, over] of [
+    ["暫停過", "暫停", { paused_episodes: 2 }],
+    ["被擋過", "擋掉過", { excluded: [["password field focused", 3]] }],
+    ["全停過", "全停", { master_stopped_episodes: 1, master_stopped_ms: 60_000 }],
+  ]) {
+    const reasonsFor = async (front) => {
+      const p = await open({
+        ask: answer({ blind: blind({ ever_recorded: true, ever_stored: true, recording_now: true, her_window_in_front: front, ...over }) }),
+      });
+      await p.type("我剛剛在幹嘛");
+      return p.hits().querySelectorAll(".hits-why").map((line) => line.textContent);
+    };
+    const reasons = await reasonsFor(true);
+    check(`A160.3 ${label}的：標題講過去，第一條原因是前景，「${needle}」那句接在後面`, reasons[0] === BLOCKED && reasons[1] === HERSELF && reasons.slice(2).some((line) => line.includes(needle)), reasons);
+    const other = await reasonsFor(false);
+    check(`A160.3 ${label}的、前景不是她：沒有前景那一條`, other.length === reasons.length - 1 && other.every((line) => !line.includes("自己的視窗")), other);
+  }
   // 終端機（`sister query`）講同一件事，只差人稱。Rust 的續行先接起來再比。
-  const cli = `"${HERS.slice(1, -1).replaceAll("我", "她")}"`;
+  const cli = (line) => `"${line.slice(1, -1).replaceAll("我", "她")}"`;
   const ops = read(join(UI, "../../../crates/sister-cli/src/ops.rs")).replace(/\\\n\s*/gu, "");
-  check("A160.4 終端機那一句和字母人只差人稱", ops.includes(cli), cli);
+  check("A160.4 終端機那兩句和字母人只差人稱", ops.includes(cli(HERS)) && ops.includes(cli(HERSELF)), [cli(HERS), cli(HERSELF)]);
 }
 
 // 這一條守的是**整支假瀏覽器看不到的那一格**：它沒有版面引擎，

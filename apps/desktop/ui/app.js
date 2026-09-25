@@ -4997,20 +4997,27 @@ function blindLines(blind) {
       blind.paused_episodes > 0 ||
       blind.master_stopped_episodes > 0 ||
       blind.excluded?.length > 0;
+    // 我正開著，而我上一拍看到的前景是我自己的視窗。我不錄自己，所以「剛開始，
+    // 再等一下」等多久都不會成真；我的視窗裡打的字照樣記節奏（ever_stored 是真的），
+    // 於是走到「之前的被忘掉了或過期了」——第一次打開我、在我這裡問第一題的人，
+    // 就落在這一格。和 `blind_lines`（ops.rs）同樣的句子、同樣的順序。
+    const lookingAtHerself = blind.recording_now && blind.her_window_in_front;
     if (blind.frames > 0) {
       // 上面那道 ocr_is_dead 已經把「夠多張畫面、一行字都沒有」攔走了，所以
       // 走到這裡的是張數還太少的時候。三張畫面上剛好都沒有字是完全正常的事
       // ——這裡不指控 OCR。
       out.push(`（我留下了 ${blind.frames} 張畫面，但還沒有任何一段字——多半是才剛開始。）`);
-    } else if (blind.recording_now && blind.her_window_in_front) {
-      // 我正開著，而我上一拍看到的前景是我自己的視窗。我不錄自己，所以底下那兩句
-      // 在這裡都是假的：「剛開始，再等一下」等多久都不會成真；我的視窗裡打的字照樣
-      // 記節奏（ever_stored 是真的），於是走到「之前的被忘掉了或過期了」——第一次
-      // 打開我、在我這裡問第一題的人，就落在這一格。排在 blocked 前面：那一句講
-      // 過去，這一句講現在卡在哪裡。和 `blind_lines`（ops.rs）同一句話。
-      out.push("（我正開著，但手上一段字都沒有——我上一次看的時候，前景是我自己的視窗，而我不錄自己。切到你要我記的程式，我才會開始記。）");
     } else if (blind.ever_recorded && blocked) {
       out.push("（我錄過，但那段時間一張畫面都沒留下來——底下是我查得出來的原因。）");
+      // 從我的視窗上問的時候，前景幾乎一定是我自己。所以被擋過的這一格不讓前景
+      // 那句搶標題：一小時的網銀全被排除、回到我這裡問的人，會讀成「是因為前景是
+      // 我」。標題照舊講過去，前景那件排在原因的第一行。
+      if (lookingAtHerself) {
+        out.push("（我上一次看的時候，前景是我自己的視窗，而我不錄自己。切到你要我記的程式，我才會開始記。）");
+      }
+    } else if (lookingAtHerself) {
+      // 排在「剛開始」和「被忘掉了」前面：那兩句在這裡都是假的。
+      out.push("（我正開著，但手上一段字都沒有——我上一次看的時候，前景是我自己的視窗，而我不錄自己。切到你要我記的程式，我才會開始記。）");
     } else if (blind.recording_now && !blind.ever_stored) {
       // **「我正開著」和「一列都沒存過」同時成立的那一格。** 底下那句攤開三
       // 種可能，而其中一種在這台機器上證得出來是假的：一列都沒進來過，就沒有

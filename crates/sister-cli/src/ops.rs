@@ -14811,6 +14811,13 @@ pub mod query {
             // 原因講出來，所以這裡改成不 return，讓它們接著講。
             let blocked =
                 b.paused_episodes > 0 || b.master_stopped_episodes > 0 || !b.excluded.is_empty();
+            // 她正開著，而她上一拍看到的前景是她自己的視窗。她不錄自己，所以
+            // 「剛開始，再等一下」等多久都不會成真，「之前的被忘掉了」在第一次打開
+            // 她的機器上指控一件沒發生的事——她的視窗裡打的字、點的滑鼠照樣記節奏，
+            // `ever_stored` 因此是真的，走到的正是那一句。
+            let looking_at_herself = b.recording_now && b.her_window_in_front.0;
+            // 被擋過的時候，前景那件不當標題，排在底下原因的第一行。
+            let mut herself_below = false;
             out.push(if b.frames > 0 {
                 // 上面那道 `ocr_is_dead()` 已經把「夠多張畫面、一行字都沒有」
                 // 那一種攔走了，所以走到這裡的是張數還太少的時候。三張畫面上
@@ -14819,20 +14826,17 @@ pub mod query {
                     "她留下了 {} 張畫面，但還沒有任何一段字——多半是才剛開始。",
                     b.frames
                 )
-            } else if b.recording_now && b.her_window_in_front.0 {
-                // 她正開著，而她上一拍看到的前景是她自己的視窗。她不錄自己，所以
-                // 底下那兩句在這裡都是假的：「剛開始，再等一下」等多久都不會成真，
-                // 「之前的被忘掉了」在第一次打開她的機器上指控一件沒發生的事——
-                // 她的視窗裡打的字、點的滑鼠照樣記節奏，`ever_stored` 因此是真的，
-                // 走到的正是那一句。
-                //
-                // 排在 `blocked` 前面：那一句講過去，這一句講現在卡在哪裡；過去的
-                // 原因照樣由底下排除／暫停那幾行接著講。
+            } else if b.ever_recorded && blocked {
+                // 從她的視窗上問的時候，前景幾乎一定是她自己。所以被擋過的這一格
+                // 不讓前景那句搶標題：一小時的網銀全被排除、回到她這裡問的人，會
+                // 讀成「是因為前景是她」。標題照舊講過去，前景那件排在原因的第一行。
+                herself_below = looking_at_herself;
+                "她錄過，但那段時間一張畫面都沒留下來——底下是查得出來的原因。".to_string()
+            } else if looking_at_herself {
+                // 排在「剛開始」和「被忘掉了」前面：那兩句在這裡都是假的。
                 "她正開著，但手上一段字都沒有——她上一次看的時候，前景是她自己的視窗，\
                  而她不錄自己。切到你要她記的程式，她才會開始記。"
                     .to_string()
-            } else if b.ever_recorded && blocked {
-                "她錄過，但那段時間一張畫面都沒留下來——底下是查得出來的原因。".to_string()
             } else if b.recording_now && !b.ever_stored {
                 // **「她正開著」和「一列都沒存過」同時成立的那一格。** 底下那
                 // 句攤開三種可能，而其中一種在這台機器上是**不可能**的：一列
@@ -14879,6 +14883,13 @@ pub mod query {
             } else {
                 format!("她還沒記過任何東西——先跑 `{}`。", cmd(data_dir, "record"))
             });
+            if herself_below {
+                out.push(
+                    "她上一次看的時候，前景是她自己的視窗，而她不錄自己。\
+                     切到你要她記的程式，她才會開始記。"
+                        .to_string(),
+                );
+            }
             // 這裡不再提早收工。以前 `frames > 0` 會直接 return，因為那時候它
             // 確定是 OCR 斷了；現在那個確定的情況在函式最上面就 return 掉了，
             // 剩下的是「才剛開始」——而排除規則和暫停照樣可能是真正的原因。
@@ -16035,22 +16046,81 @@ pub mod query {
             assert!(lines.contains("3 張畫面"), "{lines}");
             assert!(!lines.contains("自己的視窗"), "{lines}");
 
-            // 以前暫停過：先講現在卡在哪裡，過去的原因照樣接在後面。
-            let paused_before = BlindSpots {
+            // 被擋過（暫停、排除、全停）：標題照舊講過去，前景那件排在原因的第一行，
+            // 過去的原因接在後面。從她的視窗上問的時候前景幾乎一定是她自己，所以它
+            // 不能搶標題——一小時的網銀全被排除、回到她這裡問的人，會讀成「是因為
+            // 前景是她」。
+            let alone = blind_lines(&BlindSpots {
                 ever_recorded: true,
                 ever_stored: true,
                 recording_now: true,
                 her_window_in_front: HerWindowInFront(true),
-                paused_episodes: 1,
-                paused_ms: 60_000,
                 ..Default::default()
-            };
-            let lines = blind_lines(&paused_before);
-            assert!(lines[0].contains("前景是她自己的視窗"), "{lines:?}");
-            assert!(
-                lines[1..].iter().any(|line| line.contains("暫停")),
-                "{lines:?}"
-            );
+            });
+            assert_eq!(alone.len(), 1, "沒被擋過的只有一句：{alone:?}");
+            for (past, blocked) in [
+                (
+                    "暫停",
+                    BlindSpots {
+                        paused_episodes: 1,
+                        paused_ms: 60_000,
+                        ..Default::default()
+                    },
+                ),
+                (
+                    "擋掉過",
+                    BlindSpots {
+                        excluded: vec![("password field focused".to_string(), 3)],
+                        ..Default::default()
+                    },
+                ),
+                (
+                    "全停",
+                    BlindSpots {
+                        master_stopped_episodes: 1,
+                        master_stopped_ms: 60_000,
+                        ..Default::default()
+                    },
+                ),
+            ] {
+                let hers = BlindSpots {
+                    ever_recorded: true,
+                    ever_stored: true,
+                    recording_now: true,
+                    her_window_in_front: HerWindowInFront(true),
+                    ..blocked
+                };
+                let lines = blind_lines(&hers);
+                assert!(lines[0].contains("一張畫面都沒留下來"), "{past}：{lines:?}");
+                assert!(
+                    !lines[0].contains("自己的視窗"),
+                    "{past}：標題講過去：{lines:?}"
+                );
+                assert!(lines[1].contains("前景是她自己的視窗"), "{past}：{lines:?}");
+                assert!(
+                    alone[0].ends_with(&lines[1]),
+                    "{past}：第一條原因是沒被擋過時那句的後半：{alone:?} / {lines:?}"
+                );
+                assert!(
+                    lines[2..].iter().any(|line| line.contains(past)),
+                    "{past}：過去的原因接在後面：{lines:?}"
+                );
+
+                // 對照組：同樣被擋過、前景不是她，沒有這一行。
+                let other = blind_lines(&BlindSpots {
+                    her_window_in_front: HerWindowInFront(false),
+                    ..hers.clone()
+                });
+                assert_eq!(
+                    other.len() + 1,
+                    lines.len(),
+                    "{past}：{other:?} / {lines:?}"
+                );
+                assert!(
+                    !other.join("\n").contains("自己的視窗"),
+                    "{past}：{other:?}"
+                );
+            }
         }
 
         /// 「她錄過但現在是空的」有四種走法，而只有一種是「被刪掉了」。
