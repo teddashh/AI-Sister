@@ -1820,7 +1820,7 @@ grok 4.7（a156-r1，`33e1809`）做的。`ask()` 從此只做分流，正式那
 
 ### 閘門紅了兩條，一條是真的
 
-`gates-all.sh` 量 `33e1809`：**通過 51 條，失敗 2 條**。
+`/home/ted-h/tmp-tests/gates-all.sh` 量 `33e1809`：**通過 51 條，失敗 2 條**。
 
 **第一條是真的，而且 R1 看不到它。** `check-persona.mjs` 那條
 「ask 沒有日常短句旁路，每個文字問題都 invoke native ask」用原始碼文字釘住
@@ -1847,7 +1847,7 @@ before_stop_and_does_not_publish_after_pending`。
 ### R1 的「17 條全過」是怎麼來的
 
 它自己跑的是 `A156_ONLY=1`，而那不是篩子，是**截斷**：
-`scripts/check-pet-says-why.mjs:915` 一行 `process.exit()`，把後面 977 條
+`scripts/check-pet-says-why.mjs` 第 915 行一句 `process.exit()`，把後面 977 條
 全部跳過。所以它從頭到尾沒跑過 persona 那一節，也沒跑過整支。
 
 這個寫法不是它發明的——main 上已經有四個（A154×2、A149×2）。
@@ -1878,3 +1878,10 @@ before_stop_and_does_not_publish_after_pending`。
    改成「在 body 裡塞一行註解」和「連著上一行一起當錨點」之後兩刀才真的紅。
 3. **我一開始把 `A156_ONLY` 讀成 R1 自己造的風險**，查了才發現 main 上已經
    有四個同形狀的。先查先例再定性。
+4. **打 tag 前那一趟閘門，紅的是我這一節自己。**
+   `check-docs-point-somewhere.py` 把反引號裡的裸「gates-all.sh」解析成
+   `scripts/` 底下的東西（它不在那裡，它是本機工具），又把反引號裡帶行號的
+   那一串當成一條路徑。**兩種我都已經記過一次**——本機工具一律寫絕對路徑、
+   行號寫在反引號外面——而我在同一節裡把兩種都犯了。
+   這也是這道閘門第三次在打 tag 前抓到我，它的價值在這裡：
+   **它擋的不是別人，是我寫收據的時候。**
