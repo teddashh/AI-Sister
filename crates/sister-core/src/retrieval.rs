@@ -803,6 +803,17 @@ mod tests {
         assert_eq!(joint_retry("是的 the", &[]), None);
     }
 
+    /// 呼叫端把第一次查詢那一串也算進「找過」：切出來和原句一樣就不再找。
+    #[test]
+    fn a_joint_equal_to_the_first_query_is_not_tried() {
+        let db = db_with_bill();
+        assert!(
+            !db.indexed_term_exists("退款").unwrap(),
+            "前提：沒看過「退款」"
+        );
+        assert_eq!(tries(&db, "客服 退款 專線"), Vec::<String>::new());
+    }
+
     /// 桌面收到的就是這個形狀：`kind` 決定畫哪一句，`terms` 是實際拿去找的字。
     /// 多一種就要在 `app.js` 多一句，`check-pet-says-why.mjs` 會逐種對字。
     #[test]

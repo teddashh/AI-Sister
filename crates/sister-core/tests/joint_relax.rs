@@ -23,6 +23,8 @@ const BACKGROUND: &[&str] = &[
     "不知道是什麼原因",
     "為了這件事",
     "有空的話再說",
+    "這是他建議的做法",
+    "密碼要記好",
 ];
 
 const TOPIC_WORDS: &[&str] = &[
@@ -34,6 +36,7 @@ const TOPIC_WORDS: &[&str] = &[
     "專線",
     "電話",
     "退款",
+    "會議",
     "翡翠灣",
     "release",
     "candidate",
@@ -268,4 +271,48 @@ fn a_seen_aspect_word_is_still_required_on_a_used_index() {
         let got = ask(&mut plain, q);
         assert_eq!(got.searched, relaxed(base), "沒有背景「{q}」");
     }
+}
+
+/// 從剝完的字切，不從上一步的候選字切。背景看過「議的」（「他建議的做法」）而沒看過
+/// 「會議」，上一步只拿掉「會議」這個雙字，候選字是「議的密碼」。從那裡切，「議」
+/// 一個字被丟掉，就改用「密碼」拿背景那一句來湊。
+#[test]
+fn a_split_starts_from_the_whole_question_not_from_a_half_cut_word() {
+    let mut busy = fixture(true);
+    assert_seen(&busy, &["議的", "密碼"]);
+    assert!(
+        busy.search("會議", 1).unwrap().is_empty(),
+        "前提：沒看過「會議」"
+    );
+    let got = ask(&mut busy, "會議的密碼");
+    assert!(got.empty, "不可以拿別的密碼來湊：{}", got.hits);
+    assert_eq!(
+        got.searched,
+        relaxed("議的密碼"),
+        "切段空手，照舊報上一步的候選字"
+    );
+}
+
+/// 上一步原樣對得到就不切段：拆開的條件對得到的比較多，原樣那一張比較準。
+#[test]
+fn a_phrase_the_previous_step_finds_is_not_split() {
+    let mut db = Db::open_in_memory().unwrap();
+    let session = db.start_session("test", "test").unwrap();
+    add(&mut db, session, 100, 1, "月報的連結已更新");
+    add(&mut db, session, 200, 2, "連結整理：月報下週交");
+    let apart = ask(&mut db, "月報 連結");
+    assert_eq!(apart.searched, None);
+    assert!(
+        apart.hits.contains("月報的連結已更新") && apart.hits.contains("連結整理"),
+        "前提：拆開的條件兩張都對得到：{}",
+        apart.hits
+    );
+    let got = ask(&mut db, "請問月報的連結");
+    assert_eq!(got.searched, relaxed("月報的連結"));
+    assert!(got.hits.contains("月報的連結已更新"), "{}", got.hits);
+    assert!(
+        !got.hits.contains("連結整理"),
+        "上一步找得到就不切段：{}",
+        got.hits
+    );
 }
