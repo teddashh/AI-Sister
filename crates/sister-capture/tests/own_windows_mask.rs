@@ -860,8 +860,18 @@ fn without_her_the_grab_comes_back_untouched() {
 
 #[test]
 fn if_her_place_cannot_be_read_before_the_grab_there_is_no_frame() {
+    // 只有抓之前那一次問不出來；抓完再問，她已經不在畫面上了。抓的那一刻
+    // 她可能還在，這一張照樣不要。兩次都問不出來的話，只證明得了「有一次」。
+    let mut asked = 0;
     let error = grab_without_her(
-        || Err(OwnWindowUnlocated.into()),
+        || {
+            asked += 1;
+            if asked == 1 {
+                Err(OwnWindowUnlocated.into())
+            } else {
+                Ok(Vec::new())
+            }
+        },
         || Ok(magenta(4, 4)),
         4,
         4,
