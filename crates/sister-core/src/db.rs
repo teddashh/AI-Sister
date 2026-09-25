@@ -28,7 +28,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
-use crate::facts::ExtractedFact;
+use crate::facts::{ExtractedFact, condition_is_kind_word};
 use crate::model::{
     ClipboardEvent, FocusEvent, FocusSnapshot, FrameCapture, InputMetrics, Millis, SearchHit,
     SourceKind, SystemEvent, now_ms,
@@ -2926,42 +2926,72 @@ impl Db {
         Ok(false)
     }
 
-    /// 只跳過開頭連續零命中的條件；第一個已知條件之後保留原字與 AND。
-    /// 不刪中間或尾端的未知條件，避免把內容題縮成只有其中一個名詞。
-    /// 最多檢查 128 字；長題維持原查詢，避免無上限的索引探測。
-    pub(crate) fn indexed_candidate(&self, query: &str) -> Result<Option<String>> {
+    /// 原查詢整段落空之後，頭尾對不到的條件可以拿掉，再拿剩下的那一段去查。
+    ///
+    /// 條件的切法：連續中文切相鄰雙字，其餘非空白整段是一個條件。「看過」
+    /// 是三個 FTS 索引任一個 `EXISTS`。從開頭往後，連續零命中的條件跳過，
+    /// 停在第一個看過的條件——這一半跟以前一樣。從尾端往回，連續零命中、
+    /// 而且不是類型詞的條件也放掉；碰到看過的條件或類型詞就停。中間沒看過
+    /// 的條件不進那一圈，它仍是必要條件，FTS 的 AND 也還在。
+    ///
+    /// 先前這裡寫的是：不刪中間或尾端的未知條件，避免把內容題縮成只有其中
+    /// 一個名詞。中間那一半現在仍然照做。被推翻的是尾端。`部署失敗 退款流程`
+    /// 尾端整段對不到，會縮成 `部署失敗`——內容題少掉一半。肯這樣做，是因為
+    /// 放寬之後畫面會說「我對不到你打的那一串，所以改用「X」去找。」，他看得到
+    /// 她換了什麼。代價就寫在那句話裡，另外中文是靠雙字判斷的：看過「電信帳單」
+    /// 時問 `電信帳戶`，雙字「信帳」對得到，於是停在 `電信帳`，切在「帳戶」
+    /// 兩個字中間。那一句會照實印出「電信帳」，不把切口收成一個詞。
+    ///
+    /// 類型詞只認 `QUERY_KIND_TABLE`，這裡不另備雜訊詞表。尾巴碰到類型詞就
+    /// 停、把那個詞留著；「電話」常常沒寫在畫面上，放掉它 facts 就失去種類。
+    /// 英文沿用 `query_kind_word_hits` 的邊界：完整 token，可接複數 s，
+    /// hotel 裡的 tel 不是類型詞。
+    ///
+    /// 回傳把三件事分開：[`IndexedCandidate::NoneSeen`] 一個看過的條件都沒有、
+    /// [`IndexedCandidate::Unchanged`] 不用改、[`IndexedCandidate::Changed`]
+    /// 改成這段字。超過 128 字不探測索引，回 [`IndexedCandidate::TooLong`]；
+    /// 那不是「一個都沒看過」。呼叫端的類型詞保護只擋 `NoneSeen`。
+    pub(crate) fn indexed_candidate(&self, query: &str) -> Result<IndexedCandidate> {
         let chars: Vec<(usize, char)> = query.char_indices().take(129).collect();
         if chars.len() > 128 {
-            return Ok(None);
+            return Ok(IndexedCandidate::TooLong);
         }
-        let suffix = |at: usize| {
-            let candidate = query[at..].trim();
-            (candidate != query.trim()).then(|| candidate.to_owned())
+        let conditions = indexed_conditions(query, &chars);
+        if conditions.is_empty() {
+            return Ok(IndexedCandidate::NoneSeen);
+        }
+
+        let mut first = None;
+        for (idx, &(start, end)) in conditions.iter().enumerate() {
+            if self.indexed_term_exists(&query[start..end])? {
+                first = Some(idx);
+                break;
+            }
+        }
+        let Some(first) = first else {
+            // 一個看過的條件都沒有。不能從類型詞起頭，否則「火星會議連結」
+            // 會退成任意一個網址。開頭那一半仍然只認索引。
+            return Ok(IndexedCandidate::NoneSeen);
         };
-        let byte_at = |i: usize| chars.get(i).map_or(query.len(), |&(at, _)| at);
-        let mut i = 0;
-        while i < chars.len() {
-            if chars[i].1.is_whitespace() {
-                i += 1;
-                continue;
+
+        // 只往回放尾端。中間的條件不在這圈裡，所以沒看過也留著。
+        let mut last = conditions.len() - 1;
+        while last > first {
+            let (start, end) = conditions[last];
+            let seen = self.indexed_term_exists(&query[start..end])?;
+            let kind = condition_is_kind_word(query, start, end);
+            if seen || kind {
+                break;
             }
-            let start = i;
-            let cjk = is_cjk(chars[i].1);
-            while i < chars.len() && !chars[i].1.is_whitespace() && is_cjk(chars[i].1) == cjk {
-                i += 1;
-            }
-            if cjk && i - start >= 2 {
-                for j in start..i - 1 {
-                    if self.indexed_term_exists(&query[byte_at(j)..byte_at(j + 2)])? {
-                        return Ok(suffix(byte_at(j)));
-                    }
-                }
-            } else if self.indexed_term_exists(&query[byte_at(start)..byte_at(i)])? {
-                return Ok(suffix(byte_at(start)));
-            }
+            last -= 1;
         }
-        // 全部零筆不能變成沒有主題的查詢。
-        Ok(None)
+
+        let candidate = query[conditions[first].0..conditions[last].1].trim();
+        if candidate.is_empty() || candidate == query.trim() {
+            Ok(IndexedCandidate::Unchanged)
+        } else {
+            Ok(IndexedCandidate::Changed(candidate.to_owned()))
+        }
     }
 
     /// 時間條件在每條索引與掃描的 LIMIT 前成立，避免較新的資料擠掉指定日期。
@@ -7437,6 +7467,22 @@ const BIGRAM_OVERFETCH: usize = 8;
 /// 它證明「有這段文字」，但不宣稱相關性。
 const LIKE_SCORE: f64 = -1.0;
 
+/// 空結果後能不能改字再查一次。
+///
+/// 四種結果不能併成一個 `Option`：`None` 以前同時表示「一個條件都沒看過」、
+/// 「不用改」和「太長沒檢查」。類型詞保護只該擋第一種。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum IndexedCandidate {
+    /// 一個看過的條件都沒有。
+    NoneSeen,
+    /// 看過，頭尾都沒有可放掉的零命中條件。
+    Unchanged,
+    /// 放掉頭尾零命中之後，實際拿去查的那一段。
+    Changed(String),
+    /// 超過 128 字，沒有逐條件問索引。
+    TooLong,
+}
+
 fn is_cjk(c: char) -> bool {
     matches!(c as u32,
         0x3400..=0x4DBF      // 擴充 A
@@ -7444,6 +7490,33 @@ fn is_cjk(c: char) -> bool {
         | 0xF900..=0xFAFF    // 相容表意文字
         | 0x20000..=0x2FA1F  // 擴充 B 之後
     )
+}
+
+/// 連續中文切相鄰雙字；單字中文與非空白的其他字各算一個條件。
+/// 跟 [`Db::indexed_candidate`] 改之前的那圈走法相同：長中文段只切雙字，不另成一個整段條件。
+fn indexed_conditions(query: &str, chars: &[(usize, char)]) -> Vec<(usize, usize)> {
+    let byte_at = |i: usize| chars.get(i).map_or(query.len(), |&(at, _)| at);
+    let mut conditions = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i].1.is_whitespace() {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        let cjk = is_cjk(chars[i].1);
+        while i < chars.len() && !chars[i].1.is_whitespace() && is_cjk(chars[i].1) == cjk {
+            i += 1;
+        }
+        if cjk && i - start >= 2 {
+            for j in start..i - 1 {
+                conditions.push((byte_at(j), byte_at(j + 2)));
+            }
+        } else {
+            conditions.push((byte_at(start), byte_at(i)));
+        }
+    }
+    conditions
 }
 
 /// 把 CJK 連續段切成重疊的雙字：「客服專線」→「客服 服專 專線」。

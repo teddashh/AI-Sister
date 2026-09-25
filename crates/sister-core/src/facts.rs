@@ -264,16 +264,75 @@ const QUERY_KIND_TABLE: &[(&str, FactKind)] = &[
     ("deadline", FactKind::DateTimeMention),
 ];
 
+/// 類型詞在已小寫的 `q` 裡從 `start` 吃到哪。
+///
+/// 英文必須是獨立詞（可接複數 s），不能把 hotel 的 tel、profile 的
+/// file 或識別字 error_code 當成類型要求。中文沒有空白，仍允許連寫；
+/// 共用的 ASCII 邊界也保留「phone是多少」這種中英相接的問法。
+/// [`query_kind_word_hits`] 與 [`condition_is_kind_word`] 都走這裡，避免兩套邊界。
+fn kind_word_match_end(q: &str, word: &str, start: usize) -> Option<usize> {
+    let end = start.checked_add(word.len())?;
+    if end > q.len() || &q[start..end] != word {
+        return None;
+    }
+    if !word.is_ascii() {
+        return Some(end);
+    }
+    if ascii_word_boundary(q, start, end) {
+        return Some(end);
+    }
+    if q[end..].starts_with('s') && ascii_word_boundary(q, start, end + 1) {
+        return Some(end + 1);
+    }
+    None
+}
+
 fn query_kind_word_hits(q: &str, word: &str) -> bool {
-    // 英文必須是獨立詞（可接複數 s），不能把 hotel 的 tel、profile 的
-    // file 或識別字 error_code 當成類型要求。中文沒有空白，仍允許連寫；
-    // 共用的 ASCII 邊界也保留「phone是多少」這種中英相接的問法。
-    q.match_indices(word).any(|(start, _)| {
-        let end = start + word.len();
-        !word.is_ascii()
-            || ascii_word_boundary(q, start, end)
-            || (q[end..].starts_with('s') && ascii_word_boundary(q, start, end + 1))
+    q.match_indices(word)
+        .any(|(start, _)| kind_word_match_end(q, word, start).is_some())
+}
+
+/// `query[start..end)` 這一個條件是不是類型詞。
+///
+/// 比對整句、用 [`kind_word_match_end`]，不把條件切下來單獨看——否則 hotel
+/// 的 tel 會在切下來的那一段上成立。條件整個落在某個類型詞裡（「什麼時候」
+/// 的三個雙字都算），或這個條件自己包住一個類型詞（`e-mail`、`phones`），
+/// 都算。橫跨邊界、只擦到一個字的雙字不算。
+pub(crate) fn condition_is_kind_word(query: &str, start: usize, end: usize) -> bool {
+    if start >= end || end > query.len() {
+        return false;
+    }
+    let (q, orig_at) = lowercase_with_orig_bytes(query);
+    QUERY_KIND_TABLE.iter().any(|(word, _)| {
+        q.match_indices(word).any(|(lower_start, _)| {
+            let Some(lower_end) = kind_word_match_end(&q, word, lower_start) else {
+                return false;
+            };
+            let kind_start = orig_at[lower_start];
+            let kind_end = orig_at[lower_end];
+            if kind_start >= kind_end {
+                return false;
+            }
+            (kind_start <= start && end <= kind_end) || (start <= kind_start && kind_end <= end)
+        })
     })
+}
+
+/// 小寫後每個 byte 對回原字串的 byte。ASCII 摺大小寫不改變長度；
+/// 少數字元會變長，對回去時整個原字元都算進類型詞的範圍。
+fn lowercase_with_orig_bytes(query: &str) -> (String, Vec<usize>) {
+    let mut lower = String::with_capacity(query.len());
+    let mut orig_at = Vec::with_capacity(query.len() + 1);
+    for (orig, ch) in query.char_indices() {
+        for low in ch.to_lowercase() {
+            for _ in 0..low.len_utf8() {
+                orig_at.push(orig);
+            }
+            lower.push(low);
+        }
+    }
+    orig_at.push(query.len());
+    (lower, orig_at)
 }
 
 pub fn kinds_for_query(query: &str) -> Vec<FactKind> {
@@ -1384,6 +1443,36 @@ mod tests {
             kinds_for_query("profile file path"),
             vec![FactKind::FilePath]
         );
+    }
+
+    #[test]
+    fn condition_is_kind_word_uses_the_same_boundary_as_query_kinds() {
+        assert!(condition_is_kind_word("tel", 0, 3));
+        assert!(condition_is_kind_word("phones", 0, "phones".len()));
+        assert!(condition_is_kind_word("PHONES", 0, "PHONES".len()));
+        assert!(condition_is_kind_word("(tel)", 0, "(tel)".len()));
+        assert!(condition_is_kind_word("e-mail", 0, "e-mail".len()));
+        assert!(!condition_is_kind_word("hotel", 0, "hotel".len()));
+        let tel = "hotel".find("tel").unwrap();
+        assert!(!condition_is_kind_word("hotel", tel, tel + 3));
+        assert!(!condition_is_kind_word("error_code", 0, "error_code".len()));
+        assert!(!condition_is_kind_word("profile", 0, "profile".len()));
+        assert!(!condition_is_kind_word("file2", 0, "file2".len()));
+
+        let q = "客服電話怎麼打";
+        let phone = q.find("電話").unwrap();
+        assert!(condition_is_kind_word(q, phone, phone + "電話".len()));
+        let straddle = q.find("話怎").unwrap();
+        assert!(!condition_is_kind_word(
+            q,
+            straddle,
+            straddle + "話怎".len()
+        ));
+        let when = "什麼時候";
+        for gram in ["什麼", "麼時", "時候"] {
+            let at = when.find(gram).unwrap();
+            assert!(condition_is_kind_word(when, at, at + gram.len()), "{gram}");
+        }
     }
 
     #[test]

@@ -8,7 +8,7 @@ use anyhow::{Result, ensure};
 
 use crate::activity::Activity;
 use crate::answer::{Answer, answers_during};
-use crate::db::Db;
+use crate::db::{Db, IndexedCandidate};
 use crate::model::{Millis, SearchHit};
 use crate::question::{self, Shape};
 
@@ -33,14 +33,21 @@ impl SearchAdjustment {
 
 fn retry_candidate(db: &Db, query: &str) -> Result<Option<String>> {
     let original = question::terms(query);
-    // 類型詞不能冒充必要主題。主題全部零筆時，不能退成任意電話／網址。
+    // 類型詞不能冒充必要主題。主題裡一個看過的條件都沒有時，不能退成任意電話／網址。
+    // 「不用改」和「太長沒檢查」不是「沒看過」——先前這三個都是 None，主題明明
+    // 在索引裡（請問月報連結 → 月報）也被擋下來。
     if !crate::facts::kinds_for_query(query).is_empty()
         && let Some(topic) = crate::facts::topic_constraint(query)
-        && db.indexed_candidate(&topic)?.is_none()
+        && db.indexed_candidate(&topic)? == IndexedCandidate::NoneSeen
     {
         return Ok(None);
     }
-    db.indexed_candidate(original)
+    Ok(match db.indexed_candidate(original)? {
+        IndexedCandidate::Changed(candidate) => Some(candidate),
+        IndexedCandidate::NoneSeen | IndexedCandidate::Unchanged | IndexedCandidate::TooLong => {
+            None
+        }
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -929,6 +936,83 @@ mod tests {
                 .map(|a| a.segment_count)
                 .collect::<Vec<_>>(),
             vec![5, 3, 5]
+        );
+    }
+
+    #[test]
+    fn unchanged_and_too_long_are_not_nothing_seen() {
+        let mut db = db_with_bill();
+        assert_eq!(
+            db.indexed_candidate("客服").unwrap(),
+            IndexedCandidate::Unchanged
+        );
+        assert_eq!(
+            db.indexed_candidate("沒看過").unwrap(),
+            IndexedCandidate::NoneSeen
+        );
+        assert_eq!(
+            db.indexed_candidate("請問客服").unwrap(),
+            IndexedCandidate::Changed("客服".into())
+        );
+        let within = format!("{}客服", "啊".repeat(126));
+        assert_eq!(within.chars().count(), 128);
+        assert_eq!(
+            db.indexed_candidate(&within).unwrap(),
+            IndexedCandidate::Changed("客服".into())
+        );
+        let over = format!("{}客服", "啊".repeat(127));
+        assert_eq!(over.chars().count(), 129);
+        assert_eq!(
+            db.indexed_candidate(&over).unwrap(),
+            IndexedCandidate::TooLong
+        );
+        let result = RetrievalProfile::TextAndFacts
+            .retrieve(&mut db, &over, 5)
+            .unwrap();
+        assert_eq!(result.searched, None, "太長沒檢查，不放寬");
+    }
+
+    #[test]
+    fn trailing_relaxation_pays_the_documented_cost() {
+        let corpus: crate::replay::Corpus = serde_json::from_str(include_str!(
+            "../../../scenarios/recall-baseline.corpus.json"
+        ))
+        .unwrap();
+        let mut db = Db::open_in_memory().unwrap();
+        db.import_replay(&corpus, 100).unwrap();
+
+        assert_eq!(
+            db.indexed_candidate("電信帳戶").unwrap(),
+            IndexedCandidate::Changed("電信帳".into())
+        );
+        let clean = RetrievalProfile::TextAndFacts
+            .retrieve(&mut db, "電信帳", 5)
+            .unwrap();
+        assert!(clean.searched.is_none() && !clean.hits.is_empty());
+        let cut = RetrievalProfile::TextAndFacts
+            .retrieve(&mut db, "電信帳戶", 5)
+            .unwrap();
+        assert_eq!(
+            cut.searched,
+            Some(SearchAdjustment::Relaxed("電信帳".into()))
+        );
+        assert_eq!(format!("{:?}", cut.hits), format!("{:?}", clean.hits));
+
+        let clean = RetrievalProfile::TextAndFacts
+            .retrieve(&mut db, "部署失敗", 5)
+            .unwrap();
+        assert!(clean.searched.is_none() && !clean.hits.is_empty());
+        let shrunk = RetrievalProfile::TextAndFacts
+            .retrieve(&mut db, "部署失敗 退款流程", 5)
+            .unwrap();
+        assert_eq!(
+            shrunk.searched,
+            Some(SearchAdjustment::Relaxed("部署失敗".into()))
+        );
+        assert_eq!(format!("{:?}", shrunk.hits), format!("{:?}", clean.hits));
+        assert_eq!(
+            format!("{:?}", shrunk.answers),
+            format!("{:?}", clean.answers)
         );
     }
 }

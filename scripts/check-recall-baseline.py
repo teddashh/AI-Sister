@@ -379,14 +379,14 @@ if session_report is not None:
     # 不准為了讓 +session 贏去動 fixture 或評分邏輯。
     session_scores = {
         "baseline_text": {
-            "recall_at_k": (1, 2),
-            "answer_accuracy": (2, 3),
-            "citation_accuracy": (1, 2),
+            "recall_at_k": (2, 2),
+            "answer_accuracy": (3, 3),
+            "citation_accuracy": (2, 2),
         },
         "facts": {
-            "recall_at_k": (1, 2),
-            "answer_accuracy": (2, 3),
-            "citation_accuracy": (1, 2),
+            "recall_at_k": (2, 2),
+            "answer_accuracy": (3, 3),
+            "citation_accuracy": (2, 2),
         },
         "facts_session": {
             "recall_at_k": (2, 2),
