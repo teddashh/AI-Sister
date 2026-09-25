@@ -814,6 +814,17 @@ mod tests {
         assert_eq!(tries(&db, "客服 退款 專線"), Vec::<String>::new());
     }
 
+    /// 上一步已經找過一樣的字（而且空手，才會輪到切段），不再找一次。
+    #[test]
+    fn a_joint_equal_to_the_previous_candidate_is_not_tried_twice() {
+        let db = db_with_bill();
+        assert!(
+            !db.indexed_term_exists("改了").unwrap(),
+            "前提：沒看過「改了」，上一步才會拿掉它"
+        );
+        assert_eq!(tries(&db, "誰改了客服專線"), vec!["客服專線".to_string()]);
+    }
+
     /// 桌面收到的就是這個形狀：`kind` 決定畫哪一句，`terms` 是實際拿去找的字。
     /// 多一種就要在 `app.js` 多一句，`check-pet-says-why.mjs` 會逐種對字。
     #[test]
