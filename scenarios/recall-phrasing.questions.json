@@ -385,6 +385,55 @@
           }
         ]
       }
+    },
+    {
+      "id": "phrasing-23",
+      "question": "部署失敗的時間",
+      "source": "hand_labeled",
+      "expected": {
+        "outcome": "answer",
+        "any_of": [
+          "部署失敗"
+        ],
+        "evidence": [
+          {
+            "event_index": 1
+          }
+        ]
+      }
+    },
+    {
+      "id": "phrasing-24",
+      "question": "部署失敗的原因",
+      "source": "hand_labeled",
+      "expected": {
+        "outcome": "answer",
+        "any_of": [
+          "部署失敗"
+        ],
+        "evidence": [
+          {
+            "event_index": 1
+          }
+        ]
+      }
+    },
+    {
+      "id": "phrasing-25",
+      "question": "我上次看到的客服專線",
+      "source": "hand_labeled",
+      "expected": {
+        "outcome": "answer",
+        "any_of": [
+          "0800-000-123",
+          "+886800000123"
+        ],
+        "evidence": [
+          {
+            "event_index": 0
+          }
+        ]
+      }
     }
   ]
 }
