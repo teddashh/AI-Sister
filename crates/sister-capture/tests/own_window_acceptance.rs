@@ -17,6 +17,7 @@ const MUST_NEVER_APPEAR: &[&str] = &[
     "A158-SENTINEL-LINUX",
     "A158-SENTINEL-MAC",
     "A158-SENTINEL-CLIP-SRC",
+    "A158-SENTINEL-CLIP-WEBVIEW",
     "own window",
 ];
 const MUST_APPEAR: &[&str] = &[
@@ -59,8 +60,11 @@ fn scenario() -> Scenario {
         "AI-Sister",
         &["A158-SENTINEL-MAC"],
     );
-    her_mac.clipboard = Some("A158-SENTINEL-CLIP-WIN".into());
-    her_mac.clipboard_source_app = Some("com.ted-h.ai-sister".into());
+    // 在她前景時複製、而剪貼簿擁有者不是她的程式檔（WebView2 的複製可能記在
+    // msedgewebview2.exe 名下）：來源閘門認不出她，只剩前景那一拍的水位擋得住。
+    // 它是下一個一般 tick 前最後一筆，水位沒推過去就會被讀進來。
+    her_mac.clipboard = Some("A158-SENTINEL-CLIP-WEBVIEW".into());
+    her_mac.clipboard_source_app = Some("msedgewebview2.exe".into());
     Scenario {
         name: "a158-own-window".into(),
         privacy_context: ReplayPrivacyContext::Clear,

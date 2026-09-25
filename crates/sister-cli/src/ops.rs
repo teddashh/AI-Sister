@@ -1037,13 +1037,19 @@ fn exclusion_lines(stats: &sister_capture::RecorderStats) -> Vec<String> {
             stats.own_window
         ));
     }
-    // 這句只在真的有排除規則擋掉畫面時出現。只跟她說話的那一場
-    // excluded 是 0，改 config 也改不到。
-    if stats.kept == 0 && stats.excluded > 0 && !stats.excluded_reasons.is_empty() {
+    // 這句只講排除規則。只跟她說話的那一場 excluded 是 0，不會出現；
+    // 兩種都有時，她那幾拍要從「全部」裡拿出來——上一行剛寫過她，
+    // 而改 config 改不到她。
+    if stats.kept == 0 && stats.excluded > 0 {
         lines.push(
-            "  ⚠  這一整段沒有留下任何畫面，全部被上面的規則擋掉了。\
-             如果那不是你要的，改 config 的 privacy 那一段。"
-                .to_string(),
+            if stats.own_window > 0 {
+                "  ⚠  這一整段沒有留下任何畫面：她自己的視窗那幾拍以外，全部被上面的規則擋掉了。\
+                 如果那不是你要的，改 config 的 privacy 那一段。"
+            } else {
+                "  ⚠  這一整段沒有留下任何畫面，全部被上面的規則擋掉了。\
+                 如果那不是你要的，改 config 的 privacy 那一段。"
+            }
+            .to_string(),
         );
     }
     lines
@@ -1211,8 +1217,39 @@ mod summary_tests {
             .insert("excluded app: keepassxc".into(), 3);
         let ruled_text = exclusion_lines(&ruled).join("\n");
         assert!(
-            ruled_text.contains("全部被上面的規則擋掉了"),
+            ruled_text.contains("這一整段沒有留下任何畫面，全部被上面的規則擋掉了。"),
             "真的被規則擋光時那句話要還在：{ruled_text}"
+        );
+        assert!(!ruled_text.contains("她自己的視窗"), "{ruled_text}");
+    }
+
+    /// 一場裡只有排除規則和她的視窗：「全部被規則擋掉」要把她那幾拍拿掉，
+    /// 否則叫人去改 config 找一件 config 改不到的事。
+    #[test]
+    fn a_session_split_between_rules_and_her_window_keeps_her_out_of_the_rules() {
+        let mut mixed = sister_capture::RecorderStats {
+            kept: 0,
+            excluded: 3,
+            own_window: 2,
+            ..Default::default()
+        };
+        mixed
+            .excluded_reasons
+            .insert("excluded app: keepassxc".into(), 3);
+        let text = exclusion_lines(&mixed).join("\n");
+        assert!(
+            text.contains("她自己的視窗在前景 2 拍，那幾拍沒有錄。"),
+            "{text}"
+        );
+        assert!(
+            text.contains(
+                "這一整段沒有留下任何畫面：她自己的視窗那幾拍以外，全部被上面的規則擋掉了。"
+            ),
+            "{text}"
+        );
+        assert!(
+            !text.contains("這一整段沒有留下任何畫面，全部被上面的規則擋掉了。"),
+            "她那幾拍被算成規則擋的：{text}"
         );
     }
 
