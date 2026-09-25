@@ -2512,7 +2512,10 @@ Recording 心跳走，產品生不出「前景是她、沒在錄」）。
 
 ### 29.1 alpha.160 的出貨收據
 
-（tag CI 跑完補。）
+tag `v0.1.0-alpha.160`（`4cd9591`）一次全綠：八個 job 都成功，release 於
+**2026-09-25T19:21:30Z** 發出，四個 asset、prerelease，body 前綴和本機
+`release-notes.sh` 產的一致。`32356a2` 加的 `--no-run` 那一步在 tag 那一趟 47 秒，
+之後 UIA 37 秒過；上一版的 tag 在同一步 3 分鐘逾時。
 
 ### 29.2 放寬切什麼、講什麼
 
