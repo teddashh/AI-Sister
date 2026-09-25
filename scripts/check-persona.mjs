@@ -2462,12 +2462,23 @@ console.log("⑦ᶜ 未知 Persona event 整份拒絕，不能替舊角色打開
 console.log("⑧ Persona 點擊台詞獨立；所有文字問題都走大腦與記憶路徑");
 {
   const askBody = SRC.match(/async function ask\([^)]*\) \{[\s\S]*?\n\}/u)?.[0] ?? "";
+  // a156 起 `ask()` 只做分流：同意書、告訴她、其餘一律交給 `runQuestion()`，
+  // 正式那一趟連同 native ask 一起搬了進去。這一條守的是「沒有旁路」，不是
+  // 「那一行住在哪一支」，所以跟著委派往下追一層；追丟了（本體抽不出來）就紅。
+  const runBody = SRC.match(/async function runQuestion\([^)]*\) \{[\s\S]*?\n\}/u)?.[0] ?? "";
   const gateBody = SRC.match(/function renderGatekeeper\(view\) \{[\s\S]*?\n\}/u)?.[0] ?? "";
+  check(
+    "⑧ 前提：ask 與 runQuestion 兩支本體都抽得出來",
+    askBody !== "" && runBody !== "",
+    { ask: askBody.length, run: runBody.length },
+  );
   check(
     "ask 沒有日常短句旁路，每個文字問題都 invoke native ask",
     !askBody.includes("dailyDialogueReply") &&
-      askBody.includes('const answer = await invoke("ask", { question })'),
-    askBody,
+      !runBody.includes("dailyDialogueReply") &&
+      askBody.includes("await runQuestion(question, false)") &&
+      runBody.includes('const answer = await invoke("ask", { question })'),
+    { askBody, runBody },
   );
   check("Gatekeeper 不會觸發 tap-line", !/sayPersonaLine|personaLine|personaAudio/u.test(gateBody), gateBody);
   check("後端有獨立 persona_read command", MAIN.includes("fn persona_read(") && MAIN.includes("persona_read,"));
@@ -2522,6 +2533,9 @@ console.log("⑧ Persona 點擊台詞獨立；所有文字問題都走大腦與�
     SRC.match(
       /^function stopPersonaMedia\(\{ cancelAzureNative = true, cancelLocalTtsNative = true \} = \{\}\) \{[\s\S]*?^\}$/mu,
     )?.[0] ?? "";
+  const askOrRunBody =
+    (SRC.match(/async function ask\([^)]*\) \{[\s\S]*?\n\}/u)?.[0] ?? "") +
+    (SRC.match(/async function runQuestion\([^)]*\) \{[\s\S]*?\n\}/u)?.[0] ?? "");
   check(
     "長答案按段依序播且整串有 revision cancel gate",
     SRC.includes("function chunkLocalSpeech(text, limit = 160)") &&
@@ -2538,7 +2552,10 @@ console.log("⑧ Persona 點擊台詞獨立；所有文字問題都走大腦與�
       mediaStop.includes("stopLocalTts(") &&
       mediaStop.includes("stopLocalSpeech()") &&
       localSpeech.includes("stopPersonaMedia()") &&
-      /async function ask\([^)]*\)[\s\S]*?stopPersonaMedia\(\)/u.test(SRC),
+      // 本來是一條跨函式的 regex：`[\s\S]*?` 會從 `async function ask(` 一路
+      // 吃到檔案後面第一個 `stopPersonaMedia()`，配到的不一定在這支裡面。a156
+      // 把這一行搬進 `runQuestion()` 之後它照樣是綠的，卻已經不在量這件事了。
+      askOrRunBody.includes("stopPersonaMedia()"),
     mediaStop,
   );
 }

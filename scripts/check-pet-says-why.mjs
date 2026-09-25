@@ -777,6 +777,143 @@ function check(name, ok, detail) {
   }
 }
 
+// A156：記住之後用原來那一題再問一次。「記住了。」留著。
+// 空的重跑不挑成因：ask 的回條沒有欄位分得出「講的對不上」和「時間窗擋在外面」。
+{
+  const NEUTRAL = "再用剛剛那一題問了一次，這次沒有列出東西。";
+  const TIME_CAUSE = "剛記住的那句不在你問的那段時間裡";
+  const OTHER_CAUSE = "你告訴我的答不了這一題";
+  const ABSENCE = ["我手上一件事都沒有", "我翻過的那幾段裡沒有這件事",
+                   "我記得的東西裡沒有這件事", "我記憶中都沒有"];
+  const toldHit = hit({
+    text: "客服電話 0800-111-222",
+    snippet: "客服電話 0800-111-222",
+    source_kind: "told",
+    frame_id: null,
+    app: null,
+    title: null,
+    url: null,
+  });
+  const fixture = { ask: () => answer(), settings_read: { remember_told: true }, remember_told: "remembered" };
+
+  const invited = await open({ ...fixture, ask: answer() });
+  await invited.type("客服電話");
+  const inviteText = invited.hitTexts().join("");
+  check("A156 前提：邀請那一格真的在", inviteText.includes("你可以告訴我嗎?"), inviteText);
+  check("A156 邀請那一格只講一次沒有",
+    ABSENCE.filter((phrase) => inviteText.includes(phrase)).length === 1,
+    ABSENCE.filter((phrase) => inviteText.includes(phrase)));
+
+  const original = "上禮拜的客服電話？";
+  const verbatim = await open({
+    ...fixture,
+    ask: ({ question }) => question === original
+      ? answer({ time_range: { from: 1, to: 2, said: "上禮拜" } })
+      : answer({ hits: [toldHit] }),
+  });
+  await verbatim.type(`  ${original}  `);
+  await verbatim.type("0800-111-222");
+  const asked = verbatim.invokes.filter((x) => x.cmd === "ask").map((x) => x.arg.question);
+  const said = verbatim.hitTexts().join("\n");
+  check("A156 重跑送進 ask 的是原字", asked.length === 2 && asked[0] === original && asked[1] === original, asked);
+  check("A156 記住了留在答案前面", verbatim.hitTexts()[0] === "記住了。", verbatim.hitTexts());
+  check("A156 空的重跑不宣稱成因",
+    said.includes(NEUTRAL) && !said.includes(TIME_CAUSE) && !said.includes(OTHER_CAUSE), said);
+  check("A156 空的重跑不再講那些沒有", ABSENCE.filter((phrase) => said.includes(phrase)).length === 0, said);
+  check("A156 空的重跑不再邀請", !said.includes("你可以告訴我嗎?") && verbatim.input().placeholder === "問我一件事…", said);
+  const undated = await open(fixture);
+  await undated.type("客服電話");
+  await undated.type("明天要交報告");
+  const undatedText = undated.hitTexts().join("\n");
+  check("A156 有沒有時間窗都講同一句",
+    said.includes(NEUTRAL) && undatedText.includes(NEUTRAL) && !undatedText.includes(TIME_CAUSE) && !undatedText.includes(OTHER_CAUSE),
+    { dated: said, undated: undatedText });
+
+  const foundAgain = await open({
+    ...fixture,
+    ask: (() => {
+      let n = 0;
+      return () => {
+        n += 1;
+        return n === 1 ? answer() : answer({ hits: [toldHit] });
+      };
+    })(),
+  });
+  await foundAgain.type("客服電話");
+  await foundAgain.type("客服電話 0800-111-222");
+  const foundText = foundAgain.hitTexts().join("\n");
+  check("A156 重跑找到時記住了還在", foundAgain.hitTexts()[0] === "記住了。" && foundText.includes("0800-111-222") && foundText.includes("你告訴她的話"), foundAgain.hitTexts());
+  check("A156 找到時不講空的那句", !foundText.includes(NEUTRAL), foundText);
+
+  for (const [name, outcome, needle] of [
+    ["disabled", "disabled", "記住你說的話已關閉，這句話沒有記住。"],
+    ["失敗", new Error("database is locked"), "這句話沒有記住：database is locked"],
+  ]) {
+    const q = await open({ ...fixture, remember_told: outcome });
+    await q.type("客服電話");
+    await q.type("0800-111-222");
+    const asks = q.invokes.filter((x) => x.cmd === "ask");
+    const text = q.hitTexts().join("");
+    check(`A156 ${name}不重跑`, asks.length === 1 && text.includes(needle) && !text.includes(NEUTRAL) && !text.includes("記住了。"), text);
+  }
+
+  let releaseReplay = null;
+  let racedAsks = 0;
+  const raced = await open({
+    ...fixture,
+    ask: ({ question }) => {
+      if (question === "新的一題") return answer({ hits: [hit({ text: "NEW_WINS", snippet: "NEW_WINS" })] });
+      racedAsks += 1;
+      if (racedAsks === 1) return answer();
+      return new Promise((resolve) => {
+        releaseReplay = () => resolve(answer({ hits: [hit({ text: "OLD_REPLAY", snippet: "OLD_REPLAY" })] }));
+      });
+    },
+  });
+  await raced.type("客服電話");
+  await raced.type("0800");
+  check("A156 前提：重跑還在路上", releaseReplay !== null && raced.invokes.filter((x) => x.cmd === "ask").length === 2, raced.invokes.filter((x) => x.cmd === "ask"));
+  await raced.type("新的一題");
+  check("A156 前提：新題先畫出來", raced.hitTexts().join("").includes("NEW_WINS"), raced.hitTexts());
+  const finishReplay = releaseReplay;
+  finishReplay();
+  await tick();
+  const racedText = raced.hitTexts().join("");
+  check("A156 新題不被舊的重跑蓋掉", racedText.includes("NEW_WINS") && !racedText.includes("OLD_REPLAY"), raced.hitTexts());
+
+  const azureReady = {
+    generation: 7,
+    config_readable: true,
+    enabled: true,
+    region: "eastasia",
+    voice: "zh-TW-HsiaoChenNeural",
+    endpoint: "https://eastasia.tts.speech.microsoft.com/cognitiveservices/v1",
+    credential: "present",
+    consented: true,
+    consent_at: 1_757_299_200_000,
+    ready: true,
+    config_error: null,
+  };
+  let azureAsks = 0;
+  const spoken = await open({
+    ...fixture,
+    azure_tts_read: azureReady,
+    azure_tts_speak: () => ({ data_url: "data:audio/mpeg;base64,AA==", generation: 7 }),
+    ask: () => {
+      azureAsks += 1;
+      return azureAsks === 1 ? answer() : answer({ hits: [toldHit] });
+    },
+  });
+  await spoken.type("客服電話");
+  const spokeBefore = spoken.invokes.filter((x) => x.cmd === "azure_tts_speak").length;
+  check("A156 前提：邀請那題會自動念", spokeBefore === 1, spoken.invokes.filter((x) => x.cmd === "azure_tts_speak"));
+  await spoken.type("0800-111-222");
+  check("A156 重跑出來的答案不自動念",
+    spoken.invokes.filter((x) => x.cmd === "azure_tts_speak").length === spokeBefore && spoken.hitTexts().join("").includes("0800-111-222"),
+    spoken.invokes.filter((x) => x.cmd === "azure_tts_speak"));
+}
+if (process.env.A156_ONLY === "1") process.exit(failed > 0 ? 1 : 0);
+
 // A155：核心檢索的比對字一路進 native 回條，再由真 renderer 畫出來。
 {
   const native = read(MAIN).split("fn answer_from_memory(")[1]?.split("fn ")[0] ?? "";

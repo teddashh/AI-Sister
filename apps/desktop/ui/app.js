@@ -2193,31 +2193,39 @@ let consentGuideView = null;
 let consentGuideSheet = null;
 let consentGuideBusy = false;
 let pendingConsentQuestion = null;
+// 同意書把「記住之後的重跑」攔下來時，答完仍走重跑，不改成一般新題。
+let pendingConsentReplay = false;
 // 回答與下一題無法從文字判別；只收一次，成功或失敗都退出，下一次送出就是新題。
 // 這是在答完後才詢問，沒有被打斷的問題需要排隊。
 let awaitingTold = false;
 let toldBusy = false;
+// 進入邀請時留下的那一題：送進 `ask` 的原字，不是檢索剝過的詞。
+let toldQuestion = null;
 
 async function handleToldReply() {
   if (toldBusy || !awaitingTold || invoke === null) return;
   const text = askInput.value;
   if (text.trim() === "") return;
+  const question = toldQuestion;
   toldBusy = true;
   askInput.disabled = true;
   askSend.disabled = true;
   stopPersonaMedia();
   const result = document.createElement("li");
   result.className = "told-result";
+  let outcome = null;
   try {
-    const outcome = await invoke("remember_told", { text });
+    outcome = await invoke("remember_told", { text });
     if (outcome === "remembered") result.textContent = "記住了。";
     else if (outcome === "disabled") result.textContent = "記住你說的話已關閉，這句話沒有記住。";
     else throw new Error("沒有收到保存結果");
   } catch (error) {
+    outcome = null;
     result.textContent = `這句話沒有記住：${String(error?.message ?? error)}`;
   } finally {
     awaitingTold = false;
     toldBusy = false;
+    toldQuestion = null;
     askInput.value = "";
     setConsentGuideInput(true);
   }
@@ -2227,6 +2235,13 @@ async function handleToldReply() {
   showAnswerHits();
   paintConversation();
   askInput.focus?.();
+  // 沒存進去就不要重跑。重跑用的是邀請當下留下的那句，不是這次打進來的回答。
+  if (outcome === "remembered") await replayToldQuestion(question);
+}
+
+async function replayToldQuestion(question) {
+  if (typeof question !== "string" || question === "") return;
+  await runQuestion(question, true);
 }
 
 function usableConsentView(raw) {
@@ -2428,11 +2443,14 @@ function showConsentCompletion(view) {
 
 async function finishConsentGuide(view) {
   const queued = pendingConsentQuestion;
+  const replay = pendingConsentReplay;
   pendingConsentQuestion = null;
+  pendingConsentReplay = false;
   hideConsentGuide();
   if (queued !== null) {
     askInput.value = queued;
-    await ask();
+    if (replay) await replayToldQuestion(queued);
+    else await ask();
     return;
   }
   showConsentCompletion(view);
@@ -6122,6 +6140,7 @@ function renderHits(
   readings = [],
   earlyPass = false,
   canRememberTold = false,
+  afterTold = false,
 ) {
   awaitingTold = false;
   setConsentGuideInput(true);
@@ -6134,6 +6153,12 @@ function renderHits(
   localAnswerButton = null;
   hitList.replaceChildren();
   showingProvisional = false;
+  if (afterTold) {
+    const ack = document.createElement("li");
+    ack.className = "told-result";
+    ack.textContent = "記住了。";
+    hitList.append(ack);
+  }
 
   const hasOverview = overview !== null && overview !== undefined;
   const hasChapters = Array.isArray(chapters) && chapters.length > 0;
@@ -6362,9 +6387,16 @@ function renderHits(
     // blindLines 保留在終局，先開口即使收到 blind 也只說這一句。
     if (provisional) {
       appendProvisionalLine(hitList);
+    } else if (afterTold && hasGroundedAnswer) {
+      // 成句已經列在上面。不再補一句「沒有列出」。
     } else {
       const empty = document.createElement("li");
       empty.className = "hits-empty";
+      if (afterTold) {
+        // 這份 Answer 分不出「講的對不上」和「時間窗把剛寫入的那筆擋在外面」。
+        // 兩種都只看到空的，所以不挑成因，也不把邀請那三句「沒有」再講一次。
+        empty.textContent = "再用剛剛那一題問了一次，這次沒有列出東西。";
+      } else {
       empty.dataset.azureAnswerBody = "";
       // 「我沒看過這件事」和「我什麼都還沒看過」是兩件不同的事。
       //
@@ -6419,6 +6451,7 @@ function renderHits(
         empty.textContent += "你可以告訴我嗎?";
         awaitingTold = true;
         setConsentGuideInput(true);
+      }
       }
       hitList.append(empty);
 
@@ -6616,6 +6649,12 @@ async function ask(event = null) {
     return;
   }
 
+  await runQuestion(question, false);
+}
+
+async function runQuestion(question, afterTold) {
+  if (!afterTold) toldQuestion = null;
+
   // 上一題若還在等開場 status，現在也不再是「最新那題」。
   pendingAzureAutoAsk = null;
   stopPersonaMedia();
@@ -6666,35 +6705,39 @@ async function ask(event = null) {
     // 不停計時、不記簿子、不朗讀、不出聲。那些全歸底下那一趟。先開口沒開成就
     // 是回到今天的樣子——等 `ask`——不是「這一題沒答成」，所以這裡不碰 `gaveUp`
     // 也不寫 `notice`。
-    try {
-      const early = await invoke("ask_local", { question });
-      if (early === null || early === undefined) {
-        throw new Error("先開口那一段沒有回東西");
+    // 重跑不走先開口。那一趟空手會畫上「還在想」的承諾，而 showingProvisional
+    // 的規矩是答案區只剩那句；「記住了。」不能跟它並存。正式的 ask 才是這一題。
+    if (!afterTold) {
+      try {
+        const early = await invoke("ask_local", { question });
+        if (early === null || early === undefined) {
+          throw new Error("先開口那一段沒有回東西");
+        }
+        if (mine !== asking) {
+          gaveUp = "superseded";
+          releaseNativePresentation(early);
+          return;
+        }
+        // 同意書那一關要先過。今天的規矩是「還沒答過就先問條文，不畫答案」，
+        // 先畫一份出來再叫他看條文會把那條規矩倒過來。
+        if (early.brain?.state !== "consent_required") {
+          spokeEarly = await commitNativePresentation(early, () => {
+            renderHits(
+              early.hits, early.kind, early.query_id, early.answers, early.blind,
+              early.truncated, early.answers_truncated, early.searched,
+              early.time_range, early.chapters, early.followup,
+              early.closure_notice, early.overview, early.synthesis, early.brain,
+              early.readings ?? [],
+              true, // 先開口尚未記帳，與 brain 是否還在想無關。
+            );
+          });
+          if (spokeEarly) spokeAtMs = Date.now() - askedAt;
+        } else {
+          releaseNativePresentation(early);
+        }
+      } catch {
+        // 先開口失敗不是這一題失敗。底下那一趟才是正式的，錯誤由它報。
       }
-      if (mine !== asking) {
-        gaveUp = "superseded";
-        releaseNativePresentation(early);
-        return;
-      }
-      // 同意書那一關要先過。今天的規矩是「還沒答過就先問條文，不畫答案」，
-      // 先畫一份出來再叫他看條文會把那條規矩倒過來。
-      if (early.brain?.state !== "consent_required") {
-        spokeEarly = await commitNativePresentation(early, () => {
-          renderHits(
-            early.hits, early.kind, early.query_id, early.answers, early.blind,
-            early.truncated, early.answers_truncated, early.searched,
-            early.time_range, early.chapters, early.followup,
-            early.closure_notice, early.overview, early.synthesis, early.brain,
-            early.readings ?? [],
-            true, // 先開口尚未記帳，與 brain 是否還在想無關。
-          );
-        });
-        if (spokeEarly) spokeAtMs = Date.now() - askedAt;
-      } else {
-        releaseNativePresentation(early);
-      }
-    } catch {
-      // 先開口失敗不是這一題失敗。底下那一趟才是正式的，錯誤由它報。
     }
     const answer = await invoke("ask", { question });
     // 這一份過期了。畫面歸還在跑的那一次管，這裡連 idle 都不要設。
@@ -6718,6 +6761,7 @@ async function ask(event = null) {
         gaveUp = "consent_asked";
         releaseNativePresentation(answer);
         pendingConsentQuestion = question;
+        pendingConsentReplay = afterTold;
         askInput.value = "";
         consentGuideBusy = false;
         showConsentGuide(view);
@@ -6756,7 +6800,10 @@ async function ask(event = null) {
         answer.readings ?? [],
         false,
         canRememberTold,
+        afterTold,
       );
+      // 邀請狀態要的是這一題的原字。寫在呼叫端：renderHits 只負責畫。
+      if (awaitingTold && !afterTold && question !== "") toldQuestion = question;
       // 畫完了才量得到。這一段不改任何東西——`noteTheBubble` 量完會把
       // `scrollTop` 放回去，他看到的第一眼仍是最上面那一句。
       noteTheAnswer(question, answer, Date.now() - askedAt, spokeAtMs);
@@ -6764,10 +6811,12 @@ async function ask(event = null) {
       gaveUp = null;
       setState("idle");
       // 答完才清掉。失敗的時候留著，他才不用把整句話重打一次。
-      askInput.value = "";
+      // 重跑時輸入框已是下一句的草稿；只有裡頭還放著這一題才清。
+      if (!afterTold || askInput.value.trim() === question) askInput.value = "";
       // 這是唯一條自動 Azure 入口：native 已經 ready、而且這份仍是最新
       // ask 的答案，才會把正文送一次。開機 demo、status event 與舊答案重畫不走這裡。
-      autoSpeakLatestAzureAnswer(mine);
+      // 記住之後的重跑不念。那是另一件事，這一版不接。
+      if (!afterTold) autoSpeakLatestAzureAnswer(mine);
       // 語音是情境用的，回答歸回答：她出的是「找到了」，答案本文照舊用讀的。
       playAnswerBeat();
     });
@@ -6816,7 +6865,14 @@ async function ask(event = null) {
       : "這一題我沒答成。";
     // 收起的是等待中的承諾，不是取消問題；更新結果但尊重收起，不自行彈回。
     const keepProvisionalHidden = showingProvisional && hitList.hidden;
-    hitList.replaceChildren(failed);
+    if (afterTold) {
+      const ack = document.createElement("li");
+      ack.className = "told-result";
+      ack.textContent = "記住了。";
+      hitList.replaceChildren(ack, failed);
+    } else {
+      hitList.replaceChildren(failed);
+    }
     showingProvisional = false;
     showingAnswer = false;
     // **那個 `<ul>` 開場是 hidden 的**（`index.html` 上寫死，`styles.css` 還

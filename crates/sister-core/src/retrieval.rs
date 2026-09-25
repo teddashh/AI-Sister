@@ -723,6 +723,156 @@ mod tests {
         }
     }
 
+    /// `remember_told` 把那句話的時間記成呼叫端給的 `now`。
+    /// 關鍵字題的時間窗會套在這筆上，沒有另開一條 told 規則。
+    /// 窗裡有現在（今天、這禮拜）就找得到；窗在現在之前（昨天、上禮拜）就找不到。
+    /// 沒有時間詞的同一句不受窗限制。關掉再開同一顆檔案，那筆還在。
+    #[test]
+    fn told_now_is_inside_today_and_outside_last_week() {
+        use crate::model::SourceKind;
+        use chrono::{Local, TimeZone};
+
+        let now = Local
+            .with_ymd_and_hms(2026, 9, 23, 15, 0, 0)
+            .single()
+            .expect("local")
+            .timestamp_millis();
+        let text = "客服電話 0800-111-222";
+        let privacy = crate::config::PrivacyConfig::default();
+        assert!(privacy.remember_told);
+
+        let last = question::time_range("上禮拜的客服電話", now).expect("上禮拜");
+        let yesterday = question::time_range("昨天的客服電話", now).expect("昨天");
+        let today = question::time_range("今天的客服電話", now).expect("今天");
+        let this_week = question::time_range("這禮拜的客服電話", now).expect("這禮拜");
+        assert!(
+            now < last.from || now >= last.to,
+            "now={now} 必須在上禮拜 [{}, {}) 外面",
+            last.from,
+            last.to
+        );
+        assert!(
+            now < yesterday.from || now >= yesterday.to,
+            "now={now} 必須在昨天 [{}, {}) 外面",
+            yesterday.from,
+            yesterday.to
+        );
+        assert!(now >= today.from && now < today.to, "今天必須含現在");
+        assert!(
+            now >= this_week.from && now < this_week.to,
+            "這禮拜必須含現在"
+        );
+        assert_eq!(question::terms("上禮拜的客服電話"), "客服電話");
+        assert_eq!(question::shape("上禮拜的客服電話"), Shape::Keywords);
+
+        let dir =
+            std::env::temp_dir().join(format!("sister-a156-told-{}-{}", std::process::id(), now));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp");
+        let path = dir.join("sister.db");
+        struct Cleanup(std::path::PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let _cleanup = Cleanup(dir);
+
+        {
+            let mut db = Db::open(&path).expect("open");
+            let id = db
+                .remember_told(&privacy, now, text)
+                .expect("remember")
+                .expect("id");
+            assert!(id > 0);
+        }
+        let mut db = Db::open(&path).expect("reopen");
+        let kept = db.search("客服電話", 5).expect("search after reopen");
+        assert_eq!(kept.len(), 1, "重開之後同一題要找得到");
+        assert_eq!(kept[0].text, text);
+        assert_eq!(kept[0].ts, now);
+        assert_eq!(kept[0].source_kind, SourceKind::Told);
+
+        let undated = RetrievalProfile::TextAndFacts
+            .retrieve_at(&mut db, "客服電話", RetrievalLimits::same(5), now)
+            .expect("undated");
+        assert!(undated.time_range.is_none());
+        assert_eq!(undated.hits.len(), 1);
+
+        let today_hit = RetrievalProfile::TextAndFacts
+            .retrieve_at(&mut db, "今天的客服電話", RetrievalLimits::same(5), now)
+            .expect("today");
+        assert_eq!(today_hit.hits.len(), 1, "今天含現在，不該被時間窗擋掉");
+        assert_eq!(today_hit.hits[0].source_kind, SourceKind::Told);
+
+        let week_hit = RetrievalProfile::TextAndFacts
+            .retrieve_at(&mut db, "這禮拜的客服電話", RetrievalLimits::same(5), now)
+            .expect("this week");
+        assert_eq!(week_hit.hits.len(), 1, "這禮拜含現在，不該被時間窗擋掉");
+
+        let last_hit = RetrievalProfile::TextAndFacts
+            .retrieve_at(&mut db, "上禮拜的客服電話", RetrievalLimits::same(5), now)
+            .expect("last week");
+        assert!(last_hit.time_range.is_some());
+        assert!(
+            last_hit.hits.is_empty() && last_hit.answers.is_empty(),
+            "上禮拜不含現在，剛記住的那筆被時間窗擋掉"
+        );
+
+        let yesterday_hit = RetrievalProfile::TextAndFacts
+            .retrieve_at(&mut db, "昨天的客服電話", RetrievalLimits::same(5), now)
+            .expect("yesterday");
+        assert!(
+            yesterday_hit.hits.is_empty() && yesterday_hit.answers.is_empty(),
+            "昨天不含現在"
+        );
+
+        let recent = RetrievalProfile::TextAndFacts
+            .retrieve_at(&mut db, "剛剛發生什麼事", RetrievalLimits::same(5), now)
+            .expect("recent");
+        assert_eq!(recent.shape, Shape::Recent);
+        assert!(recent.time_range.is_none());
+        assert!(
+            recent.hits.iter().any(|hit| hit.text == text),
+            "剛剛沒有日曆窗，最新那筆就是剛記住的"
+        );
+
+        let last_range = RetrievalProfile::TextAndFacts
+            .retrieve_at(&mut db, "上禮拜", RetrievalLimits::same(5), now)
+            .expect("range");
+        assert_eq!(last_range.shape, Shape::Range);
+        assert!(last_range.hits.iter().all(|hit| hit.text != text));
+
+        let this_range = RetrievalProfile::TextAndFacts
+            .retrieve_at(&mut db, "這禮拜", RetrievalLimits::same(5), now)
+            .expect("this week range");
+        assert_eq!(this_range.shape, Shape::Range);
+        assert!(
+            this_range.hits.iter().any(|hit| hit.text == text),
+            "這禮拜的日曆窗含現在，chunks_in_range 會列出剛記住的那筆"
+        );
+
+        eprintln!(
+            "a156 told_now now={now} last_week=[{}, {}) yesterday=[{}, {}) today=[{}, {}) this_week=[{}, {}) reopen_hits={} today_hits={} this_week_hits={} last_week_hits={} yesterday_hits={} recent_has_told={} last_range_hits={} this_range_has_told={}",
+            last.from,
+            last.to,
+            yesterday.from,
+            yesterday.to,
+            today.from,
+            today.to,
+            this_week.from,
+            this_week.to,
+            kept.len(),
+            today_hit.hits.len(),
+            week_hit.hits.len(),
+            last_hit.hits.len(),
+            yesterday_hit.hits.len(),
+            recent.hits.iter().any(|hit| hit.text == text),
+            last_range.hits.len(),
+            this_range.hits.iter().any(|hit| hit.text == text),
+        );
+    }
+
     #[test]
     fn session_profile_returns_activities_the_text_profile_does_not() {
         use crate::model::{FocusEvent, FocusKind, FocusSnapshot};
