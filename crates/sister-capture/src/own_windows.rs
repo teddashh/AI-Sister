@@ -264,3 +264,24 @@ pub fn blank(
     }
     Some(blanked)
 }
+
+/// 抓一張不含她的畫面。抓之前、抓之後各問一次她在哪裡（`her_parts`），兩次
+/// 問到的都塗掉：抓圖要幾十毫秒，她的視窗可能在這中間出現、消失或被拖走，
+/// 只問一次就蓋不到另一頭。任何一次問不出來、或畫面大小對不上，整張不要。
+///
+/// 平台層只交出「問她在哪」和「抓」兩件事；先後順序和塗法都在這裡。
+pub fn grab_without_her(
+    mut her_parts: impl FnMut() -> anyhow::Result<Vec<DesktopRect>>,
+    grab: impl FnOnce() -> anyhow::Result<Vec<u8>>,
+    frame_w: u32,
+    frame_h: u32,
+    captured: DesktopRect,
+) -> anyhow::Result<Vec<u8>> {
+    let before = her_parts()?;
+    let mut rgba = grab()?;
+    let after = her_parts()?;
+    let parts: Vec<DesktopRect> = before.into_iter().chain(after).collect();
+    blank(&mut rgba, frame_w, frame_h, captured, &parts)
+        .ok_or_else(|| anyhow::anyhow!("擷取的畫面大小對不上，這一拍沒有抓畫面"))?;
+    Ok(rgba)
+}

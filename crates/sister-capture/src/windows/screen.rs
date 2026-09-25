@@ -64,7 +64,7 @@
 //! 只要 1.5 ms——GDI 慢了將近兩個數量級，那不是搬運，是有人在逐像素做事。
 //! 誰在做，就是那張表要回答的唯一問題。
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Result, bail};
 use sister_core::model::Millis;
 use windows::Win32::Foundation::{HWND, RECT};
 use windows::Win32::Graphics::Gdi::{
@@ -77,7 +77,7 @@ use windows::Win32::Graphics::Gdi::{
 use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
 
 use super::own_windows::{desktop_rect, window_facts};
-use crate::own_windows::{DesktopRect, blank, own_parts};
+use crate::own_windows::{DesktopRect, grab_without_her, own_parts};
 use crate::scale::{OCR_LONG_EDGE, fit};
 use crate::traits::{RawFrame, ScreenSource};
 
@@ -135,16 +135,15 @@ impl WindowsScreen {
 
         let (dst_w, dst_h) = fit(src_w as u32, src_h as u32, long_edge);
         let monitor = self.monitor_index(mon);
-
-        // 她自己看得見的那幾塊（`crate::own_windows`），抓圖前後各讀一次。
-        // BitBlt 要四十毫秒上下，她的視窗可能在這中間出現、消失或被拖走；
-        // 兩次讀到的範圍都塗，兩頭都蓋得到。塗完才算 dhash、跑 OCR、存圖。
-        let before = her_parts()?;
-        let mut rgba = unsafe { blit(rect, src_w, src_h, dst_w, dst_h)? };
-        let after = her_parts()?;
-        let parts: Vec<DesktopRect> = before.into_iter().chain(after).collect();
-        blank(&mut rgba, dst_w, dst_h, desktop_rect(rect), &parts)
-            .ok_or_else(|| anyhow!("擷取的畫面大小對不上，這一拍沒有抓畫面"))?;
+        // 她自己看得見的那幾塊，BitBlt 前後各問一次、都塗掉
+        // （`crate::own_windows::grab_without_her`）。塗完才算 dhash、跑 OCR、存圖。
+        let rgba = grab_without_her(
+            her_parts,
+            || unsafe { blit(rect, src_w, src_h, dst_w, dst_h) },
+            dst_w,
+            dst_h,
+            desktop_rect(rect),
+        )?;
 
         Ok(Some(RawFrame::from_rgba(ts, monitor, dst_w, dst_h, rgba)))
     }

@@ -1,6 +1,6 @@
 //! 她看得見、但不在前景的視窗：存下來的畫面上，她那一塊要塗掉。
 //!
-//! 這一份是派工前先寫好的驗收，只碰 `sister_capture::own_windows` 的公開函式。
+//! 這一份是平台層動工前先寫好的驗收，只碰 `sister_capture::own_windows` 的公開函式。
 //! 平台層（Windows 的 EnumWindows 那一半）只負責把讀到的原始事實交進來，判斷
 //! 全在這裡，所以 Linux 的 `cargo test` 就驗得到。真的 Windows 桌面那一半在
 //! `tests/windows_own_windows.rs`。
@@ -9,9 +9,11 @@
 //! 她把自己的答案錄進自己的記憶。所以讀不準的地方一律往「塗」那邊倒——唯一
 //! 的例外是「別人的視窗能不能擋住她」：擋得住才不塗，所以讀不準就當擋不住。
 
+use std::cell::RefCell;
+
 use sister_capture::own_windows::{
-    DesktopRect, LayeredAttributes, OwnWindowUnlocated, WindowFacts, blank, is_her_program,
-    layered_is_see_through, own_parts,
+    DesktopRect, LayeredAttributes, OwnWindowUnlocated, WindowFacts, blank, grab_without_her,
+    is_her_program, layered_is_see_through, own_parts,
 };
 use sister_core::config::OWN_APP_KEYS;
 
@@ -804,4 +806,105 @@ fn the_pinned_pet_over_notepad_on_a_1080p_monitor() {
     assert_eq!(n, Some(340 * 540));
     let want = raster(&[r(1500, 500, 1840, 1040)], w as i32, h as i32);
     expect_blanked(&before, &px, &want);
+}
+
+// ─── 抓圖前後各問一次 ──────────────────────────────────────────────────
+
+/// `w×h` 一整片洋紅色。
+fn magenta(w: u32, h: u32) -> Vec<u8> {
+    [255, 0, 255, 255].repeat((w * h) as usize)
+}
+
+/// 哪幾格被塗成黑的，由上往下、由左往右。
+fn black(rgba: &[u8]) -> Vec<bool> {
+    rgba.as_chunks::<4>()
+        .0
+        .iter()
+        .map(|px| *px == [0, 0, 0, 255])
+        .collect()
+}
+
+#[test]
+fn her_place_is_asked_before_and_after_the_grab_and_both_answers_are_blanked() {
+    // 抓之前她在左上角，抓的那幾十毫秒裡被拖到右下角。
+    let asked = RefCell::new(vec![vec![r(0, 0, 2, 2)], vec![r(5, 5, 8, 8)]].into_iter());
+    let order = RefCell::new(Vec::new());
+    let rgba = grab_without_her(
+        || {
+            order.borrow_mut().push("問她在哪");
+            Ok(asked.borrow_mut().next().expect("只問兩次"))
+        },
+        || {
+            order.borrow_mut().push("抓");
+            Ok(magenta(8, 8))
+        },
+        8,
+        8,
+        r(0, 0, 8, 8),
+    )
+    .expect("兩次都問得到");
+    assert_eq!(*order.borrow(), ["問她在哪", "抓", "問她在哪"]);
+    assert_eq!(
+        black(&rgba),
+        raster(&[r(0, 0, 2, 2), r(5, 5, 8, 8)], 8, 8),
+        "兩次問到的地方都要黑，其餘不動"
+    );
+}
+
+#[test]
+fn without_her_the_grab_comes_back_untouched() {
+    let rgba = grab_without_her(|| Ok(Vec::new()), || Ok(magenta(4, 4)), 4, 4, r(0, 0, 4, 4))
+        .expect("抓得到");
+    assert_eq!(rgba, magenta(4, 4));
+}
+
+#[test]
+fn if_her_place_cannot_be_read_before_the_grab_there_is_no_frame() {
+    let error = grab_without_her(
+        || Err(OwnWindowUnlocated.into()),
+        || Ok(magenta(4, 4)),
+        4,
+        4,
+        r(0, 0, 4, 4),
+    )
+    .expect_err("問不出她在哪，這一拍不能有畫面");
+    // 這一句就是設定頁「最後一次是：」後面那一句。
+    assert_eq!(format!("{error:#}"), OwnWindowUnlocated.to_string());
+}
+
+#[test]
+fn if_her_place_cannot_be_read_after_the_grab_the_frame_is_dropped() {
+    let mut asked = 0;
+    let error = grab_without_her(
+        || {
+            asked += 1;
+            if asked == 1 {
+                Ok(Vec::new())
+            } else {
+                Err(OwnWindowUnlocated.into())
+            }
+        },
+        || Ok(magenta(4, 4)),
+        4,
+        4,
+        r(0, 0, 4, 4),
+    )
+    .expect_err("抓完才問不出她在哪，抓到的那一張也不能留");
+    assert_eq!(format!("{error:#}"), OwnWindowUnlocated.to_string());
+}
+
+#[test]
+fn a_grab_of_the_wrong_size_is_not_a_frame() {
+    let error = grab_without_her(
+        || Ok(vec![r(0, 0, 1, 1)]),
+        || Ok(magenta(3, 3)),
+        4,
+        4,
+        r(0, 0, 4, 4),
+    )
+    .expect_err("畫面大小對不上就塗不準，整張不要");
+    assert_eq!(
+        format!("{error:#}"),
+        "擷取的畫面大小對不上，這一拍沒有抓畫面"
+    );
 }
