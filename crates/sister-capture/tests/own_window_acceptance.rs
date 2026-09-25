@@ -18,6 +18,7 @@ const MUST_NEVER_APPEAR: &[&str] = &[
     "A158-SENTINEL-MAC",
     "A158-SENTINEL-CLIP-SRC",
     "A158-SENTINEL-CLIP-WEBVIEW",
+    "A158-SENTINEL-CLIP-TAIL",
     "own window",
 ];
 const MUST_APPEAR: &[&str] = &[
@@ -65,6 +66,11 @@ fn scenario() -> Scenario {
     // 它是下一個一般 tick 前最後一筆，水位沒推過去就會被讀進來。
     her_mac.clipboard = Some("A158-SENTINEL-CLIP-WEBVIEW".into());
     her_mac.clipboard_source_app = Some("msedgewebview2.exe".into());
+    // 最後一個她的 tick（13 s）之後、下一個一般 tick（14 s）之前才複製：
+    // 那一拍的水位已經過去了，只剩離開她時的空洞旗標擋得住這條尾巴。
+    let mut her_tail = at(13_500, "com.ted-h.ai-sister", "AI-Sister", &[]);
+    her_tail.clipboard = Some("A158-SENTINEL-CLIP-TAIL".into());
+    her_tail.clipboard_source_app = Some("msedgewebview2.exe".into());
     Scenario {
         name: "a158-own-window".into(),
         privacy_context: ReplayPrivacyContext::Clear,
@@ -89,6 +95,7 @@ fn scenario() -> Scenario {
                 &["A158-SENTINEL-LINUX"],
             ),
             her_mac,
+            her_tail,
             at(
                 14_000,
                 "code.exe",
