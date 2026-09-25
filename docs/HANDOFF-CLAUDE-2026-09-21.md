@@ -2096,6 +2096,8 @@ HUD」。**程式裡一次都沒有呼叫它**：整個 repo 沒有 `SetWindowDi
 修法是現成的（上面那個 API），但代價要 Ted 決定：她會從**所有**截圖、錄影和
 螢幕分享裡消失——包括他回報問題時截的那張圖。
 
+alpha.158 用另一條路修了（在她自己的擷取裡塗掉，見 26.3）；這個 API 仍待 Ted（26.7）。
+
 ### 25.10 登記在案、這一版不修的
 
 - alpha.155 版本說明寫「事實、原文、章節三邊**全部空手**才放寬」。產品路徑上章節是
@@ -2120,3 +2122,189 @@ HUD」。**程式裡一次都沒有呼叫它**：整個 repo 沒有 `SetWindowDi
 - 會起子行程的測試在整支一起跑、機器又慢的時候會紅（25.6）；已知 flake 名單多兩條
   `reviewer::tests::real_review_pass_refuses_a_fact_swapped_after_prompt_was_built`、
   `wakeup::tests::the_recorder_can_still_write_while_the_slow_path_thinks`，成因沒證實。
+
+## 26. alpha.158：她不把自己的視窗錄進記憶（2026-09-25）
+
+25.9 那一格修了，分兩半：她的視窗在前景時整拍不錄（26.2）；看得見、但前景是別的
+程式時，Windows 上她那一塊塗黑（26.3）。`WDA_EXCLUDEFROMCAPTURE` 那條路沒有走，
+仍待 Ted 決定（26.7）。
+
+### 26.1 alpha.157 的出貨收據
+
+tag `v0.1.0-alpha.157`（`6d76acf`）一次就過：八個 job 全綠，release 於
+**2026-09-25T14:16:29Z** 發出，四個 asset、prerelease，body 前綴和本機
+`release-notes.sh` 產的一致。
+
+打 tag 前在 detached worktree 跑 `/home/ted-h/tmp-tests/gates-all.sh`，第一次有四條紅在
+「找不到 `./target/debug/sister`」。那支工具說它接受 `CARGO_TARGET_DIR`，只有 cargo
+那半是真的：`check-erased-db.sh`、`check-readme-quickstart.sh`、
+`check-recall-baseline.py`、`check-moment-baseline.py` 寫死 repo 裡的 `target`。
+工具改成把 binary 路徑一起傳過去（`check-erased-db.sh` 用暫時的 symlink，路徑上
+已經有東西就拒絕），重跑 53/53。
+
+### 26.2 前景那一格（R1）
+
+grok 4.7（`90633e2`）。
+
+- `PrivacyConfig::check` 在敏感欄之前先認她：`OWN_APP_KEYS` 是三個平台的
+  `app_key()`（`sister-desktop.exe`、`sister-desktop`、`com.ted-h.ai-sister`），轉小寫後
+  整串相等。回 `Exclusion::OwnWindow`，`is_blocked()` 為真。設定檔裡沒有開關，
+  `excluded_apps` 清空也擋。
+- recorder 把排除分支抽成 `hold_blocked_tick`，兩條路共用：清 dedup／OCR baseline、
+  推剪貼簿水位、開空洞旗標、輸入節奏照記。差在後面：她的 tick 不寫 excluded 稽核、
+  不算 `excluded`，`last_exclusion` 照放行那樣清掉（所以夾在她前後的兩段 KeePassXC
+  仍是兩列稽核）。
+- 剪貼簿來源是她的程式檔，算進新的 `clipboard_source_own_window`，不算排除。
+- `sister record` 收尾多兩行：「她自己的視窗在前景 N 拍，那幾拍沒有錄。」
+  「剪貼簿丟棄 N 筆：從她自己的視窗複製的。」
+
+### 26.3 看得見、不在前景那一格（R2）
+
+**R1 收貨時我才看到，它擋的不是平常那一格。** 她的主視窗就是桌寵
+（`tauri.conf.json` 的 `pet`：340×560、透明、`alwaysOnTop`），答案回來之後一直掛在
+那裡。使用者看完答案點回記事本，下一拍前景是記事本，R1 放行，整個螢幕連同她的
+答案一起被截走。
+
+R2 派給 grok 4.7 時回 HTTP 402（Grok Build 額度用完），這一半是我自己寫的。
+
+- 判斷全在 `crates/sister-capture/src/own_windows.rs`（純函式，Linux 的 `cargo test`
+  驗得到）。`crates/sister-capture/src/windows/own_windows.rs` 只讀事實，而且不准呼叫
+  會送視窗訊息的 API：recorder 可能跑在她自己的行程裡，送訊息給自己的 UI 執行緒
+  會卡死。
+- 每一拍抓圖前後各列一次視窗（`grab_without_her`），兩次讀到的她都塗黑，塗完才算
+  dhash、跑 OCR、存圖。任一次列不出來，或她的一扇看得見卻讀不到位置，這一拍回錯誤、
+  整張不抓，算進 `sister record` 摘要「⚠ N 拍失敗」那一行。
+- 她那一扇：`GetWindowRect` 和 DWM 外框（`DWMWA_EXTENDED_FRAME_BOUNDS`）兩塊都塗；
+  被 DWM 藏起來、透明、形狀不規則都照塗。
+- 別人的視窗要**確定蓋得住**才擋她：讀得到、而且沒被 DWM 藏起來，不透明，不是
+  `SetWindowRgn` 的不規則形狀，而且只拿 DWM 外框算（`GetWindowRect` 多出來的那圈
+  縮放邊底下看得到她）。不透明是指：沒有 `WS_EX_NOREDIRECTIONBITMAP`（DirectComposition
+  畫的，從外面讀不出透明度），沒有 `WS_EX_TRANSPARENT`（點得穿的覆蓋層），layered 的
+  話要讀得到屬性、沒有色鍵、alpha 沒設或設成 255。
+- 畫面縮過圖時，每一塊往外取整、各邊多塗一格。
+- `sister bench` 的 `bench_grab` 不塗：它量的是抓圖本身。
+- 只有 Windows。Linux X11 抓的是整個 root window，不塗。
+
+### 26.4 收貨
+
+**R1。** 驗收在派工前寫好：`crates/sister-core/tests/own_window_gate.rs`（7 條，閘門）
+與 `crates/sister-capture/tests/own_window_acceptance.rs`（1 條，整段錄製加位元組
+掃描）。交貨後直接跑，綠。收貨改了兩處：
+
+1. **⚠ 在混合那一場說錯話。** 一場只有排除規則和她的視窗、一張畫面都沒留下時，
+   ⚠ 寫「全部被上面的規則擋掉了」，而上一行剛寫完她的視窗，改 config 改不到她。
+   改成「她自己的視窗那幾拍以外」，補一條測試（`25d0c77`）。delegate 在條件上
+   多加的 `!excluded_reasons.is_empty()` 和 `excluded > 0` 等價，拿掉。
+2. **我的驗收讓兩層互相補票。** 三筆剪貼簿的擁有者都寫成她的程式檔，所以水位那一層
+   和來源閘門那一層，拿掉任一層都不紅。加了兩筆擁有者是 `msedgewebview2.exe` 的：
+   一筆在她前景那一拍（守水位），一筆在她最後一個 tick 之後、下一個一般 tick 之前
+   （只剩空洞旗標擋得住，`87e4d65`）。WebView2 裡複製的字，真機器上擁有者報的是哪個
+   程式，沒看過。
+
+R1 的突變 22 刀（對 `87e4d65`，對照組前後各跑一次、全綠），**22 刀全紅**：
+
+| 範圍 | 刀 |
+|---|---|
+| 閘門 | 拿掉她的早退；她排到敏感欄後面；整串相等改子字串；剪貼簿來源不轉小寫；`reason()` 對她回 `None`；剪貼簿來源拿掉她；`is_blocked` 對她回 false |
+| recorder | 不清 `last_exclusion`；寫 excluded 稽核；算進 `excluded`；算進 `excluded_reasons`；不數 `own_window`；不推水位也不開空洞；推水位但不開空洞；只把 Blocked 送進排除分支；她的剪貼簿照收；她的剪貼簿算成排除 |
+| 摘要 | ⚠ 也算她；拿掉她那一行；⚠ 兩種說法對調；她的 tick 每拍都叫腦；拿掉剪貼簿她那一行 |
+
+**R2 純規則。** `crates/sister-capture/tests/own_windows_mask.rs`（36 條，平台層動工前
+先寫）：規則逐格對照、隨機 1500 組視窗、隨機縮圖畫面、抓圖前後各問一次。突變 24 刀
+（對 `40ba35c`），**24 刀全紅**：別人擋不住她、擋她用 `window_rect`、讀不到有沒有藏
+當沒藏、她透明就不塗、縮圖不多塗一格、右邊往內取整、讀不到位置就跳過那一扇、名字
+不轉小寫、重疊重算、不先切到擷取範圍、layered 沒設 alpha 當透明、沒畫出來的別人也算擋、
+只塗 `frame_bounds`、長度不對照塗、形狀不規則的別人也算擋、抓完不再問、抓之前不問、
+兩次都在抓之前問、抓完問不出來也留著、抓之前問不出來也照抓、大小對不上也留著、
+DirectComposition 當實心、點得穿當實心、不看 layered 那張表。
+
+**R2 真的 Windows 桌面。** `crates/sister-capture/tests/windows_own_windows.rs`，CI 那一步
+叫「Own windows — masked in her own capture on a real desktop」。它把自己的測試程式
+複製幾份當視窗：改名成 `sister-desktop.exe` 的是她，別的名字是別人；她畫洋紅，別人
+畫綠或青。五個情境：
+
+1. 不是她的洋紅視窗照樣看得到（對照組：塗黑不是整片亂塗）。
+2. 她那一塊全黑，外圍一圈沒有洋紅（連抓三張）。
+3. 實心的別人蓋在她上面：重疊那一塊是綠的，她其餘的地方是黑的。
+4. alpha 128 的別人蓋在她上面：她整塊是黑的。
+5. 沒有內容的 `WS_EX_NOREDIRECTIONBITMAP` 別人蓋在她上面：她整塊是黑的（連抓三張）。
+
+CI 的桌面是 1024×768、不縮放，所以縮放那一格只在清單上。平台層的突變在另一條只跑
+這支測試的暫時分支上跑（對 `40ba35c`；對照組前後各一次，都綠），**九刀全紅**，
+每一刀都紅在它該紅的那個情境：
+
+| 刀 | 切什麼 | 紅在 |
+|---|---|---|
+| W01 | 不問她在哪（永遠回空） | 情境 2：她 38400 格全是洋紅 |
+| W02 | 程式檔拿完整路徑、不取檔名 | 情境 2：同上 |
+| W03 | cloaked 讀反 | 情境 3：重疊那一塊被塗黑 |
+| W04 | 永遠不是 layered | 情境 4：重疊那 14400 格是混色，看得到她 |
+| W05 | 不讀 alpha | 情境 4：同上 |
+| W06 | 讀不到 DWM 外框 | 情境 3：重疊那一塊被塗黑 |
+| W07 | 形狀讀反 | 情境 3：同上 |
+| W08 | 讀到的視窗範圍左邊偏一格（擷取範圍不動） | 情境 2：洋紅漏出 160 格 |
+| W09 | 不讀 `WS_EX_NOREDIRECTIONBITMAP` | 情境 5：重疊那 14400 格全是洋紅 |
+
+**同一份腳本在 alpha.157 和這一版的差別。** 腳本是記事本一張（`客服專線 0800-080-123`）、
+她的答案畫面兩張，問「客服電話」：
+
+```
+alpha.157  🔍 「客服電話」 1 筆答案、2 筆原文
+             ★ +886800080123  「0800-080-123」
+               ↳ phone · … · sister-desktop.exe · AI-Sister · frame #3
+           兩筆原文都是她自己的畫面（frame #2、#3）
+這一版     🔍 「客服電話」 1 筆答案、0 筆原文
+             ★ +886800080123  「0800-080-123」
+               ↳ phone · … · notepad.exe · 帳單.txt - 記事本 · frame #1
+```
+
+這份腳本走的是 `sister replay`，只驗得到前景那一格；塗黑那一格只有上面那支 Windows
+測試和清單驗得到。
+
+### 26.5 我這一輪做錯的
+
+- **我把前景那道閘門當成整件事。** 25.9 寫的是「她的主視窗和桌寵一出現在畫面上」，
+  派給 grok 的 R1 卻只擋前景（26.3 開頭）。
+- 派工單的行號錯了幾處，grok 在收據裡逐條指出（剪貼簿閘門從 2331 行開始，不是 2334）。
+- 派工單說她前景那一拍複製的剪貼簿「算 own window」，那筆其實走不到來源閘門：
+  水位先把它跳過了。grok 兩條路都測了，也照實寫了。
+- 驗收第一版三筆剪貼簿都寫她的程式檔（26.4 R1 的 2）。
+- **判斷「看不看得穿」的第一版只看 layered。** DirectComposition 畫的和點得穿的覆蓋層
+  都被當成實心，蓋在她上面的那一塊就不塗。`40ba35c` 補上，出貨前。把這一格拿掉的
+  W09 在真的 Windows 上量到：沒有內容的那種視窗底下，她 14400 格洋紅全看得到。
+- 「抓之前問不出來也照抓」那一刀一開始是綠的：夾具讓兩次都問不出來，所以只證明了
+  「至少一次問不出來就不抓」，刀切掉抓之前那一問，還是紅在抓之後那一問。改成只讓
+  第一次失敗（`6eec86b`）。
+- Windows 突變第一輪的 W08 是綠的。我把偏一格切在共用的換算函式 `desktop_rect` 上，
+  擷取的螢幕範圍也跟著偏；範圍偏了，畫面和範圍不再一樣大，縮圖那條「各邊多塗一格」
+  就把那一格補回來。第二輪改成只偏讀到的視窗範圍、不動擷取範圍，才紅。**切在共用
+  換算上的刀會自己補償，要切在其中一個呼叫端。**
+
+### 26.6 登記在案、這一版不修的
+
+- 認的是程式檔名。安裝版的檔名是固定的；免安裝版改了名（瀏覽器重複下載會變成
+  `sister-desktop (1).exe`）她就認不得，兩格都擋不到。
+- Linux 讀不到 `/proc/<pid>/exe` 時退回 WM_CLASS、macOS 讀不到 bundle id 時退回
+  localizedName；那兩個退路的值會不會等於三個名字之一，沒在真機器上看過。Linux 和
+  macOS 的剪貼簿後端本來就沒有來源 app。
+- Linux X11 不塗：她看得見但不在前景時，照樣進 frame。
+- 全新的資料庫只跟她說過話時，她說「我正開著，可是到現在一列內容都還沒落地——多半是
+  剛開始，再等一下。」——等下去沒用，要切到別的 app。
+- 塗的是她整扇視窗的範圍。桌寵四周透明、看得到底下程式的地方也一起塗，被她蓋住的
+  那一小塊那一拍不記。
+- 她被 DWM 藏起來也照塗（理由寫在 `her_cloaked_window_is_masked_anyway`）。她開在另一個
+  虛擬桌面時，會不會在這一個桌面的同一個位置留一塊黑的，要看 DWM 那時有沒有把她藏起來，
+  沒在真機器上看過。
+- 沒驗過的兩類，都是「擁有者不是她的程式檔」：WebView2 的下拉選單、右鍵選單與提示框
+  如果是 `msedgewebview2.exe` 開的頂層視窗，她認不得；工作列、Alt-Tab、工作檢視裡
+  她的縮圖是 explorer／DWM 畫的，這一層不塗。
+- `DwmExtendFrameIntoClientArea` 延伸出來的玻璃、Mica／Acrylic 背景的視窗，這一層判成
+  實心；蓋在她上面時，那一塊不塗。透過去看不看得到她的字，沒量過。
+- 列完視窗到讀位置之間她的一扇剛好關掉，會讀不到位置，那一拍整張不抓。
+
+### 26.7 還沒做、要 Ted 決定：`WDA_EXCLUDEFROMCAPTURE`
+
+`SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE)` 讓她從**所有**截圖、錄影、
+螢幕分享裡消失，包括 Ted 回報問題時截的圖。好處是 BitBlt 直接抓得到她底下的東西，
+沒有黑框，也不用列視窗。這一版的塗黑只影響她自己的記憶，別人的截圖照樣看得到她。
+要不要換、或兩個都要，是 Ted 的決定。
