@@ -193,6 +193,65 @@ fn an_unseen_topic_with_a_type_word_still_gets_nothing() {
     }
 }
 
+/// 類型詞在前、沒看過的主題在後。索引看過「網址」「時間」和「的退」（別的畫面上的
+/// 「按下的退出鍵」），拿掉尾巴沒看過的「款」，剩下的「網址的退」「時間的退」過得了
+/// 兩道出口（「退」算主題）。擋住它們的只有放寬之前那一道：類型題的主題整段沒看過
+/// 就不放寬。那一道拿掉，facts 會拿別張畫面上的網址和日期來答。
+#[test]
+fn a_type_word_before_an_unseen_topic_still_gets_nothing() {
+    let mut db = db_with("設定頁的網址 https://example.com/dl");
+    let session = db.start_session("test", "test").unwrap();
+    for (i, text) in ["按下的退出鍵", "開會的時間 2026-08-23 14:00"]
+        .iter()
+        .enumerate()
+    {
+        db.insert_frame(
+            session,
+            &FrameCapture {
+                assistive: Vec::new(),
+                ts: 200 + i as i64,
+                monitor: 0,
+                width: 800,
+                height: 600,
+                dhash: 2 + i as u64,
+                image: None,
+                image_ext: "png",
+                ocr: vec![OcrBlock {
+                    text: (*text).into(),
+                    x: 0,
+                    y: 0,
+                    w: 300,
+                    h: 20,
+                    confidence: 1.0,
+                }],
+                focus: FocusSnapshot::default(),
+            },
+            None,
+            0,
+        )
+        .unwrap();
+    }
+    for seen in ["網址", "時間", "的退"] {
+        assert!(
+            !db.search(seen, 1).unwrap().is_empty(),
+            "前提：看過「{seen}」"
+        );
+    }
+    assert!(
+        db.search("退款", 1).unwrap().is_empty(),
+        "前提：沒看過「退款」"
+    );
+    for q in ["網址的退款", "時間的退款"] {
+        let got = ask(&mut db, q);
+        assert!(
+            got.empty,
+            "{q}：主題沒看過，不可以拿別的網址／日期來湊：{}",
+            got.answers
+        );
+        assert_eq!(got.searched, None, "{q}：沒有放寬就不說改用了什麼");
+    }
+}
+
 #[test]
 fn an_unknown_word_in_the_middle_is_still_required() {
     let mut db = replay_db();
