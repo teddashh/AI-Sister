@@ -257,12 +257,51 @@ const QUERY_KIND_TABLE: &[(&str, FactKind)] = &[
     ("日期", FactKind::DateTimeMention),
     ("時間", FactKind::DateTimeMention),
     ("期限", FactKind::DateTimeMention),
-    // 「幾號」刻意不收：「今天幾號」問日期，「電話幾號」問號碼，分不出來就不猜
-    ("什麼時候", FactKind::DateTimeMention),
+    // 「幾號」刻意不收：「今天幾號」問日期，「電話幾號」問號碼，分不出來就不猜。
+    // 「什麼時候」「when」這種問法在底下另一張表 [`WHEN_ASKS`]。
     ("date", FactKind::DateTimeMention),
-    ("when", FactKind::DateTimeMention),
     ("deadline", FactKind::DateTimeMention),
 ];
+
+/// 問「什麼時候」的說法。它們也是 [`FactKind::DateTimeMention`] 的類型詞：第一次
+/// 查詢照樣去找寫在畫面上、而且在主題旁邊的日期時間。
+///
+/// 和上面那張表分開，是因為放寬可以把這幾個切掉，名詞不行（見
+/// [`crate::retrieval`] 的 `retry_candidate`）。錄影機對「什麼時候」本來就有一個
+/// 答案，就是她記下它的那一刻；對「期限」「日期」「多少錢」沒有，截圖的時間不是
+/// 帳單上的期限，也不是金額。
+///
+/// 簡體和異體跟著 `QUESTION_WORDS` 收：那張表有「什么」「什麽」，這裡不收的話，
+/// 「什么时候」會被當成「什么」切掉，說出來的就是另一句。
+///
+/// 「幾點」的代價：「會議紀錄的幾點結論」也會被當成在問時間。「幾號」不收的理由
+/// 在上面那張表。
+pub(crate) const WHEN_ASKS: &[&str] = &[
+    "什麼時候",
+    "甚麼時候",
+    "什麽時候",
+    "什么时候",
+    "何時",
+    "何时",
+    "幾點",
+    "几点",
+    "when",
+];
+
+/// 兩張表接起來。類型詞的每一個讀取端都走這裡，不各自只讀一張。
+fn query_kind_words() -> impl Iterator<Item = (&'static str, FactKind)> {
+    QUERY_KIND_TABLE.iter().copied().chain(
+        WHEN_ASKS
+            .iter()
+            .map(|word| (*word, FactKind::DateTimeMention)),
+    )
+}
+
+/// 這句話有沒有問「什麼時候」。邊界和類型詞同一支：`whenever` 不算。
+pub(crate) fn asks_when(query: &str) -> bool {
+    let q = query.to_lowercase();
+    WHEN_ASKS.iter().any(|word| query_kind_word_hits(&q, word))
+}
 
 /// 類型詞在已小寫的 `q` 裡從 `start` 吃到哪。
 ///
@@ -309,7 +348,7 @@ pub(crate) fn condition_is_kind_word(query: &str, start: usize, end: usize) -> b
         return false;
     }
     let (q, orig_at) = lowercase_with_orig_bytes(query);
-    QUERY_KIND_TABLE.iter().any(|(word, _)| {
+    query_kind_words().any(|(word, _)| {
         q.match_indices(word).any(|(lower_start, _)| {
             let Some(lower_end) = kind_word_match_end(&q, word, lower_start) else {
                 return false;
@@ -343,14 +382,45 @@ pub(crate) fn lowercase_with_orig_bytes(query: &str) -> (String, Vec<usize>) {
 }
 
 pub fn kinds_for_query(query: &str) -> Vec<FactKind> {
+    kinds_among(query, query_kind_words())
+}
+
+fn kinds_among(
+    query: &str,
+    words: impl Iterator<Item = (&'static str, FactKind)>,
+) -> Vec<FactKind> {
     let q = query.to_lowercase();
     let mut out: Vec<FactKind> = Vec::new();
-    for (word, kind) in QUERY_KIND_TABLE {
-        if query_kind_word_hits(&q, word) && !out.contains(kind) {
-            out.push(*kind);
+    for (word, kind) in words {
+        if query_kind_word_hits(&q, word) && !out.contains(&kind) {
+            out.push(kind);
         }
     }
     out
+}
+
+/// 一句話要撈哪幾種 facts、限在哪個主題旁邊。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FactRequest {
+    pub kinds: Vec<FactKind>,
+    pub topic: Option<String>,
+}
+
+/// [`crate::answer::answers_during`] 照這個撈。
+///
+/// 種類和 [`kinds_for_query`] 只差一件事：沒有主題的時候，問時間的說法
+/// （[`WHEN_ASKS`]）不算。「電話」一個詞就是在要一支電話，拿最近看到的那幾支
+/// 回答它是對的；「幾點了」「什麼時候」沒有在問哪一件事，拿最近看到的任意一個
+/// 日期時間回答，看起來就像在報現在幾點。
+///
+/// 放寬那兩道拒絕照舊用 [`kinds_for_query`]：只剩「什麼時候」也是只剩類型詞。
+pub fn fact_request(query: &str) -> FactRequest {
+    let topic = topic_constraint(query);
+    let kinds = match topic {
+        Some(_) => kinds_for_query(query),
+        None => kinds_among(query, QUERY_KIND_TABLE.iter().copied()),
+    };
+    FactRequest { kinds, topic }
 }
 
 /// 類型詞以外還剩下的主題。有的話，L1 答案必須出現在這段主題的出處附近，
@@ -358,6 +428,24 @@ pub fn kinds_for_query(query: &str) -> Vec<FactKind> {
 ///
 /// 問句虛字不是主題：「電話是多少」「請幫我找昨天電話」與
 /// `what was the phone number yesterday` 都只問類型，不另限來源。
+///
+/// 類型詞拿掉之後，原本接著它的虛字會露在主題的邊上：「客服的電話」剩「客服的」、
+/// 「週會是什麼時候」剩「週會是」。主題是拿去和出處做子字串比對的，畫面上寫的是
+/// 「客服專線」，「客服的」永遠對不到，於是這種問法第一次查詢一定空手。所以每一段
+/// 主題再剝一次尾巴的虛字（[`crate::question::trim_trailing_filler`]），開頭只剝
+/// 「的」（「幾點的會議」）。開頭其他虛字不剝：「電話到期日」剝掉「到」就剩「期日」，
+/// 對到「星期日」。剝完不足兩個字就不剝，所以主題不會因為剝字變成沒有——沒有主題
+/// 就是任意一支電話。
+///
+/// 只剝邊上、每段仍是原字的一段，所以原本對得到的出處剝完一定還對得到。
+///
+/// 代價：句首那一段早在 [`crate::question::terms`] 就剝過開頭的虛字，「到期日是
+/// 什麼時候」到這裡已經是「期日是」。以前那個「是」讓它什麼都對不到；剝掉之後剩
+/// 「期日」，「星期日」旁邊的日期也對得到。
+///
+/// 中間整段都是虛字的不處理：「我什麼時候看到 ERR_DEPLOY_42」的主題是
+/// 「看到 err_deploy_42」，第一次查詢的 facts 對不到；放寬改用
+/// 「ERR_DEPLOY_42」去找那一趟找得到。
 pub fn topic_constraint(query: &str) -> Option<String> {
     let lower = query.to_lowercase();
     let mut rest = strip_fact_question_edges(&lower).to_owned();
@@ -365,14 +453,24 @@ pub fn topic_constraint(query: &str) -> Option<String> {
     rest = strip_kind_words(&rest);
     let leftover = strip_fact_question_edges(&rest)
         .split_whitespace()
+        .map(trim_topic_joint)
         .filter(|tok| tok.chars().count() >= 2)
         .collect::<Vec<_>>()
         .join(" ");
     (!leftover.is_empty()).then_some(leftover)
 }
 
+/// 一段主題邊上、類型詞拿掉後露出來的虛字。剝完不足兩個字就原樣留著。
+fn trim_topic_joint(token: &str) -> &str {
+    let token = match token.strip_prefix('的') {
+        Some(rest) if rest.chars().count() >= 2 => rest,
+        _ => token,
+    };
+    crate::question::trim_trailing_filler(token)
+}
+
 fn strip_kind_words(rest: &str) -> String {
-    let mut keys: Vec<&str> = QUERY_KIND_TABLE.iter().map(|(word, _)| *word).collect();
+    let mut keys: Vec<&str> = query_kind_words().map(|(word, _)| word).collect();
     keys.sort_by_key(|word| std::cmp::Reverse(word.len()));
     let mut rest = rest.to_owned();
     for key in keys {
@@ -1442,6 +1540,122 @@ mod tests {
         assert_eq!(
             topic_constraint("幫我看一下客服專線").as_deref(),
             Some("客服")
+        );
+    }
+
+    #[test]
+    fn the_joint_a_type_word_leaves_behind_is_not_part_of_the_topic() {
+        for (query, topic) in [
+            ("客服的電話", "客服"),
+            ("客服的電話幾號", "客服"),
+            ("月報的連結", "月報"),
+            ("週會是什麼時候", "週會"),
+            ("週會是幾點", "週會"),
+            ("週會在幾點", "週會"),
+            ("週會的時間", "週會"),
+            ("幾點的會議", "會議"),
+            ("ERR_DEPLOY_42是什麼時候", "err_deploy_42"),
+            ("when is the weekly meeting", "weekly meeting"),
+        ] {
+            assert_eq!(topic_constraint(query).as_deref(), Some(topic), "{query}");
+        }
+    }
+
+    #[test]
+    fn trimming_the_joint_stays_on_the_edge() {
+        assert_eq!(trim_topic_joint("客服的"), "客服");
+        assert_eq!(trim_topic_joint("週會是"), "週會");
+        assert_eq!(trim_topic_joint("的會議"), "會議");
+        // 開頭只剝「的」：「到」是虛字，這裡是「到期日」的一部分
+        assert_eq!(trim_topic_joint("到期日"), "到期日");
+        assert_eq!(topic_constraint("電話到期日").as_deref(), Some("到期日"));
+        // 剝完不足兩個字就原樣留著
+        assert_eq!(trim_topic_joint("客的"), "客的");
+        assert_eq!(trim_topic_joint("的客"), "的客");
+        assert_eq!(trim_topic_joint("的的"), "的的");
+    }
+
+    /// 文件寫的代價：句首的虛字 [`crate::question::terms`] 本來就會剝。以前主題剩
+    /// 「期日是」，什麼都對不到；剝掉尾巴之後剩「期日」，「星期日」旁邊的日期也對得到。
+    #[test]
+    fn a_head_word_cut_by_terms_pays_the_documented_cost() {
+        assert_eq!(
+            topic_constraint("到期日是什麼時候").as_deref(),
+            Some("期日")
+        );
+    }
+
+    #[test]
+    fn when_asks_are_date_kind_words_and_are_known_as_when() {
+        for query in [
+            "週會什麼時候",
+            "週會甚麼時候",
+            "週會什麽時候",
+            "周会什么时候",
+            "週會何時",
+            "周会何时",
+            "週會幾點",
+            "周会几点",
+            "when is the meeting",
+            "WHEN",
+        ] {
+            assert_eq!(
+                kinds_for_query(query),
+                vec![FactKind::DateTimeMention],
+                "{query}"
+            );
+            assert!(asks_when(query), "{query}");
+        }
+        // 名詞的日期類型詞不是在問「什麼時候」；whenever 不是 when
+        for query in [
+            "週會的時間",
+            "報告期限",
+            "到期日期",
+            "whenever",
+            "客服電話多少錢",
+        ] {
+            assert!(!asks_when(query), "{query}");
+        }
+        // 文件寫的代價：「幾點」一律算在問時間
+        assert!(asks_when("會議紀錄的幾點結論"));
+    }
+
+    #[test]
+    fn a_when_ask_without_a_topic_asks_for_no_facts() {
+        for query in ["什麼時候", "幾點", "幾點了", "when"] {
+            assert_eq!(
+                fact_request(query),
+                FactRequest {
+                    kinds: Vec::new(),
+                    topic: None
+                },
+                "{query}"
+            );
+            // 放寬的兩道拒絕看的是這一支：只剩問時間的字，也是只剩類型詞
+            assert_eq!(kinds_for_query(query), vec![FactKind::DateTimeMention]);
+        }
+        // 名詞類型詞沒有主題照撈；問時間的那一半不跟著撈任意日期
+        assert_eq!(
+            fact_request("電話什麼時候打"),
+            FactRequest {
+                kinds: vec![FactKind::Phone],
+                topic: None
+            }
+        );
+        assert_eq!(
+            fact_request("時間"),
+            FactRequest {
+                kinds: vec![FactKind::DateTimeMention],
+                topic: None
+            }
+        );
+        // 有主題就撈主題旁邊的日期時間
+        assert_eq!(
+            fact_request("週會什麼時候"),
+            FactRequest {
+                kinds: vec![FactKind::DateTimeMention],
+                topic: Some("週會".into())
+            }
         );
     }
 

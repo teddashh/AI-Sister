@@ -18,6 +18,10 @@ use crate::question::{self, Shape};
 pub enum SearchAdjustment {
     Glued(String),
     Relaxed(String),
+    /// 放寬過、他問的是「什麼時候」（[`crate::facts::WHEN_ASKS`]），而且放寬之後
+    /// 底下有東西。改找的字裡已經沒有那幾個字了，底下的時間只剩她記下每一筆的
+    /// 時刻，所以要講明。放寬之後還是空手的話用 [`Self::Relaxed`]。
+    RelaxedWhen(String),
 }
 
 impl SearchAdjustment {
@@ -27,6 +31,9 @@ impl SearchAdjustment {
                 "我拿去比對的是「{x}」——那是從你打的字黏出來的，不是一個詞。直接打你要的那個詞再問一次。"
             ),
             Self::Relaxed(x) => format!("我對不到你打的那一串，所以改用「{x}」去找。"),
+            Self::RelaxedWhen(x) => format!(
+                "我對不到你打的那一串，所以改用「{x}」去找。底下每一筆的時間，是我記下那一筆的時候。"
+            ),
         }
     }
 }
@@ -54,14 +61,27 @@ impl SearchAdjustment {
 /// 剛好沒看過。問句詞是這一張；口語開頭是旁邊另一張 [`SPOKEN_LEAD_INS`]，
 /// 各只有一份，不複製到 facts 或索引。問句詞中文整段比對；英文是獨立 token、
 /// 不分大小寫，邊界與類型詞同一支 [`crate::facts::kind_word_match_end`]（`show`
-/// 裡的 how 不算）。口語開頭的英文另有更嚴的邊界，見 [`ascii_lead_in_end`]。落在類型詞裡面的不算：「什麼時候」「多少錢」「繳多少」
-/// 「付多少」「欠多少」是答案種類，不是問句。前面已經有內容，就只留前面，
-/// 後面連類型詞一起丟、不接回去。前面只有空白或虛字，就只拿掉這個詞再往後看，
+/// 裡的 how 不算）。口語開頭的英文另有更嚴的邊界，見 [`ascii_lead_in_end`]。落在類型詞裡面的不算：「多少錢」「繳多少」
+/// 「付多少」「欠多少」是答案種類，不是問句。問時間的那幾個是例外，見下一段。
+/// 前面已經有內容，就只留前面，後面連類型詞一起丟、不接回去。前面只有空白或虛字，
+/// 就只拿掉這個詞再往後看，
 /// 所以「為什麼部署失敗」留下「部署失敗」，「怎麼找客服電話」留下「找客服電話」，
 /// 再交給索引把「找」拿掉。
 ///
-/// 刻意不收：「幾」（「幾號」分不出日期和號碼，還有「幾乎」）、嗎／呢／吧
-/// （[`question::terms`] 已經剝頭尾虛字）、when（它自己就是類型詞）。
+/// 問時間的說法（[`crate::facts::WHEN_ASKS`]：「什麼時候」「幾點」「何時」、when）
+/// 自己也是類型詞，alpha.161 起照樣在這裡切。alpha.157 到 alpha.160 不切，理由是
+/// 「什麼時候」是他要的日期，畫面上沒有日期就該空手，`common_words_relax.rs` 有一條
+/// 測試釘著這一句。推翻它的理由：錄影機對「什麼時候」本來就有一個答案，就是她記下
+/// 它的那一刻。對「多少錢」沒有，截圖的時間不是金額，所以錢那幾個照舊不切。第一次
+/// 查詢照樣去找寫在主題旁邊的日期時間，這裡只管那一趟整段空手之後。
+///
+/// 代價：問的是還沒到的事（「預算表什麼時候交」，而畫面上沒寫日期），找到的是她看到
+/// 「預算表」那幾張畫面的時間，不是要交的那一天。所以這種放寬另用
+/// [`SearchAdjustment::RelaxedWhen`]，多講一句「底下每一筆的時間，是我記下那一筆的
+/// 時候」，不沿用籠統的那一句。`when_questions.rs` 釘著這個代價。
+///
+/// 刻意不收：單獨的「幾」（「幾號」分不出日期和號碼，還有「幾乎」；「幾點」在
+/// [`crate::facts::WHEN_ASKS`]）、嗎／呢／吧（[`question::terms`] 已經剝頭尾虛字）。
 ///
 /// 問句頭尾另外套 [`crate::facts::strip_fact_question_edges`]，和 facts 主題
 /// 同一張表。那張表多的是「幫我看一下」「幫我看」「查一下」「找一下」「看一下」。
@@ -336,20 +356,22 @@ fn peel_retry_terms(terms: &str) -> &str {
     }
 }
 
-/// 由左往右第一個不在類型詞裡的問句詞。前面有內容就留下前面；前面只有虛字
-/// 就拿掉這個詞，繼續看後面。
+/// 由左往右第一個問句詞；落在類型詞裡的跳過，問時間的不跳。前面有內容就留下
+/// 前面；前面只有虛字就拿掉這個詞，繼續看後面。
 fn cut_question_words(text: &str) -> &str {
     let (lower, orig_at) = crate::facts::lowercase_with_orig_bytes(text);
     let mut search_from = 0;
     loop {
-        let Some((rel_lo, rel_hi)) = find_question_word(&lower[search_from..]) else {
+        let Some(found) = find_question_word(&lower[search_from..]) else {
             return text;
         };
-        let abs_lo = search_from + rel_lo;
-        let abs_hi = search_from + rel_hi;
+        let abs_lo = search_from + found.lo;
+        let abs_hi = search_from + found.hi;
         let orig_lo = orig_at[abs_lo];
         let orig_hi = orig_at[abs_hi];
-        if crate::facts::condition_is_kind_word(text, orig_lo, orig_hi) {
+        // 問時間的字自己也是類型詞，所以要先看它：不先看的話，下一行會把它當成
+        // 「多少錢」那一種跳過去。
+        if !found.asks_when && crate::facts::condition_is_kind_word(text, orig_lo, orig_hi) {
             search_from = abs_hi;
             continue;
         }
@@ -360,23 +382,39 @@ fn cut_question_words(text: &str) -> &str {
     }
 }
 
-/// `lower` 裡最左邊的問句詞，同一位置取最長的。回傳的是 `lower` 的 byte 範圍。
-fn find_question_word(lower: &str) -> Option<(usize, usize)> {
-    let mut best: Option<(usize, usize)> = None;
+/// [`find_question_word`] 找到的那一個。`lo`／`hi` 是 `lower` 的 byte 範圍。
+struct FoundQuestionWord {
+    lo: usize,
+    hi: usize,
+    /// 是 [`crate::facts::WHEN_ASKS`] 裡的字，不是 [`QUESTION_WORDS`] 裡的。
+    asks_when: bool,
+}
+
+/// `lower` 裡最左邊的問句詞，同一位置取最長的：「什麼時候」贏過「什麼」。
+fn find_question_word(lower: &str) -> Option<FoundQuestionWord> {
+    let words = QUESTION_WORDS
+        .iter()
+        .map(|word| (*word, false))
+        .chain(crate::facts::WHEN_ASKS.iter().map(|word| (*word, true)));
+    let mut best: Option<FoundQuestionWord> = None;
     let mut i = 0;
     while i < lower.len() {
-        if best.is_some_and(|(start, _)| i > start) {
+        if best.as_ref().is_some_and(|found| i > found.lo) {
             break;
         }
-        for word in QUESTION_WORDS {
+        for (word, asks_when) in words.clone() {
             let Some(end) = crate::facts::kind_word_match_end(lower, word, i) else {
                 continue;
             };
-            let replace = best.is_none_or(|(start, prev_end)| {
-                i < start || (i == start && end - i > prev_end - start)
+            let replace = best.as_ref().is_none_or(|found| {
+                i < found.lo || (i == found.lo && end - i > found.hi - found.lo)
             });
             if replace {
-                best = Some((i, end));
+                best = Some(FoundQuestionWord {
+                    lo: i,
+                    hi: end,
+                    asks_when,
+                });
             }
         }
         let ch = lower[i..].chars().next().expect("i 在字元邊界");
@@ -492,12 +530,19 @@ impl RetrievalProfile {
                     && let Some(candidate) = retry_candidate(db, query)?
                 {
                     terms = candidate.to_string();
-                    searched = Some(SearchAdjustment::Relaxed(terms.clone()));
                     if self.wants_facts() {
                         answer_set =
                             answers_during(db, &candidate, limits.answers, range.as_ref())?;
                     }
                     hits = db.search_indexed_during(&candidate, limits.text + 1, range.as_ref())?;
+                    // 候選字裡不會再有問時間的字：`cut_question_words` 碰到就切。
+                    // 「底下每一筆的時間」只在底下有東西時講，空手就是籠統那一句。
+                    let found = !answer_set.items.is_empty() || !hits.is_empty();
+                    searched = Some(if found && crate::facts::asks_when(query) {
+                        SearchAdjustment::RelaxedWhen(terms.clone())
+                    } else {
+                        SearchAdjustment::Relaxed(terms.clone())
+                    });
                 }
                 (Some(terms), answer_set, hits)
             }
@@ -569,6 +614,40 @@ impl Retrieval {
 mod tests {
     use super::*;
     use crate::model::{FocusSnapshot, FrameCapture, OcrBlock};
+
+    /// 桌面收到的就是這個形狀：`kind` 決定畫哪一句，`terms` 是實際拿去找的字。
+    /// 多一種就要在 `app.js` 多一句，`check-pet-says-why.mjs` 會逐種對字。
+    #[test]
+    fn every_adjustment_serializes_as_kind_and_terms() {
+        for (adjustment, kind) in [
+            (SearchAdjustment::Glued("個板".into()), "glued"),
+            (SearchAdjustment::Relaxed("客服電話".into()), "relaxed"),
+            (
+                SearchAdjustment::RelaxedWhen("ERR_DEPLOY_42".into()),
+                "relaxed_when",
+            ),
+        ] {
+            let terms = match &adjustment {
+                SearchAdjustment::Glued(x)
+                | SearchAdjustment::Relaxed(x)
+                | SearchAdjustment::RelaxedWhen(x) => x.clone(),
+            };
+            assert_eq!(
+                serde_json::to_value(&adjustment).unwrap(),
+                serde_json::json!({"kind": kind, "terms": terms})
+            );
+        }
+    }
+
+    #[test]
+    fn relaxed_when_says_what_relaxed_says_and_then_which_time() {
+        let plain = SearchAdjustment::Relaxed("ERR_DEPLOY_42".into()).message();
+        let when = SearchAdjustment::RelaxedWhen("ERR_DEPLOY_42".into()).message();
+        assert_eq!(
+            when,
+            format!("{plain}底下每一筆的時間，是我記下那一筆的時候。")
+        );
+    }
 
     fn db_with_bill() -> Db {
         let mut db = Db::open_in_memory().expect("db");

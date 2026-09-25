@@ -6115,6 +6115,22 @@ function renderGrounded(synthesis, readings, facts, hits, queryId) {
   return true;
 }
 
+// 她改過字的每一種原因各一句，和 Rust 的 `SearchAdjustment::message` 逐字相同
+// （`check-pet-says-why.mjs` 逐種對字）。認不得的種類不出聲：拿另一種的話來講，
+// 就是替一件沒發生的事解釋原因。
+function searchedNote(adjustment) {
+  switch (adjustment?.kind) {
+    case "glued":
+      return `我拿去比對的是「${adjustment.terms}」——那是從你打的字黏出來的，不是一個詞。直接打你要的那個詞再問一次。`;
+    case "relaxed":
+      return `我對不到你打的那一串，所以改用「${adjustment.terms}」去找。`;
+    case "relaxed_when":
+      return `我對不到你打的那一串，所以改用「${adjustment.terms}」去找。底下每一筆的時間，是我記下那一筆的時候。`;
+    default:
+      return null;
+  }
+}
+
 /**
  * @param hits 一筆一筆的原文。
  * @param kind `"keywords"`（比對字找到的）、`"recent"`（剛剛）、`"range"`（昨天下午那種日曆範圍），
@@ -6284,11 +6300,11 @@ function renderHits(
   // 每條查詢保留自己的原因；正常剝詞不出聲，黏詞提供重打的下一步。
   if (searched && !provisional) {
     for (const adjustment of searched) {
+      const said = searchedNote(adjustment);
+      if (!said) continue;
       const why = document.createElement("li");
       why.className = "hits-note";
-      why.textContent = adjustment.kind === "glued"
-        ? `我拿去比對的是「${adjustment.terms}」——那是從你打的字黏出來的，不是一個詞。直接打你要的那個詞再問一次。`
-        : `我對不到你打的那一串，所以改用「${adjustment.terms}」去找。`;
+      why.textContent = said;
       hitList.append(why);
     }
   }
@@ -7086,6 +7102,12 @@ if (browserDemoQuery && params.get("asleep") === "stopped") {
   paint();
 }
 
+// `?glued=` 示範和產品收到的同一個形狀：一串 `{kind, terms}`，不是一個字串。
+function demoSearched() {
+  const terms = params.get("glued");
+  return terms ? [{ kind: "glued", terms }] : null;
+}
+
 if (browserDemoQuery && params.get("hits") === "demo") {
   renderHits(
     [
@@ -7147,7 +7169,7 @@ if (browserDemoQuery && params.get("hits") === "demo") {
     // `?glued=的人`：她拿去比對的字是黏出來的，**而且還真的比到東西了**。
     // 這一半比空手那一半更需要看一眼：一串看起來像正常答案的東西配上一句
     // 「我找的不是你打的字」，兩者要能同時讀得下去才算對。
-    params.get("glued"),
+    demoSearched(),
     null,
     null,
     null,
@@ -7562,7 +7584,7 @@ if (browserDemoQuery && params.get("hits") === "none") {
     false,
     // `?glued=個板`：她拿去比對的字是從「剛剛那個板」黏出來的。看得見這一行
     // 才知道下一步是重打一個詞，而不是去設定頁找一條擋掉它的規則。
-    params.get("glued"),
+    demoSearched(),
   );
 }
 

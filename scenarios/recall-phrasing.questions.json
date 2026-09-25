@@ -288,6 +288,55 @@
           }
         ]
       }
+    },
+    {
+      "id": "phrasing-17",
+      "question": "客服的電話",
+      "source": "hand_labeled",
+      "expected": {
+        "outcome": "answer",
+        "any_of": [
+          "0800-000-123",
+          "+886800000123"
+        ],
+        "evidence": [
+          {
+            "event_index": 0
+          }
+        ]
+      }
+    },
+    {
+      "id": "phrasing-18",
+      "question": "ERR_DEPLOY_42 什麼時候發生的",
+      "source": "hand_labeled",
+      "expected": {
+        "outcome": "answer",
+        "any_of": [
+          "ERR_DEPLOY_42"
+        ],
+        "evidence": [
+          {
+            "event_index": 1
+          }
+        ]
+      }
+    },
+    {
+      "id": "phrasing-19",
+      "question": "部署失敗是什麼時候",
+      "source": "hand_labeled",
+      "expected": {
+        "outcome": "answer",
+        "any_of": [
+          "部署失敗"
+        ],
+        "evidence": [
+          {
+            "event_index": 1
+          }
+        ]
+      }
     }
   ]
 }

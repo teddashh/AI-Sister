@@ -51,9 +51,9 @@ pub fn answers_during(
     // 看了一次沒關掉。見 `Db::SAME_SITTING_MS`。
     //
     // 多要一筆，這樣「剛好 limit 筆」和「被切掉了」分得開。
-    let topic = crate::facts::topic_constraint(query);
+    let crate::facts::FactRequest { kinds, topic } = crate::facts::fact_request(query);
     let mut merged: HashMap<String, Answer> = HashMap::new();
-    for kind in crate::facts::kinds_for_query(query) {
+    for kind in kinds {
         // 一句問話可以命中兩種 kind（「多少錢」→ money 和 percent），而同一
         // 個正規化字串理論上不會跨 kind 重複。真的重複的話取比較新的那一筆，
         // 次數相加——這比讓其中一邊安靜地覆蓋掉另一邊誠實。

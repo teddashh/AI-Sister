@@ -324,11 +324,17 @@ fn an_unseen_topic_still_gets_nothing_even_when_every_other_word_is_seen() {
 
 #[test]
 fn a_type_word_that_contains_a_question_word_is_what_he_asked_for() {
-    // 「什麼時候」「多少錢」本身就是答案種類。把它從「什麼」切掉，就變成去找
+    // 「多少錢」本身就是答案種類。把它從「多少」切掉，就變成去找
     // release candidate 這個詞本身——那不是他問的。
+    //
+    // alpha.157 到 alpha.160 這裡釘的是「release candidate 什麼時候」，理由相同：
+    // 他問的是日期，畫面上沒有日期就是空手。alpha.161 推翻了那一半：錄影機對
+    // 「什麼時候」有答案，就是她記下那一筆的時候；對「多少錢」沒有，截圖的時間
+    // 不是金額。代價是還沒到的事也只拿得到她看到那張畫面的時間，所以那種放寬
+    // 另外講明。見 `when_questions.rs`。
     nothing_everywhere(
-        "release candidate 什麼時候",
-        "他問的是日期；畫面上沒有日期就是空手",
+        "release candidate 多少錢",
+        "他問的是金額；畫面上沒有金額就是空手",
     );
 }
 

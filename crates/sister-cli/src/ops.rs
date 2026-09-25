@@ -16364,6 +16364,10 @@ pub mod query {
                 glued_note(Some(&SearchAdjustment::Glued("個板".into()))).unwrap(),
                 "   我拿去比對的是「個板」——那是從你打的字黏出來的，不是一個詞。直接打你要的那個詞再問一次。"
             );
+            assert_eq!(
+                glued_note(Some(&SearchAdjustment::RelaxedWhen("ERR_DEPLOY_42".into()))).unwrap(),
+                "   我對不到你打的那一串，所以改用「ERR_DEPLOY_42」去找。底下每一筆的時間，是我記下那一筆的時候。"
+            );
         }
 
         /// 「我找不到」和「我沒去找」不可以是同一句話。

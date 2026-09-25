@@ -915,6 +915,18 @@ function check(name, ok, detail) {
 }
 if (process.env.A156_ONLY === "1") process.exit(failed > 0 ? 1 : 0);
 
+// A155／A161 共用：她改過字的每一種原因，那一句話從 Rust 的
+// `SearchAdjustment::message` 讀，不在這裡抄一份——抄的那份會和兩邊一起漂。
+// 種類名照 serde 的 snake_case 換算。續行先接起來再比。
+const RETRIEVAL_SOURCE = read(join(UI, "../../../crates/sister-core/src/retrieval.rs")).replace(/\\\n\s*/gu, "");
+const ADJUSTMENT_VARIANTS = [...(RETRIEVAL_SOURCE.split("pub enum SearchAdjustment {")[1]?.split("\n}")[0] ?? "")
+  .matchAll(/^ {4}([A-Z][A-Za-z]*)\(String\),$/gmu)].map(m => m[1]);
+const snakeKind = (variant) => variant.replace(/(?<!^)[A-Z]/gu, c => `_${c}`).toLowerCase();
+const ADJUSTMENT_SAID = new Map([...(RETRIEVAL_SOURCE.split("pub fn message(&self) -> String {")[1]?.split("\n    }\n")[0] ?? "")
+  .matchAll(/Self::([A-Z][A-Za-z]*)\(x\) => format!\(\s*"([^"]*)",?\s*\)/gu)]
+  .map(m => [snakeKind(m[1]), m[2]]));
+const adjustmentSaid = (a) => ADJUSTMENT_SAID.get(a.kind)?.replaceAll("{x}", a.terms);
+
 // A155：核心檢索的比對字一路進 native 回條，再由真 renderer 畫出來。
 {
   const native = read(MAIN).split("fn answer_from_memory(")[1]?.split("fn ")[0] ?? "";
@@ -930,9 +942,29 @@ if (process.env.A156_ONLY === "1") process.exit(failed > 0 ? 1 : 0);
     const p = await open({ ask: answer({ searched, hits }) });
     await p.type("找客服電話");
     const notes = p.hitTexts().filter(text => text.includes("我拿去比對的是") || text.includes("我對不到你打的那一串"));
-    const expected = searched ? searched.map(a => a.kind === "glued" ? `我拿去比對的是「${a.terms}」——那是從你打的字黏出來的，不是一個詞。直接打你要的那個詞再問一次。` : `我對不到你打的那一串，所以改用「${a.terms}」去找。`) : [];
-    check(`A155 ${label}只說實際比對字`, JSON.stringify(notes) === JSON.stringify(expected), notes);
+    const expected = searched ? searched.map(adjustmentSaid) : [];
+    check(`A155 ${label}只說實際比對字`, expected.every(Boolean) && JSON.stringify(notes) === JSON.stringify(expected), notes);
   }
+}
+
+// A161：每一種原因畫出來都是 Rust 那一句，一字不差；認不得的種類不出聲。
+// 前提斷言要真的抽到三種以上：抽到零種的話，底下每一條都會空轉著叫綠。
+{
+  check("A161 前提：抽到每一種改字的原因", ADJUSTMENT_VARIANTS.length >= 3, ADJUSTMENT_VARIANTS);
+  check("A161 每一種原因都抽到一句話",
+    ADJUSTMENT_SAID.size === ADJUSTMENT_VARIANTS.length && ADJUSTMENT_VARIANTS.every(v => ADJUSTMENT_SAID.has(snakeKind(v))),
+    [...ADJUSTMENT_SAID.keys()]);
+  check("A161 前提：問時間的那一種在裡面", ADJUSTMENT_SAID.has("relaxed_when"), [...ADJUSTMENT_SAID.keys()]);
+  for (const kind of ADJUSTMENT_SAID.keys()) {
+    const adjustment = { kind, terms: "ERR_DEPLOY_42" };
+    const want = adjustmentSaid(adjustment);
+    const p = await open({ ask: answer({ searched: [adjustment], hits: [hit()] }) });
+    await p.type("ERR_DEPLOY_42 什麼時候發生的");
+    check(`A161 ${kind}：畫的是 Rust 那一句`, want.includes("「ERR_DEPLOY_42」") && p.hitTexts().filter(text => text === want).length === 1, p.hitTexts());
+  }
+  const unknown = await open({ ask: answer({ searched: [{ kind: "someday", terms: "ERR_DEPLOY_42" }], hits: [hit()] }) });
+  await unknown.type("ERR_DEPLOY_42");
+  check("A161 認不得的種類不出聲", unknown.hitTexts().length > 0 && unknown.hitTexts().every(text => !text.includes("「ERR_DEPLOY_42」")), unknown.hitTexts());
 }
 
 // A154 R2：用真 app.js 的按送出路徑；只在突變取證時單跑此組。

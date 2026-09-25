@@ -345,6 +345,25 @@ pub(crate) fn only_filler(text: &str) -> bool {
     words(text).iter().all(|&(_, _, role)| role == Role::Filler)
 }
 
+/// 剝掉尾巴不是內容詞的字，開頭不動。剝完不足兩個字、或整段都不是內容詞，
+/// 就原樣回傳。
+///
+/// 給 [`crate::facts::topic_constraint`] 修類型詞拿掉之後露出來的邊用：
+/// 「客服的」→「客服」、「週會是」→「週會」。[`terms`] 兩頭都剝，而開頭的虛字
+/// 常常是詞的一部分（「到期日」「事件」），所以這裡只剝尾巴。
+pub(crate) fn trim_trailing_filler(text: &str) -> &str {
+    let words = words(text);
+    let Some(hi) = words.iter().rposition(|&(_, _, r)| r == Role::Content) else {
+        return text;
+    };
+    let trimmed = &text[..words[hi].1];
+    if trimmed.chars().count() < 2 {
+        text
+    } else {
+        trimmed
+    }
+}
+
 /// 在開頭比對得到的最長那個詞，以及它的角色。
 fn longest(rest: &str) -> Option<(usize, Role)> {
     let mut best: Option<(usize, Role)> = None;
@@ -364,6 +383,13 @@ fn longest(rest: &str) -> Option<(usize, Role)> {
     }
     for token in FILLER_CJK {
         consider(token, Role::Filler);
+    }
+    // 「什麼時候」是一個詞，不是虛字「什麼」加上「時候」。拆開的話，開頭的「什麼」
+    // 會被 [`terms`] 剝掉，「什麼時候看到部署失敗」剩「時候看到部署失敗」，放寬
+    // 就認不出他在問時間（見 [`crate::facts::WHEN_ASKS`]）。算內容詞，和「時候」
+    // 本來一樣：第一次查詢照樣拿它去比對，只是不再少掉開頭的「什麼」。
+    for token in crate::facts::WHEN_ASKS {
+        consider(token, Role::Content);
     }
     best
 }
@@ -738,6 +764,29 @@ mod tests {
         // 退到夠用就停，不是退回整句——「剛剛」還是不該進去比對。
         assert_eq!(terms("剛剛那個事件"), "事件");
         assert_eq!(terms("剛剛的事件"), "事件");
+    }
+
+    /// 「什麼時候」是一個詞。拆成虛字「什麼」加「時候」的話，開頭的「什麼」會被剝掉，
+    /// 放寬就認不出他在問時間。單獨的「什麼」照舊是虛字。
+    #[test]
+    fn a_when_ask_is_one_word_not_filler_plus_time() {
+        assert_eq!(terms("什麼時候看到部署失敗"), "什麼時候看到部署失敗");
+        assert_eq!(terms("甚麼時候看到部署失敗"), "甚麼時候看到部署失敗");
+        assert_eq!(terms("什麼部署失敗"), "部署失敗");
+        assert_eq!(terms("甚麼部署失敗"), "部署失敗");
+    }
+
+    /// 給主題修邊用：只剝尾巴，開頭的虛字常常是詞的一部分。
+    #[test]
+    fn trimming_the_tail_leaves_the_head_alone() {
+        assert_eq!(trim_trailing_filler("客服的"), "客服");
+        assert_eq!(trim_trailing_filler("週會是"), "週會");
+        assert_eq!(trim_trailing_filler("月報的了"), "月報");
+        assert_eq!(trim_trailing_filler("到期日"), "到期日");
+        // 整段都是虛字、或剝完不足兩個字，原樣回傳
+        assert_eq!(trim_trailing_filler("看到了"), "看到了");
+        assert_eq!(trim_trailing_filler("客的"), "客的");
+        assert_eq!(trim_trailing_filler(""), "");
     }
 
     /// 整句就只有一個字的時候沒有東西可以退，照原樣送出去。
