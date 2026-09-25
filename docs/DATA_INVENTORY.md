@@ -100,7 +100,7 @@ timeout，相關設定／key／consent mutation 或 native cancel 可能等它�
 | `consent.lock` | 空的跨行程同意 transaction 鎖。CLI／desktop 的 grant／revoke 在 OS whole-file exclusive lock 內重讀最新 `consent.toml`、套當次變更再 atomic save；recorder start 先持 shared guard。CLI 那份跨到第一拍；desktop parent 那份只跨到 `Command::spawn` 回來便立即放掉，child 自己 nonblocking 重拿並跨到第一拍。symlink／non-regular path 拒絕 | Windows 的 live handle 會拒絕刪除；Unix Preview 的 advisory lock 擋不住 unlink／replace。執行中不可刪，否則不同 process 可能鎖到不同 inode；所有 AI-Sister 行程關閉後才可修復／重建 |
 | `consent-revoke.barrier` | 第一張同意撤回在 atomic save **之前**發布的獨立 durable barrier；內容是 `v1:` 加 fresh 256-bit generation。Recorder 把它視為 `consent-revoked` 停止條件，但不消費；Start 無權清。只有成功 commit 的 local-recording regrant 可用相符 generation ticket 清理，並先確保另有 durable stop intent | 刪掉可能讓失敗的 consent save 留著舊有效同意時重新開錄，也可能讓同一拍內的快速 revoke→regrant 漏掉收工。不要手動刪；損毀時 fail closed，須先關閉所有 AI-Sister 行程再修復 |
 | `pet-window.json` | 字母人視窗的位置與置頂狀態 | 下次開在右下角 |
-| `recording.beat` | `sister record` 每 5 秒蓋一次的時戳，用來告訴字母人「現在真的有人在錄」。收工的時候**不刪檔**，改寫成一塊墓碑（`0 stopped <收工時間>`） | 字母人一樣顯示「沒有人在記錄」；但「這台機器從來沒跑過 recorder」和「她剛剛才收工」會變回同一句話 |
+| `recording.beat` | `sister record` 每 5 秒蓋一次的時戳，用來告訴字母人「現在真的有人在錄」。上一拍的前景是她自己的視窗時，時戳後面多一欄 `own`。收工的時候**不刪檔**，改寫成一塊墓碑（`0 stopped <收工時間>`） | 字母人一樣顯示「沒有人在記錄」；但「這台機器從來沒跑過 recorder」和「她剛剛才收工」會變回同一句話 |
 | `recording.lock` | 空的 recorder 單一擁有者協定檔。每個 CLI／desktop recorder 在第一拍 heartbeat 前 nonblocking 取得 OS whole-file exclusive lock，整場持有；process crash／handle drop 由 OS 釋放。symlink／non-regular path 拒絕 | Windows 的 live handle 會拒絕刪除；Unix Preview 的 advisory lock 擋不住 unlink／replace。檔案本來就可持久留著，刪掉不是「解除占用」；執行中刪除反而可讓不同 process 鎖到不同 inode。所有 AI-Sister 行程關閉後才可修復／重建 |
 | `stop.request` | 尚未交給 recorder 的 durable stop latch；內容是 `desktop-quit`、`requested` 或 `consent-revoked`，舊版 `stop` 仍讀成 `requested`。獨立 revoke barrier 活著時先顯示撤回；成功 regrant 清 barrier 前若原本沒有 stop，會在這裡留下 `consent-revoked`，既有 marker 則原封保留 | 可能讓已排重試在不知使用者已停／已撤回的情況下又啟動；不要手動刪 |
 | `stop.consumed` | recorder 已收到的同一種 durable stop latch。recorder 把 pending 原子搬到這裡，不刪除意圖；內容與強度同上 | 可能讓 child 在 DB finalize 失敗、非零退出後被 watchdog 當 crash 復活；真人顯式 start 可清三種，下一個全新 opt-in login 只可在五分鐘 bounded handoff 與完整 barrier 後清 `desktop-quit`，不要手動刪 |
@@ -215,6 +215,12 @@ forward-compat 本身是對的：多寫一個欄位的新版不該讓舊版放�
 所以一個舊的 `sister.exe` 讀到 `stopped` 會說「她在錄」——這個產品唯一不能說
 的謊。時戳寫 0 之後，舊版走的是「過期」那條路，答案變回正確的「沒有人在錄」。
 真正的收工時間放在第三欄，新版讀得到，舊版看都不會看。
+
+錄製那一行的第二欄 `own`（alpha.160 起）代表上一拍的前景是她自己的視窗。她不錄
+自己，所以第一次打開她、一直待在她視窗上的人，資料庫裡一張畫面都不會有；少了這
+一欄，她空手的理由只講得出「剛開始，再等一下」或「之前的被忘掉了」，而真正的下
+一步是切到別的程式。這一欄**正是靠**那條 forward-compat：舊版讀到 `123 own`，
+讀成「123 那一刻她在錄」，一個字都沒讀錯，只是沒讀到前景是誰。
 
 `stop.request`／`stop.consumed` 和 pause 三檔是兩件事，刻意沒有合併：
 暫停是「先別看，但留在這裡」，停止是「今天到此為止」——那個行程會結束。
