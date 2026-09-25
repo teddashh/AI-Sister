@@ -2420,7 +2420,13 @@ grok 回 402、codex 沒額度，這一版也是我自己寫的。
 
 ### 28.1 alpha.159 的出貨收據
 
-（tag CI 跑完補。）
+tag `v0.1.0-alpha.159`（`1278af4`）第一次紅在 Windows：UIA 那一步 3 分鐘逾時，其餘
+五個 job 全綠。同一個 sha 在 main 上那一趟（`36164530354`）UIA 只花 44 秒；tag 那一趟
+要從頭編 `windows_uia`，光編譯就 2 分 18 秒，逾時量到的是編譯，不是測試。
+`rerun --failed` 第二次 UIA 1 分 45 秒過，Windows、Release、Website 全綠，release 於
+**2026-09-25T18:14:15Z** 發出，四個 asset、prerelease，body 前綴和本機
+`release-notes.sh` 產的一致。`32356a2` 讓 CI 先 `--no-run` 編好兩支原生擷取測試，
+3 分鐘只量測試本身。
 
 ### 28.2 怎麼知道前景是她
 
