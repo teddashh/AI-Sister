@@ -823,6 +823,12 @@ jobs:
           Get-WindowsCapability -Online -Name "Language.OCR*" |
             Where-Object State -eq Installed | Select-Object -ExpandProperty Name
 
+      # 底下兩步的 3 分鐘量的是 UIA／桌面有沒有卡住，不是編譯。tag 的快取常是冷的
+      # （版號一改 Cargo.lock 就換 key）：alpha.159 的 tag 光編譯就 2 分 18 秒，
+      # 測試跑不到一分鐘就被砍，同一個 commit 在 main 上整步 44 秒。所以先編好。
+      - name: Build the native Windows capture tests
+        run: cargo test -p sister-capture --test windows_uia --test windows_own_windows --no-run
+
       # These own synthetic WPF/Edge windows; run alone to isolate foreground state.
       - name: UIA — read WPF and Edge visible paragraphs; reject excluded text
         timeout-minutes: 3
