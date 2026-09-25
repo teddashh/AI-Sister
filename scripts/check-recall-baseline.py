@@ -404,6 +404,9 @@ if session_report is not None:
         "recall-session",
     )
 
+# 題數只寫這一次：liveness、延遲樣本和最後那一行都讀它。
+PHRASING_COUNT = 23
+
 print("▶ 用真正的 sister CLI 跑口語最小對")
 phrasing = run(CORPUS, ROOT / "scenarios/recall-phrasing.questions.json")
 if phrasing is not None:
@@ -414,14 +417,14 @@ if phrasing is not None:
     else:
         rows = at(facts, "questions") or []
         expect([at(row, "id") for row in rows],
-               [f"phrasing-{i:02}" for i in range(20)],
-               "phrasing liveness：必須實跑 20 個不同的指定題目")
+               [f"phrasing-{i:02}" for i in range(PHRASING_COUNT)],
+               f"phrasing liveness：必須實跑 {PHRASING_COUNT} 個不同的指定題目")
         for row in rows:
             label = f"phrasing.{at(row, 'id')}"
             for field in ("recalled", "answer_correct", "citation_correct"):
                 expect(at(row, field), True, f"{label}.{field}")
         latency = at(facts, "metrics", "latency")
-        expect(at(latency, "samples"), 20, "phrasing.latency.samples")
+        expect(at(latency, "samples"), PHRASING_COUNT, "phrasing.latency.samples")
         for field in ("p50_ms", "p95_ms"):
             expect_finite_nonnegative(at(latency, field), f"phrasing.latency.{field}")
 
@@ -448,5 +451,5 @@ if failed:
 
 print("✓ 3 個事件、5 題、三個產品 profile 的結果都和 baseline 一致")
 print("✓ 活動級章節 corpus：7 個事件、3 題，分數已釘")
-print("✓ 口語 20 題：facts 找回率、答案與出處全數正確，題號與延遲樣本已釘")
+print(f"✓ 口語 {PHRASING_COUNT} 題：facts 找回率、答案與出處全數正確，題號與延遲樣本已釘")
 print("✓ 延遲有樣本且都是有限非負數；沒有鎖毫秒門檻")

@@ -337,6 +337,54 @@
           }
         ]
       }
+    },
+    {
+      "id": "phrasing-20",
+      "question": "失敗的部署",
+      "source": "hand_labeled",
+      "expected": {
+        "outcome": "answer",
+        "any_of": [
+          "部署失敗"
+        ],
+        "evidence": [
+          {
+            "event_index": 1
+          }
+        ]
+      }
+    },
+    {
+      "id": "phrasing-21",
+      "question": "失敗了的部署",
+      "source": "hand_labeled",
+      "expected": {
+        "outcome": "answer",
+        "any_of": [
+          "部署失敗"
+        ],
+        "evidence": [
+          {
+            "event_index": 1
+          }
+        ]
+      }
+    },
+    {
+      "id": "phrasing-22",
+      "question": "where is the release candidate",
+      "source": "hand_labeled",
+      "expected": {
+        "outcome": "answer",
+        "any_of": [
+          "release candidate"
+        ],
+        "evidence": [
+          {
+            "event_index": 2
+          }
+        ]
+      }
     }
   ]
 }

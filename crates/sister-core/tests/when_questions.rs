@@ -405,15 +405,38 @@ fn a_head_word_that_starts_like_filler_pays_the_documented_cost() {
     }
 }
 
-/// 文件寫的還是找不到：英文的 when is 句型，is 不在問法表裡，也不是虛字。
+/// 英文的 when is 句型：is 不在問法表裡，也不是虛字，所以仍是必要條件。
+///
+/// alpha.161 這裡整條空手：改用「is the release candidate」，中間的 the 也是必要
+/// 條件，畫面寫的是「release candidate alpha is ready」。alpha.162 的切段每段再剝
+/// 虛字，the 不再是條件，那張畫面上剛好有 is，就找到了。代價照舊一半：畫面上沒有
+/// is 的（「部署失敗 ERR_DEPLOY_42」那張），一樣空手；中文「ERR_DEPLOY_42 什麼時候
+/// 發生的」找得到。
 #[test]
-fn an_english_when_is_question_pays_the_documented_cost() {
+fn an_english_when_is_question_still_needs_is_on_the_screen() {
     for (label, mut db) in both() {
         let got = ask(&mut db, "when is the release candidate");
-        assert!(got.empty, "{label}");
         assert_eq!(
             got.searched,
-            Some(SearchAdjustment::Relaxed("is the release candidate".into())),
+            relaxed_when("is release candidate"),
+            "{label}"
+        );
+        assert_eq!(
+            got.hit_texts,
+            vec!["release candidate alpha is ready".to_owned()],
+            "{label}"
+        );
+        assert!(got.raws.is_empty(), "{label}：{:?}", got.raws);
+
+        assert!(
+            !db.search("ERR_DEPLOY_42", 1).unwrap().is_empty(),
+            "前提：看過 ERR_DEPLOY_42"
+        );
+        let got = ask(&mut db, "when is ERR_DEPLOY_42");
+        assert!(got.empty, "{label}：{:?} {:?}", got.raws, got.hit_texts);
+        assert_eq!(
+            got.searched,
+            Some(SearchAdjustment::Relaxed("is ERR_DEPLOY_42".into())),
             "{label}"
         );
     }

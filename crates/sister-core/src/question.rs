@@ -394,7 +394,7 @@ fn longest(rest: &str) -> Option<(usize, Role)> {
     best
 }
 
-fn is_cjk_punct(c: char) -> bool {
+pub(crate) fn is_cjk_punct(c: char) -> bool {
     matches!(
         c,
         '，' | '。' | '？' | '！' | '、' | '；' | '：' | '「' | '」' | '（' | '）' | '…' | '　'

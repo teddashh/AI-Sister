@@ -7,7 +7,7 @@
 use anyhow::{Result, ensure};
 
 use crate::activity::Activity;
-use crate::answer::{Answer, answers_during};
+use crate::answer::{Answer, Answers, answers_during};
 use crate::db::{Db, IndexedCandidate};
 use crate::model::{Millis, SearchHit};
 use crate::question::{self, Shape};
@@ -147,13 +147,54 @@ impl SearchAdjustment {
 ///   「部設定」沒看過，不放寬；畫面上的 terms 仍是「底部設定在哪」（「到」本來
 ///   就是虛字），answers 空、hits 0。bg=1 索引把「部」拿掉，改用「設定」，
 ///   answers 空、hits 5，是不相干的原文。
-/// - `誰改了月報連結`：bg=1 改用「改了月報連結」，answers 空、hits 0。這一輪不修。
+/// - `誰改了月報連結`：bg=1 改用「改了月報連結」，answers 空、hits 0。
 ///   「誰」拿掉之後「改了」在那 24 萬字裡看過，整段留著，對不到「月報連結已更新」。
 ///   bg=0「改了」沒看過，會縮成「月報連結」並命中那一筆，answers 仍是空的。
-fn retry_candidate(db: &Db, query: &str) -> Result<Option<String>> {
+///   這一支到現在還是這樣；alpha.162 起由下一步 [`joint_retry`] 在「了」切開接住。
+fn retry_candidate(db: &Db, query: &str, peeled: &str) -> Result<Option<String>> {
     let original = question::terms(query);
-    // 傳原句，不傳 `original`。「到」「那」是虛字，先跑 terms 會把「到底」「那麼」
-    // 吃成「底」「麼」，口語開頭整段對不到。剝完再和 `original` 比。
+    let candidate = match db.indexed_candidate(peeled)? {
+        IndexedCandidate::Changed(candidate) => candidate,
+        IndexedCandidate::Unchanged => peeled.to_string(),
+        IndexedCandidate::NoneSeen | IndexedCandidate::TooLong => return Ok(None),
+    };
+    if candidate.is_empty() || candidate == original {
+        return Ok(None);
+    }
+    // `Changed` 和 `Unchanged` 都已經折成 `candidate`，兩道出口只寫一次。
+    // 切段那一步（`joint_retry`）也過同一支 `candidate_refused`。
+    if candidate_refused(&candidate) {
+        return Ok(None);
+    }
+    Ok(Some(candidate))
+}
+
+/// 空手之後要依序找的候選字。
+#[derive(Debug, PartialEq, Eq)]
+struct RelaxPlan {
+    /// [`retry_candidate`]：索引拿掉頭尾沒看過的條件。有的話先找它。
+    indexed: Option<String>,
+    /// [`joint_retry`]：`indexed` 沒有或空手才找。
+    joint: Option<String>,
+}
+
+/// 產品路徑和測試都從這裡拿放寬的候選字。`None` 就是這一題不放寬。
+fn relax_plan(db: &Db, query: &str) -> Result<Option<RelaxPlan>> {
+    let Some(peeled) = relax_base(db, query)? else {
+        return Ok(None);
+    };
+    let indexed = retry_candidate(db, query, peeled)?;
+    // 第一次查詢拿去比對的就是這一串（`question::terms_with_retreat` 的第一格）。
+    let original = question::terms(query);
+    let joint = joint_retry(peeled, &[Some(original), indexed.as_deref()]);
+    Ok(Some(RelaxPlan { indexed, joint }))
+}
+
+/// 兩步放寬共用的前提：剝完的字，和類型詞保護。`None` 就是這一題不放寬，
+/// [`retry_candidate`] 和 [`joint_retry`] 都不跑。
+fn relax_base<'q>(db: &Db, query: &'q str) -> Result<Option<&'q str>> {
+    // 傳原句，不傳 `question::terms(query)`。「到」「那」是虛字，先跑 terms 會把
+    // 「到底」「那麼」吃成「底」「麼」，口語開頭整段對不到。剝完再和它比。
     let peeled = peel_retry_terms(query);
     if peeled.is_empty() {
         return Ok(None);
@@ -164,19 +205,85 @@ fn retry_candidate(db: &Db, query: &str) -> Result<Option<String>> {
     {
         return Ok(None);
     }
-    let candidate = match db.indexed_candidate(peeled)? {
-        IndexedCandidate::Changed(candidate) => candidate,
-        IndexedCandidate::Unchanged => peeled.to_string(),
-        IndexedCandidate::NoneSeen | IndexedCandidate::TooLong => return Ok(None),
-    };
-    if candidate.is_empty() || candidate == original {
-        return Ok(None);
+    Ok(Some(peeled))
+}
+
+/// [`joint_retry`] 切段的字。空白和中文標點另外也切。
+const JOINTS: &[char] = &['的', '了'];
+
+/// 「的」「了」是詞的一部分、不是接頭的：切開會剩一個字而被丟掉。
+const JOINT_INSIDE_WORDS: &[&str] = &["目的", "了解"];
+
+/// [`retry_candidate`] 也空手（或根本沒有候選字）之後的最後一步。
+///
+/// 那一步整段照原樣對。問句裡的「的」「了」是接頭，畫面上不一定有：
+/// 「誰改了月報連結」剝掉「誰」剩「改了月報連結」，畫面寫的是「月報連結已更新」；
+/// 「月報的連結」對不到「月報連結」。用過一陣子的索引裡「改了」看過，那一步
+/// 不會把它當成沒看過的頭拿掉。
+///
+/// 這一步把剝完的字在空白、中文標點和「的」「了」切開，每段再剝一次頭尾虛字，
+/// 剩下的每一段都是必要條件：「月報 連結」「更新 月報連結」。
+///
+/// - 不到兩個字的段不要：一個字的條件不是條件，是掃描（和 [`candidate_refused`]
+///   同一個理由）。「改了」的「改」只能丟掉。
+/// - 兩個字以上的段一律留著，看過沒看過都一樣。沒看過的段和別的段不可能在同一
+///   筆字裡，所以「客服 退款 專線」照舊空手；看過的段可能就是他要的那個人或那件事，
+///   丟掉就是答另一題（`indexed_noise_remains_a_required_condition`）。
+/// - [`JOINT_INSIDE_WORDS`] 裡的詞不切：「出差的目的地」是「出差 目的地」。
+///
+/// 從剝完的字切，不從上一步的候選字切。上一步會把沒看過的頭切掉一半：「會議的
+/// 密碼」在沒看過「會議」的索引上是「議的密碼」，再切就剩「議」一個字被丟掉，
+/// 等於整個主題不見。從候選字切的那一版在 58 萬字那份上量過：改用「密碼」，
+/// 拿兩筆不相干的字來湊。
+///
+/// 過 [`candidate_refused`]，和第一次查詢或上一步一樣的字不再找。空手就照舊報
+/// 上一步的候選字，這一步不出聲。
+///
+/// 探針（基準語料加「月報連結已更新」；背景三份：沒有、`common_words_relax.rs`
+/// 那 17 句、repo 中文文件 58 萬字且主題字的行排除）：
+///
+/// - 三份都從 0 筆變成找到那一張：`誰更新了月報連結`（改用「更新 月報連結」）、
+///   `月報的連結`、`月報的連結在哪`（「月報 連結」）、`where is the release candidate`
+///   和 `when is the release candidate`（「is release candidate」，後者多講記下的時間）。
+///   `誰改了月報連結`、`為了部署失敗`、`部署失敗的話怎麼辦` 以前只有 58 萬字那份空手。
+/// - 還是空手：58 萬字那份上的 `部署失敗的原因`、`上次看到的月報連結`（「原因」
+///   「上次看到」看過，是必要條件）；三份都空手的 `部署失敗的時間`、`部署失敗的期限`
+///   （類型詞）、`退款的電話`、`上次看到的連結`。英文 is 仍是條件，`when is
+///   ERR_DEPLOY_42` 空手（`when_questions.rs`）。
+///
+/// 代價：`部署失敗的目的` 改用「部署失敗」。[`question::terms`] 先把句尾的「的」
+/// 當虛字剝掉，剩「部署失敗的目」，「目」只剩一個字；另外兩份以前就是這樣答
+/// （上一步把沒看過的尾巴拿掉）。「的」「了」在別的詞裡、又不在
+/// [`JOINT_INSIDE_WORDS`] 的照切：「受不了部署失敗」去找「受不 部署失敗」。
+fn joint_retry(base: &str, tried: &[Option<&str>]) -> Option<String> {
+    let inside: Vec<std::ops::Range<usize>> = JOINT_INSIDE_WORDS
+        .iter()
+        .flat_map(|word| base.match_indices(word))
+        .map(|(at, word)| at..at + word.len())
+        .collect();
+    let mut pieces = Vec::new();
+    let mut start = 0;
+    for (at, c) in base.char_indices() {
+        let joint = JOINTS.contains(&c) && !inside.iter().any(|word| word.contains(&at));
+        if joint || c.is_whitespace() || question::is_cjk_punct(c) {
+            pieces.push(&base[start..at]);
+            start = at + c.len_utf8();
+        }
     }
-    // 兩道出口只放在這裡。`Changed` 和 `Unchanged` 都已經折成 `candidate`。
-    if candidate_refused(&candidate) {
-        return Ok(None);
+    pieces.push(&base[start..]);
+    let candidate = pieces
+        .into_iter()
+        .map(question::terms)
+        .filter(|piece| !question::only_filler(piece) && piece.chars().count() >= 2)
+        .collect::<Vec<_>>()
+        .join(" ");
+    if candidate.is_empty()
+        || tried.contains(&Some(candidate.as_str()))
+        || candidate_refused(&candidate)
+    {
+        return None;
     }
-    Ok(Some(candidate))
+    Some(candidate)
 }
 
 /// 去掉空白後不到兩個字，或只剩類型詞、沒有主題。
@@ -527,22 +634,49 @@ impl RetrievalProfile {
                 if answer_set.items.is_empty()
                     && hits.is_empty()
                     && activities.is_empty()
-                    && let Some(candidate) = retry_candidate(db, query)?
+                    && let Some(plan) = relax_plan(db, query)?
                 {
-                    terms = candidate.to_string();
-                    if self.wants_facts() {
-                        answer_set =
-                            answers_during(db, &candidate, limits.answers, range.as_ref())?;
+                    let wants_facts = self.wants_facts();
+                    let search = |db: &Db, candidate: &str| -> Result<(Answers, Vec<SearchHit>)> {
+                        let answers = if wants_facts {
+                            answers_during(db, candidate, limits.answers, range.as_ref())?
+                        } else {
+                            Default::default()
+                        };
+                        let hits =
+                            db.search_indexed_during(candidate, limits.text + 1, range.as_ref())?;
+                        Ok((answers, hits))
+                    };
+                    let has_any = |(answers, hits): &(Answers, Vec<SearchHit>)| {
+                        !answers.items.is_empty() || !hits.is_empty()
+                    };
+                    let mut relaxed = None;
+                    if let Some(candidate) = plan.indexed {
+                        let result = search(db, &candidate)?;
+                        relaxed = Some((candidate, result));
                     }
-                    hits = db.search_indexed_during(&candidate, limits.text + 1, range.as_ref())?;
-                    // 候選字裡不會再有問時間的字：`cut_question_words` 碰到就切。
-                    // 「底下每一筆的時間」只在底下有東西時講，空手就是籠統那一句。
-                    let found = !answer_set.items.is_empty() || !hits.is_empty();
-                    searched = Some(if found && crate::facts::asks_when(query) {
-                        SearchAdjustment::RelaxedWhen(terms.clone())
-                    } else {
-                        SearchAdjustment::Relaxed(terms.clone())
-                    });
+                    // 上一步找得到就不切段。切段也空手，照舊報上一步的候選字。
+                    if !relaxed.as_ref().is_some_and(|(_, result)| has_any(result))
+                        && let Some(candidate) = plan.joint
+                    {
+                        let result = search(db, &candidate)?;
+                        if has_any(&result) {
+                            relaxed = Some((candidate, result));
+                        }
+                    }
+                    if let Some((candidate, (answers, relaxed_hits))) = relaxed {
+                        terms = candidate;
+                        answer_set = answers;
+                        hits = relaxed_hits;
+                        // 候選字裡不會再有問時間的字：`cut_question_words` 碰到就切。
+                        // 「底下每一筆的時間」只在底下有東西時講，空手就是籠統那一句。
+                        let found = !answer_set.items.is_empty() || !hits.is_empty();
+                        searched = Some(if found && crate::facts::asks_when(query) {
+                            SearchAdjustment::RelaxedWhen(terms.clone())
+                        } else {
+                            SearchAdjustment::Relaxed(terms.clone())
+                        });
+                    }
                 }
                 (Some(terms), answer_set, hits)
             }
@@ -614,6 +748,60 @@ impl Retrieval {
 mod tests {
     use super::*;
     use crate::model::{FocusSnapshot, FrameCapture, OcrBlock};
+
+    /// 空手之後會依序拿去找的每一串字，兩步都算。產品路徑用的是同一個
+    /// [`relax_plan`]，這裡只是把它攤平。
+    fn tries(db: &Db, query: &str) -> Vec<String> {
+        relax_plan(db, query)
+            .unwrap()
+            .map(|plan| plan.indexed.into_iter().chain(plan.joint).collect())
+            .unwrap_or_default()
+    }
+
+    /// 切段只看字，不問資料庫。
+    #[test]
+    fn a_joint_keeps_every_piece_of_two_or_more_and_drops_single_characters() {
+        for (base, want) in [
+            ("改了月報連結", "月報連結"),
+            ("更新了月報連結", "更新 月報連結"),
+            ("月報的連結", "月報 連結"),
+            ("客服，退款的專線", "客服 退款 專線"),
+            ("is the release candidate", "is release candidate"),
+            // `question::terms` 已經把「目的」句尾的「的」剝掉了，「目」只剩一個字。
+            ("部署失敗的目", "部署失敗"),
+            // 「的」「了」在別的詞裡的照切。
+            ("受不了部署失敗", "受不 部署失敗"),
+        ] {
+            assert_eq!(joint_retry(base, &[]).as_deref(), Some(want), "{base}");
+        }
+    }
+
+    #[test]
+    fn a_word_that_holds_a_joint_is_not_split() {
+        assert_eq!(
+            joint_retry("出差的目的地", &[]).as_deref(),
+            Some("出差 目的地")
+        );
+        assert_eq!(
+            joint_retry("我想了解部署", &[]).as_deref(),
+            Some("想了解部署")
+        );
+    }
+
+    #[test]
+    fn a_joint_never_retries_what_was_tried_or_what_is_refused() {
+        // 和第一次查詢或上一步一樣。
+        assert_eq!(
+            joint_retry("客服 退款 專線", &[Some("客服 退款 專線")]),
+            None
+        );
+        assert_eq!(joint_retry("月報的連結", &[None, Some("月報 連結")]), None);
+        // 只剩類型詞。
+        assert_eq!(joint_retry("我的電話", &[]), None);
+        // 只剩一個字、或全是虛字。
+        assert_eq!(joint_retry("改了", &[]), None);
+        assert_eq!(joint_retry("是的 the", &[]), None);
+    }
 
     /// 桌面收到的就是這個形狀：`kind` 決定畫哪一句，`terms` 是實際拿去找的字。
     /// 多一種就要在 `app.js` 多一句，`check-pet-says-why.mjs` 會逐種對字。
@@ -1636,7 +1824,7 @@ mod tests {
             peeled.chars().filter(|c| !c.is_whitespace()).count() < 2,
             "只有口語開頭，剝完不該還有兩個字：「{peeled}」"
         );
-        assert_eq!(retry_candidate(&db, "所以但是可是").unwrap(), None);
+        assert_eq!(tries(&db, "所以但是可是"), Vec::<String>::new());
     }
 
     /// 「回」是索引裡的一個 token，`indexed_candidate` 回 `Unchanged`。
@@ -1655,7 +1843,7 @@ mod tests {
             IndexedCandidate::Unchanged,
             "前提：沒有出口的話，「回」會被放出去"
         );
-        assert_eq!(retry_candidate(&db, "怎麼回事").unwrap(), None);
+        assert_eq!(tries(&db, "怎麼回事"), Vec::<String>::new());
     }
 
     /// 「電話」看過，而且是類型詞、沒有主題。沒有出口就會改用「電話」。
@@ -1682,6 +1870,6 @@ mod tests {
             IndexedCandidate::Unchanged,
             "前提：沒有出口的話，「電話」會被放出去"
         );
-        assert_eq!(retry_candidate(&db, "電話怎麼打").unwrap(), None);
+        assert_eq!(tries(&db, "電話怎麼打"), Vec::<String>::new());
     }
 }
