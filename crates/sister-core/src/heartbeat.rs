@@ -67,17 +67,54 @@ pub enum Phase {
     Recording,
 }
 
-/// 蓋一次時戳。recorder 每 [`BEAT_EVERY_MS`] 呼叫一次。
+/// 她那一拍看到的前景，是不是她自己的視窗。
+///
+/// 她不錄自己（前景是她的那一拍整拍不抓），所以第一次打開她、一直待在她視窗
+/// 上的人，資料庫裡一張畫面都不會有。那時候「剛開始，再等一下」是一句假話：
+/// 等多久都一樣，要切到別的程式她才開始記。讀心跳的人靠這一格分得出這一種。
+///
+/// **`false` 不是「前景不是她」，是「沒有證據說是她」。** 只有那一拍真的問到
+/// 前景、而且認出是她，才是 `true`；暫停、鎖屏、沒問到、別的程式全部是
+/// `false`。往少講的那邊倒，理由同模組開頭。
+///
+/// newtype 而不是 `bool`：它和 `recording_now`／`booting_now` 排在同一個
+/// struct 裡，三個裸布林填錯欄位照樣編得過。
+///
+/// 序列化成裸的 `true`／`false`：字母人那一格的 JSON 和其他布林一樣。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+pub struct HerWindowInFront(pub bool);
+
+/// 錄製那一行的第二欄：那一拍前景是她自己的視窗。
+///
+/// 舊版讀到認不得的第二欄一律當成「在錄」（見 [`parse_record`]），所以多寫
+/// 這一欄不會讓舊的字母人或舊的 `sister` 讀成「沒有人在錄」。
+const OWN: &str = "own";
+
+/// 蓋一次時戳，不帶前景。錄製開頭那一拍用：她一拍都還沒跑，沒有證據。
 ///
 /// 先寫暫存檔再 rename，否則讀的人有機會讀到寫到一半的半行數字。那不會壞掉
 /// （解析失敗就當成沒在錄），但會讓字母人無緣無故閃一下。
 pub fn beat(data_dir: &Path, ts: Millis) -> Result<()> {
-    write_beat(data_dir, ts, Phase::Recording)
+    beat_seeing(data_dir, ts, HerWindowInFront(false))
+}
+
+/// 錄製中蓋一次時戳，連同上一拍的前景是不是她自己。主迴圈每
+/// [`BEAT_EVERY_MS`] 呼叫一次。見 [`HerWindowInFront`]。
+pub fn beat_seeing(data_dir: &Path, ts: Millis, front: HerWindowInFront) -> Result<()> {
+    // 前景不是她就寫一個裸數字，和舊版一模一樣——舊的心跳檔（和舊的
+    // recorder）讀起來仍然是「在錄」，那也是對的：會寫這個檔案的舊版都在主迴圈裡。
+    write_raw(
+        data_dir,
+        &match front {
+            HerWindowInFront(true) => format!("{ts} {OWN}"),
+            HerWindowInFront(false) => ts.to_string(),
+        },
+    )
 }
 
 /// 開機那一段蓋的心跳。見 [`Phase`]。
 pub fn beat_booting(data_dir: &Path, ts: Millis) -> Result<()> {
-    write_beat(data_dir, ts, Phase::Booting)
+    write_raw(data_dir, &format!("{ts} boot"))
 }
 
 /// 錄製迴圈已經停了，解釋層還在把最後一段想完。
@@ -92,18 +129,6 @@ pub fn beat_booting(data_dir: &Path, ts: Millis) -> Result<()> {
 /// 共用一個 16 秒。
 pub fn beat_thinking(data_dir: &Path, ts: Millis, until: Millis) -> Result<()> {
     write_raw(data_dir, &format!("{ts} thinking {until}"))
-}
-
-fn write_beat(data_dir: &Path, ts: Millis, phase: Phase) -> Result<()> {
-    // 錄製中就寫一個裸數字，和舊版一模一樣——舊的心跳檔（和舊的 recorder）
-    // 讀起來仍然是「在錄」，那也是對的：會寫這個檔案的舊版都在主迴圈裡。
-    write_raw(
-        data_dir,
-        &match phase {
-            Phase::Recording => ts.to_string(),
-            Phase::Booting => format!("{ts} boot"),
-        },
-    )
 }
 
 /// 收工。**乾淨結束的時候要自己講一聲**，不要留給逾時去猜——那 16 秒裡字母人
@@ -172,8 +197,9 @@ fn write_raw(data_dir: &Path, body: &str) -> Result<()> {
 /// 而過期只跟第二個有關。墓碑不會過期（她收工了就是收工了，過一年還是收工），
 /// 心跳會。
 enum Record {
-    /// 一次心跳：那個時刻她活著，而且在這個階段。
-    Beat(Millis, Phase),
+    /// 一次心跳：那個時刻她活著，而且在這個階段。開機那一段的前景一律是
+    /// `false`：她一拍都還沒跑。
+    Beat(Millis, Phase, HerWindowInFront),
     /// 錄製已停，解釋層還在想最後一段。`until` 是這一次自己寫下的上限。
     Thinking { at: Millis, until: Millis },
     /// 一塊墓碑：她收工了。`at` 是收工時間；`None` 代表寫墓碑的版本沒寫第三欄。
@@ -230,8 +256,11 @@ fn parse_record(raw: &str) -> Option<Record> {
     //
     // `stopped` 是這條規則的第一個客人，而它**不靠**這一欄被舊版讀懂——舊版
     // 讀不懂它，只會讀成 `Recording`。靠的是時戳寫 0，見 [`stop`]。
+    //
+    // `own` 是第二個客人，而它**正是靠**這一條：舊版讀到 `123 own`，讀成
+    // 「123 那一刻她在錄」，一個字都沒讀錯，只是沒讀到前景是誰。
     match fields.next() {
-        Some("boot") => Some(Record::Beat(ts, Phase::Booting)),
+        Some("boot") => Some(Record::Beat(ts, Phase::Booting, HerWindowInFront(false))),
         Some("thinking") => Some(Record::Thinking {
             at: ts,
             until: fields.next().and_then(|s| s.parse().ok())?,
@@ -239,7 +268,8 @@ fn parse_record(raw: &str) -> Option<Record> {
         Some("stopped") => Some(Record::Tombstone {
             at: fields.next().and_then(|s| s.parse().ok()),
         }),
-        _ => Some(Record::Beat(ts, Phase::Recording)),
+        Some(OWN) => Some(Record::Beat(ts, Phase::Recording, HerWindowInFront(true))),
+        _ => Some(Record::Beat(ts, Phase::Recording, HerWindowInFront(false))),
     }
 }
 
@@ -287,14 +317,20 @@ pub enum Presence {
 /// `now` 由呼叫端給，因為時間在這個 crate 裡一律是參數（測試要能演「三分鐘
 /// 前的心跳」，不能等三分鐘）。
 pub fn presence(data_dir: &Path, now: Millis) -> Presence {
+    presence_of(&read_raw(data_dir), now)
+}
+
+/// [`presence`] 的純函式那一半：同一次讀到的東西，可以再問一個問題而不必
+/// 再讀一次磁碟（[`phase_seeing`]）。
+fn presence_of(raw: &Raw, now: Millis) -> Presence {
     // 一次查找，三種答案。**不要在這裡補第二次 stat 去分辨前兩種**——那一版
     // 把「權限拿不到」餵成了 `NeverStarted`，理由寫在 [`Raw`] 上面。
-    let raw = match read_raw(data_dir) {
+    let raw = match raw {
         Raw::Missing => return Presence::NeverStarted,
         Raw::Unreadable => return Presence::Unreadable,
         Raw::Text(s) => s,
     };
-    match parse_record(&raw) {
+    match parse_record(raw) {
         // 讀到了，但看不懂（寫到一半斷電）。有人來過。
         None => Presence::Unreadable,
         Some(Record::Tombstone { at }) => Presence::Stopped { at },
@@ -308,8 +344,8 @@ pub fn presence(data_dir: &Path, now: Millis) -> Presence {
         },
         // 未來的時戳一樣算活的：使用者調過時鐘、或者兩個行程對時差了幾百毫秒，
         // 都不該被讀成「她死了」。
-        Some(Record::Beat(ts, phase)) if now - ts < STALE_AFTER_MS => Presence::Live(phase),
-        Some(Record::Beat(ts, phase)) => Presence::Stalled { at: ts, phase },
+        Some(Record::Beat(ts, phase, _)) if now - ts < STALE_AFTER_MS => Presence::Live(phase),
+        Some(Record::Beat(ts, phase, _)) => Presence::Stalled { at: ts, phase },
     }
 }
 
@@ -319,7 +355,7 @@ pub fn presence(data_dir: &Path, now: Millis) -> Presence {
 /// 心跳是幾秒前」。收工時間要用 [`presence`] 拿。
 pub fn last_beat(data_dir: &Path) -> Option<Millis> {
     match read_record(data_dir)? {
-        Record::Beat(ts, _) | Record::Thinking { at: ts, .. } => Some(ts),
+        Record::Beat(ts, _, _) | Record::Thinking { at: ts, .. } => Some(ts),
         Record::Tombstone { .. } => None,
     }
 }
@@ -336,6 +372,26 @@ pub fn phase(data_dir: &Path, now: Millis) -> Option<Phase> {
     phase_of(presence(data_dir, now))
 }
 
+/// [`phase`]，加上錄製那一行的前景（[`HerWindowInFront`]）。**同一次讀檔。**
+///
+/// 分兩次讀的話，兩次之間她可以從「前景是她」那一拍換成收工的墓碑，同一句話
+/// 的兩個前提就描述兩個不同的瞬間。前景只跟著新鮮的 `Recording` 心跳走：
+/// 開機、過期、收工、讀不懂都回不出 `true`。
+pub fn phase_seeing(data_dir: &Path, now: Millis) -> Option<(Phase, HerWindowInFront)> {
+    let raw = read_raw(data_dir);
+    let phase = phase_of(presence_of(&raw, now))?;
+    let front = match &raw {
+        Raw::Text(s) => match parse_record(s) {
+            Some(Record::Beat(_, _, front)) => front,
+            Some(Record::Thinking { .. } | Record::Tombstone { .. }) | None => {
+                HerWindowInFront(false)
+            }
+        },
+        Raw::Missing | Raw::Unreadable => HerWindowInFront(false),
+    };
+    Some((phase, front))
+}
+
 /// 一份可用來證明「健康 Recording 持續前進」的新鮮 heartbeat。
 ///
 /// [`phase`] 只回答目前是不是 live，刻意不帶時戳；supervisor 若每 200ms 重讀
@@ -345,8 +401,8 @@ pub fn phase(data_dir: &Path, now: Millis) -> Option<Phase> {
 /// 來說，它們共同代表「這次沒有新的 Recording 證據」。
 pub fn live_heartbeat(data_dir: &Path, now: Millis) -> Option<(Millis, Phase)> {
     match read_record(data_dir)? {
-        Record::Beat(at, phase) if now - at < STALE_AFTER_MS => Some((at, phase)),
-        Record::Beat(_, _) | Record::Thinking { .. } | Record::Tombstone { .. } => None,
+        Record::Beat(at, phase, _) if now - at < STALE_AFTER_MS => Some((at, phase)),
+        Record::Beat(_, _, _) | Record::Thinking { .. } | Record::Tombstone { .. } => None,
     }
 }
 
@@ -1086,5 +1142,151 @@ mod tests {
             phase: Phase::Recording
         }));
         assert!(!session_row_is_hers(Presence::Unreadable));
+    }
+
+    fn raw_line(data_dir: &Path) -> String {
+        std::fs::read_to_string(beat_path(data_dir)).expect("read beat")
+    }
+
+    /// 前景是她的那一拍，心跳多寫一欄，讀的人拿得到；不是她就和舊版一字不差。
+    #[test]
+    fn a_beat_can_say_her_own_window_was_in_front() {
+        let t = Tmp::new("own");
+        beat_seeing(&t.0, 1_000_000, HerWindowInFront(true)).expect("beat");
+        assert_eq!(raw_line(&t.0), "1000000 own");
+        assert_eq!(
+            phase_seeing(&t.0, 1_000_000),
+            Some((Phase::Recording, HerWindowInFront(true)))
+        );
+        assert!(is_recording(&t.0, 1_000_000), "多一欄不改變「她在錄」");
+        assert_eq!(
+            live_heartbeat(&t.0, 1_000_000),
+            Some((1_000_000, Phase::Recording)),
+            "watchdog 照樣認得這一拍"
+        );
+
+        beat_seeing(&t.0, 1_005_000, HerWindowInFront(false)).expect("beat");
+        assert_eq!(raw_line(&t.0), "1005000", "不是她就寫裸數字，和舊版一樣");
+        assert_eq!(
+            phase_seeing(&t.0, 1_005_000),
+            Some((Phase::Recording, HerWindowInFront(false)))
+        );
+
+        // 開頭那一拍還沒跑過任何一拍，沒有證據。
+        beat(&t.0, 1_010_000).expect("beat");
+        assert_eq!(raw_line(&t.0), "1010000");
+        assert_eq!(
+            phase_seeing(&t.0, 1_010_000),
+            Some((Phase::Recording, HerWindowInFront(false)))
+        );
+    }
+
+    /// 前景只跟著新鮮的錄製心跳走。過期、收工、想最後一段、開機、讀不懂，都不能
+    /// 再說「她上一拍看到的是自己」。
+    #[test]
+    fn her_window_in_front_only_rides_a_live_recording_beat() {
+        let t = Tmp::new("own-gone");
+        beat_seeing(&t.0, 1_000_000, HerWindowInFront(true)).expect("beat");
+        assert_eq!(phase_seeing(&t.0, 1_000_000 + STALE_AFTER_MS), None, "過期");
+
+        beat_seeing(&t.0, 2_000_000, HerWindowInFront(true)).expect("beat");
+        stop(&t.0, 2_000_001);
+        assert_eq!(phase_seeing(&t.0, 2_000_002), None, "收工");
+
+        beat_thinking(&t.0, 3_000_000, 3_100_000).expect("thinking");
+        assert_eq!(phase_seeing(&t.0, 3_000_001), None, "想最後一段");
+
+        beat_booting(&t.0, 4_000_000).expect("boot");
+        assert_eq!(
+            phase_seeing(&t.0, 4_000_000),
+            Some((Phase::Booting, HerWindowInFront(false))),
+            "開機"
+        );
+
+        std::fs::write(beat_path(&t.0), "own 5000000").expect("write");
+        assert_eq!(phase_seeing(&t.0, 5_000_000), None, "讀不懂");
+
+        let never = Tmp::new("own-never");
+        assert_eq!(phase_seeing(&never.0, 5_000_000), None, "從來沒開過");
+    }
+
+    /// `phase_seeing` 回的階段和 [`phase`] 是同一條規則，每一種心跳都一樣。
+    #[test]
+    fn phase_seeing_agrees_with_phase_on_every_line() {
+        let t = Tmp::new("own-agree");
+        let now = 1_000_000;
+        let lines = [
+            "1000000",
+            "1000000 own",
+            "1000000 boot",
+            "1000000 thinking 1100000",
+            "1000000 thinking 999999",
+            "0 stopped 999999",
+            "0 stopped",
+            "983999 own",
+            "984001 own",
+            "1000000 something-newer",
+            "",
+            "own",
+        ];
+        for line in lines {
+            std::fs::write(beat_path(&t.0), line).expect("write");
+            assert_eq!(
+                phase_seeing(&t.0, now).map(|(phase, _)| phase),
+                phase(&t.0, now),
+                "{line:?}"
+            );
+            let front = phase_seeing(&t.0, now).map(|(_, front)| front);
+            assert_eq!(
+                front == Some(HerWindowInFront(true)),
+                line.ends_with(" own") && phase(&t.0, now).is_some(),
+                "{line:?}"
+            );
+        }
+    }
+
+    /// **一個 alpha.159 的 `sister`／字母人讀到 `own` 這一欄，要照樣說她在錄。**
+    ///
+    /// 同 [`an_old_exe_reading_this_tombstone_still_says_nobody_is_recording`]：
+    /// 不寫「我相信舊版會怎樣」，把 alpha.159 的 `parse_record` 原樣抄過來跑。
+    /// 這條紅掉的時候不要改這個測試——改 [`beat_seeing`] 寫出去的那一行。
+    #[test]
+    fn an_old_exe_reading_her_window_mark_still_says_she_is_recording() {
+        // 抄來的形狀；這條只讀 `Beat` 那一臂。
+        #[allow(dead_code)]
+        enum Record {
+            Beat(Millis, Phase),
+            Thinking { at: Millis, until: Millis },
+            Tombstone { at: Option<Millis> },
+        }
+        // ↓↓↓ alpha.159 `heartbeat.rs` 的 `parse_record`，一字不改。
+        fn parse_record(raw: &str) -> Option<Record> {
+            let mut fields = raw.split_whitespace();
+            let ts: Millis = fields.next()?.parse().ok()?;
+            match fields.next() {
+                Some("boot") => Some(Record::Beat(ts, Phase::Booting)),
+                Some("thinking") => Some(Record::Thinking {
+                    at: ts,
+                    until: fields.next().and_then(|s| s.parse().ok())?,
+                }),
+                Some("stopped") => Some(Record::Tombstone {
+                    at: fields.next().and_then(|s| s.parse().ok()),
+                }),
+                _ => Some(Record::Beat(ts, Phase::Recording)),
+            }
+        }
+        // ↑↑↑
+
+        let t = Tmp::new("own-old-reader");
+        beat_seeing(&t.0, 1_000_000, HerWindowInFront(true)).expect("beat");
+        match parse_record(&raw_line(&t.0)) {
+            Some(Record::Beat(ts, phase)) => {
+                assert_eq!(ts, 1_000_000, "舊版讀到的是這一拍的時戳");
+                assert_eq!(phase, Phase::Recording, "舊版說她在錄");
+            }
+            Some(Record::Thinking { .. } | Record::Tombstone { .. }) | None => {
+                panic!("舊版把前景那一欄讀成了別的東西")
+            }
+        }
     }
 }

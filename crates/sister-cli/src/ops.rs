@@ -14767,7 +14767,10 @@ pub mod query {
         blind_lines_for(Path::new("/tmp/sister-blind-lines"), b)
     }
 
-    fn blind_lines_for(data_dir: &Path, b: &sister_core::answer::BlindSpots) -> Vec<String> {
+    pub(super) fn blind_lines_for(
+        data_dir: &Path,
+        b: &sister_core::answer::BlindSpots,
+    ) -> Vec<String> {
         let mut out = Vec::new();
         // 讀字斷掉要**單獨先問**，不能掛在 `chunks == 0` 底下。
         //
@@ -14816,6 +14819,18 @@ pub mod query {
                     "她留下了 {} 張畫面，但還沒有任何一段字——多半是才剛開始。",
                     b.frames
                 )
+            } else if b.recording_now && b.her_window_in_front.0 {
+                // 她正開著，而她上一拍看到的前景是她自己的視窗。她不錄自己，所以
+                // 底下那兩句在這裡都是假的：「剛開始，再等一下」等多久都不會成真，
+                // 「之前的被忘掉了」在第一次打開她的機器上指控一件沒發生的事——
+                // 她的視窗裡打的字、點的滑鼠照樣記節奏，`ever_stored` 因此是真的，
+                // 走到的正是那一句。
+                //
+                // 排在 `blocked` 前面：那一句講過去，這一句講現在卡在哪裡；過去的
+                // 原因照樣由底下排除／暫停那幾行接著講。
+                "她正開著，但手上一段字都沒有——她上一次看的時候，前景是她自己的視窗，\
+                 而她不錄自己。切到你要她記的程式，她才會開始記。"
+                    .to_string()
             } else if b.ever_recorded && blocked {
                 "她錄過，但那段時間一張畫面都沒留下來——底下是查得出來的原因。".to_string()
             } else if b.recording_now && !b.ever_stored {
@@ -15966,6 +15981,77 @@ pub mod query {
         }
 
         use sister_core::answer::BlindSpots;
+
+        /// **她正開著，而她上一拍看到的前景是她自己的視窗。** 她不錄自己，所以
+        /// 「剛開始，再等一下」等多久都不會成真，「之前的被忘掉了」是一句指控。
+        #[test]
+        fn looking_at_herself_names_the_way_out() {
+            use sister_core::heartbeat::HerWindowInFront;
+            // 她的視窗裡打的字照樣記節奏，所以第一次打開她、一直待在她視窗上的
+            // 機器，`ever_stored` 兩種都有：還沒碰鍵盤是 false，打過字是 true。
+            for stored in [false, true] {
+                let hers = BlindSpots {
+                    ever_recorded: true,
+                    ever_stored: stored,
+                    recording_now: true,
+                    her_window_in_front: HerWindowInFront(true),
+                    ..Default::default()
+                };
+                let lines = blind_lines(&hers).join("\n");
+                assert!(lines.contains("前景是她自己的視窗"), "{lines}");
+                assert!(
+                    lines.contains("切到你要她記的程式"),
+                    "下一步要講出來：{lines}"
+                );
+                assert!(
+                    !lines.contains("再等一下") && !lines.contains("剛開始"),
+                    "等多久都一樣：{lines}"
+                );
+                assert!(
+                    !lines.contains("忘掉") && !lines.contains("過期"),
+                    "什麼都沒被刪：{lines}"
+                );
+
+                // 對照組：同一組數字、前景不是她，句子和改之前一樣。
+                let other = BlindSpots {
+                    her_window_in_front: HerWindowInFront(false),
+                    ..hers.clone()
+                };
+                let lines = blind_lines(&other).join("\n");
+                assert!(!lines.contains("自己的視窗"), "{lines}");
+                assert!(lines.contains("剛開始"), "{lines}");
+            }
+
+            // 留過畫面的不是這一種：她記過別的程式，這時候缺的是字。
+            let framed = BlindSpots {
+                frames: 3,
+                ever_recorded: true,
+                ever_stored: true,
+                recording_now: true,
+                her_window_in_front: HerWindowInFront(true),
+                ..Default::default()
+            };
+            let lines = blind_lines(&framed).join("\n");
+            assert!(lines.contains("3 張畫面"), "{lines}");
+            assert!(!lines.contains("自己的視窗"), "{lines}");
+
+            // 以前暫停過：先講現在卡在哪裡，過去的原因照樣接在後面。
+            let paused_before = BlindSpots {
+                ever_recorded: true,
+                ever_stored: true,
+                recording_now: true,
+                her_window_in_front: HerWindowInFront(true),
+                paused_episodes: 1,
+                paused_ms: 60_000,
+                ..Default::default()
+            };
+            let lines = blind_lines(&paused_before);
+            assert!(lines[0].contains("前景是她自己的視窗"), "{lines:?}");
+            assert!(
+                lines[1..].iter().any(|line| line.contains("暫停")),
+                "{lines:?}"
+            );
+        }
 
         /// 「她錄過但現在是空的」有四種走法，而只有一種是「被刪掉了」。
         ///
@@ -26609,8 +26695,43 @@ pub mod record {
     struct RecordingBeat {
         dir: PathBuf,
         stopped: bool,
+        /// 上一拍看到的前景是不是她自己的視窗；下一次蓋心跳時一起寫出去。
+        front: sister_core::heartbeat::HerWindowInFront,
         // 欄位刻意排最後：Drop 先蓋 heartbeat 墓碑，之後 OS lease 才隨 File 關閉。
         _lease: sister_core::recorder_lease::RecorderLease,
+    }
+
+    /// 這一拍有沒有**認出**前景是她自己的視窗。
+    ///
+    /// 只有 `OwnWindow` 是。其餘的要嘛前景被認成別人（`Kept`、`Duplicate`、
+    /// `Idle`、`ContextChanged`），要嘛這一拍停在別的閘門上（暫停、全停、鎖屏、
+    /// 排除規則、問不出前景）。沒有證據就不說是她。
+    ///
+    /// **沒有 `_`**：多一種 tick 就編不過，下一個人得自己決定它算不算。
+    #[cfg(any(windows, target_os = "macos", target_os = "linux", test))]
+    fn her_window_in_front(
+        tick: &Result<sister_capture::Tick>,
+    ) -> sister_core::heartbeat::HerWindowInFront {
+        use sister_capture::Tick;
+        sister_core::heartbeat::HerWindowInFront(match tick {
+            Ok(Tick::OwnWindow) => true,
+            Ok(
+                Tick::Disabled
+                | Tick::MasterStopped
+                | Tick::MasterReleased
+                | Tick::Paused
+                | Tick::Resumed
+                | Tick::Excluded { .. }
+                | Tick::NoScreen
+                | Tick::SystemChanged
+                | Tick::SystemUnknown
+                | Tick::ContextChanged
+                | Tick::Idle
+                | Tick::Duplicate { .. }
+                | Tick::Kept { .. },
+            ) => false,
+            Err(_) => false,
+        })
     }
 
     #[cfg_attr(not(windows), allow(dead_code))]
@@ -26621,6 +26742,7 @@ pub mod record {
             Self {
                 dir: data_dir.to_path_buf(),
                 stopped: false,
+                front: sister_core::heartbeat::HerWindowInFront(false),
                 _lease: handoff.lease,
             }
         }
@@ -26632,8 +26754,14 @@ pub mod record {
             Self::take_over(data_dir, BootHandoff { lease })
         }
 
+        /// 記下這一拍看到的前景。主迴圈每一拍都叫，不論那一拍成功與否。
+        #[cfg(any(windows, target_os = "macos", target_os = "linux", test))]
+        fn saw(&mut self, tick: &Result<sister_capture::Tick>) {
+            self.front = her_window_in_front(tick);
+        }
+
         fn beat(&mut self) -> Result<()> {
-            sister_core::heartbeat::beat(&self.dir, sister_core::now_ms())
+            sister_core::heartbeat::beat_seeing(&self.dir, sister_core::now_ms(), self.front)
         }
 
         fn stop(&mut self) {
@@ -26736,6 +26864,7 @@ pub mod record {
 
             let was_paused = recorder.is_paused();
             let tick_result = recorder.tick_with_pause_probe(now, &mut pause_probe);
+            recording_beat.saw(&tick_result);
             match (was_paused, recorder.is_paused()) {
                 (false, true) => println!("  ⏸ 已暫停——她不看了，直到你解除。"),
                 (true, false) => println!("  ▶ 已解除暫停。"),
@@ -28523,7 +28652,7 @@ pub mod record {
             FootprintMeasured, ImageBudgetBytes, LiveAfterTick, LiveLoopControl, RecordingBeat,
             StartMode, StoringImages, TickCounts, WantsImages, already_recording, bytes_per_day_at,
             external_stop_control, external_stop_message, finalize_live_recording,
-            footprint_context, footprint_lines, ocr_off_words, ocr_work_line,
+            footprint_context, footprint_lines, her_window_in_front, ocr_off_words, ocr_work_line,
             recording_consent_stop_message, run_live_loop, should_ping_brain, skipped_tick_summary,
         };
         use crate::ops::tmp::Tmp;
@@ -28623,6 +28752,147 @@ pub mod record {
             assert!(should_ping_brain(&Tick::OwnWindow, &mut idle));
             assert!(!idle);
             assert!(!should_ping_brain(&Tick::OwnWindow, &mut idle));
+        }
+
+        /// 只有 `OwnWindow` 這一拍算「認出前景是她」。其餘每一種、連同失敗的那一拍，
+        /// 都不是證據。
+        #[test]
+        fn only_her_own_window_tick_says_she_was_in_front() {
+            use sister_capture::Tick;
+            use sister_core::heartbeat::HerWindowInFront;
+            assert_eq!(
+                her_window_in_front(&Ok(Tick::OwnWindow)),
+                HerWindowInFront(true)
+            );
+            for tick in [
+                Tick::Disabled,
+                Tick::MasterStopped,
+                Tick::MasterReleased,
+                Tick::Paused,
+                Tick::Resumed,
+                Tick::Excluded {
+                    reason: "excluded app: keepassxc".into(),
+                },
+                Tick::NoScreen,
+                Tick::SystemChanged,
+                Tick::SystemUnknown,
+                Tick::ContextChanged,
+                Tick::Idle,
+                Tick::Duplicate { run: 2 },
+                Tick::Kept {
+                    frame_id: 1,
+                    ocr_blocks: 0,
+                    facts: 0,
+                },
+            ] {
+                assert_eq!(
+                    her_window_in_front(&Ok(tick.clone())),
+                    HerWindowInFront(false),
+                    "{tick:?}"
+                );
+            }
+            assert_eq!(
+                her_window_in_front(&Err(anyhow::anyhow!("tick failed"))),
+                HerWindowInFront(false)
+            );
+        }
+
+        /// 第一次打開她、一直待在她視窗上打字的人：主迴圈每一拍記下前景是誰，
+        /// 心跳帶著它出去，`BlindSpots` 讀得回來——而那時候資料庫裡是「一張畫面、
+        /// 一段字都沒有，節奏卻有」，正是舊版說「之前的被忘掉了」的那一格。切到
+        /// 別的程式之後的下一次心跳，就不再這樣說。
+        #[test]
+        fn the_heartbeat_carries_her_window_in_front_to_blind_spots() {
+            use sister_core::heartbeat::{HerWindowInFront, Phase};
+            let dir = Tmp::new("live-runner-her-window");
+            let scenario = sister_capture::Scenario {
+                name: "her-window".into(),
+                privacy_context: ReplayPrivacyContext::Clear,
+                system_state: ReplaySystemState::Active,
+                steps: vec![
+                    sister_capture::Step {
+                        at_ms: 1_000,
+                        app: Some("sister-desktop.exe".into()),
+                        title: Some("問她".into()),
+                        text: vec!["我剛剛在幹嘛".into()],
+                        keystrokes: 6,
+                        ..Default::default()
+                    },
+                    sister_capture::Step {
+                        at_ms: 3_000,
+                        app: Some("editor.exe".into()),
+                        title: Some("notes".into()),
+                        text: vec!["一段要記的工作".into()],
+                        ..Default::default()
+                    },
+                ],
+            };
+            let mut recorder = Recorder::new(
+                ReplayBackend::new(scenario),
+                sister_core::Db::open_in_memory().expect("db"),
+                Config::default(),
+                None,
+                sister_capture::MasterStopSource::NotApplicable,
+            )
+            .expect("replay recorder");
+            let mut beat = RecordingBeat::start_for_test(&dir.0);
+
+            fn run(
+                recorder: &mut Recorder<ReplayBackend>,
+                beat: &mut RecordingBeat,
+                ticks: &[sister_core::model::Millis],
+            ) {
+                let mut ticks = ticks.iter().copied();
+                run_live_loop(
+                    recorder,
+                    beat,
+                    || match ticks.next() {
+                        Some(at) => LiveLoopControl::Tick(at),
+                        None => LiveLoopControl::Stop(sister_core::model::EndReason::Requested),
+                    },
+                    || sister_capture::PauseSignal::Recording,
+                    |_recorder, _ping_brain, beat| {
+                        beat.beat()?;
+                        Ok(LiveAfterTick::Continue)
+                    },
+                    || {},
+                )
+                .expect("live loop");
+            }
+
+            run(&mut recorder, &mut beat, &[1_000, 2_000]);
+            assert_eq!(recorder.stats().own_window, 2, "前提：兩拍都是她的視窗");
+            assert_eq!(
+                heartbeat::phase_seeing(&dir.0, sister_core::now_ms()),
+                Some((Phase::Recording, HerWindowInFront(true)))
+            );
+            let hers =
+                sister_core::answer::blind_spots(recorder.db(), &dir.0, "電話").expect("blind");
+            assert!(hers.recording_now);
+            assert_eq!(hers.her_window_in_front, HerWindowInFront(true));
+            assert_eq!((hers.frames, hers.chunks), (0, 0), "她不錄自己");
+            assert!(hers.ever_stored, "前提：她的視窗裡打的字記了節奏");
+            let said = crate::ops::query::blind_lines_for(&dir.0, &hers).join("\n");
+            assert!(said.contains("前景是她自己的視窗"), "{said}");
+            let before = crate::ops::query::blind_lines_for(
+                &dir.0,
+                &sister_core::answer::BlindSpots {
+                    her_window_in_front: HerWindowInFront(false),
+                    ..hers.clone()
+                },
+            )
+            .join("\n");
+            assert!(before.contains("被忘掉了"), "少了這一格就是這句：{before}");
+
+            run(&mut recorder, &mut beat, &[3_000]);
+            assert_eq!(recorder.stats().kept, 1, "前提：切過去的那一拍真的錄了");
+            assert_eq!(
+                heartbeat::phase_seeing(&dir.0, sister_core::now_ms()),
+                Some((Phase::Recording, HerWindowInFront(false)))
+            );
+            let other =
+                sister_core::answer::blind_spots(recorder.db(), &dir.0, "電話").expect("blind");
+            assert_eq!(other.her_window_in_front, HerWindowInFront(false));
         }
 
         fn replay_live_recorder() -> Recorder<ReplayBackend> {

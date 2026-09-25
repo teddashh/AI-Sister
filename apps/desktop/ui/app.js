@@ -5002,6 +5002,13 @@ function blindLines(blind) {
       // 走到這裡的是張數還太少的時候。三張畫面上剛好都沒有字是完全正常的事
       // ——這裡不指控 OCR。
       out.push(`（我留下了 ${blind.frames} 張畫面，但還沒有任何一段字——多半是才剛開始。）`);
+    } else if (blind.recording_now && blind.her_window_in_front) {
+      // 我正開著，而我上一拍看到的前景是我自己的視窗。我不錄自己，所以底下那兩句
+      // 在這裡都是假的：「剛開始，再等一下」等多久都不會成真；我的視窗裡打的字照樣
+      // 記節奏（ever_stored 是真的），於是走到「之前的被忘掉了或過期了」——第一次
+      // 打開我、在我這裡問第一題的人，就落在這一格。排在 blocked 前面：那一句講
+      // 過去，這一句講現在卡在哪裡。和 `blind_lines`（ops.rs）同一句話。
+      out.push("（我正開著，但手上一段字都沒有——我上一次看的時候，前景是我自己的視窗，而我不錄自己。切到你要我記的程式，我才會開始記。）");
     } else if (blind.ever_recorded && blocked) {
       out.push("（我錄過，但那段時間一張畫面都沒留下來——底下是我查得出來的原因。）");
     } else if (blind.recording_now && !blind.ever_stored) {

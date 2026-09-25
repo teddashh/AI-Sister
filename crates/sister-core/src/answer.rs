@@ -263,6 +263,17 @@ pub struct BlindSpots {
     /// 還沒開始的 recorder 說成「先看 `capture.enabled`」——而同一個資料目錄
     /// 上 `sister facts` 說的是「再等一下」。兩個指令，相反的下一步。
     pub booting_now: bool,
+    /// 她正在錄，而她上一拍看到的前景是她自己的視窗。
+    ///
+    /// 她不錄自己，所以第一次打開她、一直待在她視窗上的人，一張畫面都不會有。
+    /// 少了這一格，那時候的句子是「剛開始，再等一下」或「之前的被忘掉了」——
+    /// 前一句等多久都不會成真，後一句指控一件沒發生的事。真正的下一步是切到
+    /// 別的程式。
+    ///
+    /// 和 [`recording_now`](Self::recording_now) 同一次讀心跳；`recording_now`
+    /// 是假的時候它不會是真的。心跳每 5 秒蓋一次，所以它講的是「上一次看的
+    /// 時候」，不是「此刻」。
+    pub her_window_in_front: crate::heartbeat::HerWindowInFront,
 }
 
 impl BlindSpots {
@@ -322,10 +333,14 @@ pub fn blind_spots_during(
     let stats = db.stats()?;
     let pauses = db.pause_audit()?;
     let master_stops = db.master_stop_audit()?;
-    // **心跳只讀一次。** 底下那兩個布林是同一次讀的兩半，所以它們不可能同時
+    // **心跳只讀一次。** 底下那三格是同一次讀的三個部分，所以前兩個不可能同時
     // 為真，也不可能同時為假而其實有人在。分兩次讀的話，兩次之間她可以從
     // `Booting` 跳到 `Recording`——同一句話的兩個前提描述兩個不同的瞬間。
-    let beat = crate::heartbeat::phase(data_dir, crate::now_ms());
+    let (beat, her_window_in_front) =
+        match crate::heartbeat::phase_seeing(data_dir, crate::now_ms()) {
+            Some((phase, front)) => (Some(phase), front),
+            None => (None, crate::heartbeat::HerWindowInFront(false)),
+        };
     Ok(BlindSpots {
         chunks: stats.chunks,
         ocr_blocks: stats.ocr_blocks,
@@ -354,6 +369,7 @@ pub fn blind_spots_during(
         },
         recording_now: beat == Some(crate::heartbeat::Phase::Recording),
         booting_now: beat == Some(crate::heartbeat::Phase::Booting),
+        her_window_in_front,
     })
 }
 
@@ -774,6 +790,39 @@ mod tests {
         for b in [&cold, &hot, &booting] {
             assert!(!(b.recording_now && b.booting_now), "兩個位元不可以同時亮");
         }
+    }
+
+    /// 她正在錄，而上一拍前景是她自己的視窗：`BlindSpots` 要帶得出這一格，
+    /// 而且只在心跳真的這樣寫的時候帶。
+    #[test]
+    fn a_recorder_looking_at_herself_says_so() {
+        use crate::heartbeat::HerWindowInFront;
+        let tmp = Tmp::new("her-window");
+        let mut db = Db::open_in_memory().expect("db");
+        db.start_session("test", "0.0.1").expect("session");
+
+        crate::heartbeat::beat_seeing(&tmp.0, crate::now_ms(), HerWindowInFront(true))
+            .expect("beat");
+        let hers = blind_spots(&db, &tmp.0, "電話").expect("blind");
+        assert!(hers.recording_now);
+        assert_eq!(hers.her_window_in_front, HerWindowInFront(true));
+
+        crate::heartbeat::beat_seeing(&tmp.0, crate::now_ms(), HerWindowInFront(false))
+            .expect("beat");
+        let other = blind_spots(&db, &tmp.0, "電話").expect("blind");
+        assert!(other.recording_now);
+        assert_eq!(other.her_window_in_front, HerWindowInFront(false));
+
+        crate::heartbeat::beat_seeing(&tmp.0, crate::now_ms(), HerWindowInFront(true))
+            .expect("beat");
+        crate::heartbeat::stop(&tmp.0, crate::now_ms());
+        let stopped = blind_spots(&db, &tmp.0, "電話").expect("blind");
+        assert!(!stopped.recording_now);
+        assert_eq!(
+            stopped.her_window_in_front,
+            HerWindowInFront(false),
+            "收工了就不再說她上一拍看到自己"
+        );
     }
 
     /// 反過來：旗標在，紀錄裡卻一個字都沒有。

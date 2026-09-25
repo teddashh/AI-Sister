@@ -2838,6 +2838,10 @@ struct Blind {
     /// 少了這一格，開機那幾分鐘字母人會說「先看設定頁的『開始記錄』那一段」，
     /// 對一個什麼都還沒開始的 recorder。
     booting_now: bool,
+    /// 她正在錄，而她上一拍看到的前景是她自己的視窗——她不錄自己，要切到別的
+    /// 程式她才開始記。見
+    /// [`sister_core::answer::BlindSpots::her_window_in_front`]。
+    her_window_in_front: sister_core::heartbeat::HerWindowInFront,
 }
 
 impl From<sister_core::answer::BlindSpots> for Blind {
@@ -2863,6 +2867,7 @@ impl From<sister_core::answer::BlindSpots> for Blind {
             scan_horizon_days: blind.scan_horizon_days,
             recording_now: blind.recording_now,
             booting_now: blind.booting_now,
+            her_window_in_front: blind.her_window_in_front,
         }
     }
 }
@@ -2893,6 +2898,7 @@ mod blind_dto_tests {
             scan_horizon_days: Some(41),
             recording_now: true,
             booting_now: false,
+            her_window_in_front: sister_core::heartbeat::HerWindowInFront(true),
         });
 
         assert_eq!(
@@ -2917,6 +2923,7 @@ mod blind_dto_tests {
                 "scan_horizon_days": 41,
                 "recording_now": true,
                 "booting_now": false,
+                "her_window_in_front": true,
             })
         );
     }

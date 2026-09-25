@@ -285,6 +285,7 @@ function blind(over = {}) {
     scan_horizon_days: null,
     recording_now: false,
     booting_now: false,
+    her_window_in_front: false,
     ...over,
   };
 }
@@ -3117,6 +3118,38 @@ for (const [name, supplied] of [["null", null], ["空陣列", blind({ chunks: 10
   const p = await open({ ask_local: answer({ brain: { state: "thinking", provider: "codex" }, blind: blind() }), ask: () => new Promise(() => {}) });
   await p.type("先開口");
   check("R2.provisional 只留先開口句、不畫收合區", p.hits().querySelectorAll(".hits-why-toggle, .hits-why-lines, .hits-why-disclosure, .hits-why").length === 0 && p.hits().querySelector(".hits-empty")?.textContent === "我好像不太知道你在說什麼耶，我再認真想一下。", p.hitTexts());
+}
+
+console.log("A160. 第一次打開她、一直待在她視窗上問：空手的理由講前景是她自己");
+{
+  // 她的視窗裡打的字照樣記節奏，所以 ever_stored 兩種都會遇到；前景不是她的那一組
+  // 是對照：同樣的數字，句子和改之前一樣。
+  const HERS = "（我正開著，但手上一段字都沒有——我上一次看的時候，前景是我自己的視窗，而我不錄自己。切到你要我記的程式，我才會開始記。）";
+  for (const stored of [false, true]) {
+    for (const front of [true, false]) {
+      const p = await open({
+        ask: answer({ blind: blind({ ever_recorded: true, ever_stored: stored, recording_now: true, her_window_in_front: front }) }),
+      });
+      await p.type("我剛剛在幹嘛");
+      const reasons = p.hits().querySelectorAll(".hits-why").map((line) => line.textContent);
+      if (front) {
+        check(`A160.1 ever_stored=${stored}：只講前景是她自己這一件事`, JSON.stringify(reasons) === JSON.stringify([HERS]), reasons);
+      } else {
+        check(`A160.2 ever_stored=${stored}：前景不是她，還是那句「剛開始」`, reasons.length === 1 && reasons[0].includes("剛開始") && !reasons[0].includes("自己的視窗"), reasons);
+      }
+    }
+  }
+  // 以前暫停過：先講現在卡在哪裡，過去的原因照樣接在後面。
+  const p = await open({
+    ask: answer({ blind: blind({ ever_recorded: true, ever_stored: true, recording_now: true, her_window_in_front: true, paused_episodes: 2 }) }),
+  });
+  await p.type("我剛剛在幹嘛");
+  const reasons = p.hits().querySelectorAll(".hits-why").map((line) => line.textContent);
+  check("A160.3 暫停過的：第一句是前景，暫停那句接在後面", reasons[0] === HERS && reasons.slice(1).some((line) => line.includes("暫停")), reasons);
+  // 終端機（`sister query`）講同一件事，只差人稱。Rust 的續行先接起來再比。
+  const cli = `"${HERS.slice(1, -1).replaceAll("我", "她")}"`;
+  const ops = read(join(UI, "../../../crates/sister-cli/src/ops.rs")).replace(/\\\n\s*/gu, "");
+  check("A160.4 終端機那一句和字母人只差人稱", ops.includes(cli), cli);
 }
 
 // 這一條守的是**整支假瀏覽器看不到的那一格**：它沒有版面引擎，
