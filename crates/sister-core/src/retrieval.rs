@@ -410,8 +410,8 @@ const QUESTION_WORDS: &[&str] = &[
 /// 見 [`widen_where`]。「哪」單獨一個字也收（「去哪找」）；同一位置取最長，所以
 /// 「哪個」「哪些」照舊是 [`QUESTION_WORDS`] 的字。英文的 where 留在那張表：
 /// 這裡前後的問法都是中文。「哪個地方」整段收：只切「哪個」，「哪個地方有月報連結」
-/// 會剩「地方有月報連結」。「什麼地方」收了也到不了這裡：[`question::terms`] 先把
-/// 開頭的「什麼」當虛字剝掉。
+/// 會剩「地方有月報連結」。開頭的「什麼地方」收了也到不了這裡：[`question::terms`]
+/// 先把「什麼」當虛字剝掉。
 const WHERE_WORDS: &[&str] = &[
     "哪裡",
     "哪裏",
@@ -462,7 +462,7 @@ const WHERE_FIND_MODALS: &[&str] = &["可以", "才能", "能", "才"];
 /// 用過的索引裡看過，索引那一步分不出來，所以和「哪裡」前後的問法一樣，放寬時整段
 /// 拿掉（[`strip_looking`]）。「有沒有看到月報連結」是兩個找法，一次拿掉一個。
 ///
-/// 動詞一定要接結果：單獨的「找」「看」「查」「搜」常是名詞的第一個字（找零、看板、
+/// 單獨一個字的「找」「看」「查」「搜」不收：它們常是名詞的第一個字（找零、看板、
 /// 查核），單獨的「找」照舊交給索引。「查詢」「搜尋」「搜索」不收：「查詢結果」
 /// 「搜尋欄位」是畫面上的名詞，拿掉會剩「結果」「欄位」。「看過」「找過」「查過」
 /// 也不收：「查過期的發票」會剩「期的發票」。
@@ -999,9 +999,9 @@ fn longest_prefix(text: &str, words: &[&str]) -> Option<usize> {
 
 /// 開頭或結尾的一個找法（[`LOOK_HEADS`]、[`LOOK_TAILS`]）拿掉，回傳剩下的；沒有就
 /// `None`。開頭那一個前面、結尾那一個後面只能是虛字：「我看不到月報連結」「月報
-/// 連結不見了」。結尾那一個前面要還有內容，而且不是「哪裡」：「月報連結可以在哪裡
-/// 找到」的「找到」是「哪裡」的找法，留給 [`widen_where`]；先拿掉的話，問句頭尾那張
-/// 表會把「在哪裡」切走，留下「可以」。要在原句上認：[`question::terms`] 把「看」當
+/// 連結不見了」。結尾那一個前面不能緊接著「哪裡」：「月報連結可以在哪裡找到」的
+/// 「找到」是「哪裡」的找法，留給 [`widen_where`]；先拿掉的話，問句頭尾那張表會把
+/// 「在哪裡」切走，留下「可以」。要在原句上認：[`question::terms`] 把「看」當
 /// 虛字剝掉，「看不到月報連結」會剩「不到月報連結」。
 fn strip_looking(text: &str) -> Option<&str> {
     look_head_end(text)
@@ -1027,16 +1027,6 @@ fn look_head_end(text: &str) -> Option<usize> {
     None
 }
 
-/// `text` 的結尾是 [`WHERE_WORDS`]，或 [`WHERE_WORDS`] 後面再接一個
-/// [`WHERE_FIND_MODALS`]：「在哪裡」「在哪裡可以」。
-fn ends_with_where(text: &str) -> bool {
-    let text = match longest_suffix(text, WHERE_FIND_MODALS) {
-        Some(len) => &text[..text.len() - len],
-        None => text,
-    };
-    longest_suffix(text, WHERE_WORDS).is_some()
-}
-
 /// 結尾那一個找法開始的位置。
 fn look_tail_start(text: &str) -> Option<usize> {
     let ends = text
@@ -1052,13 +1042,13 @@ fn look_tail_start(text: &str) -> Option<usize> {
             continue;
         };
         let mut start = end - len;
-        if ends_with_where(&text[..start]) {
+        if longest_suffix(&text[..start], WHERE_WORDS).is_some() {
             return None;
         }
         while let Some(len) = longest_suffix(&text[..start], LOOK_TAIL_BEFORES) {
             start -= len;
         }
-        return (!question::only_filler(&text[..start])).then_some(start);
+        return Some(start);
     }
     None
 }
@@ -2554,6 +2544,9 @@ mod tests {
             ("月報連結看不到", "月報連結"),
             ("月報連結看得到嗎", "月報連結"),
             ("月報連結有看到嗎", "月報連結"),
+            // 上一列少了結尾的「看到」也一樣：「有」「看」「到」「嗎」全是虛字。
+            // 這一列的「沒」不是，少了「看到」會剩「月報連結沒」。
+            ("月報連結沒看到", "月報連結"),
             ("月報連結不見了", "月報連結"),
             ("月报链接不见了", "月报链接"),
             ("月報連結有沒有", "月報連結"),
@@ -2568,6 +2561,7 @@ mod tests {
             ("月報連結一直找不到", "月報連結"),
             ("月報連結還是找不到", "月報連結"),
             ("月报链接还是找不到", "月报链接"),
+            ("月報連結還是沒找到", "月報連結"),
             // 問句詞拿掉之後才露出來的。
             ("為什麼找不到月報連結", "月報連結"),
             ("怎麼沒看到月報連結", "月報連結"),
@@ -2580,6 +2574,7 @@ mod tests {
             // 只有找法，什麼都不剩。
             ("找不到", ""),
             ("有沒有", ""),
+            ("不見了", ""),
         ] {
             assert_eq!(peel_retry_terms(query), want, "{query}");
         }
