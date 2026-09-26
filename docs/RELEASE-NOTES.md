@@ -88,6 +88,47 @@ alpha.107 的 Windows login mode 是窄例外：它不在登入背景啟動時�
 最有價值的回報是：**「這條規則在我的機器上沒有生效。」**
 
 
+## v0.1.0-alpha.164
+
+**英文問句「when is ERR_DEPLOY_42」「where can I find the build log」，她答得和只打主題一樣。**
+
+英文問句詞後面的 is、can、does，以前是條件：
+
+> ERR_DEPLOY_42　　　　　　→　（直接找到）
+> when is ERR_DEPLOY_42　　→　改用「is ERR_DEPLOY_42」去找，一件事都沒有
+
+那張畫面上要剛好有 is 才找得到。問的東西她沒看過的時候更糟：用了一陣子的機器上，
+「where is the invoice」會拿掉沒看過的 invoice，改用「is the」去找，拿隨便一張寫著 is the 的
+畫面來湊。
+
+這一版放寬時，問句詞後面緊接的 is、can、does（where's、isn't 這類縮寫也一樣），和它後面的
+I、you、we、they、he、she、it 一起拿掉；of、for、in、at、by、with、from、about 和中文的「的」
+一樣切開：
+
+> when is ERR_DEPLOY_42　　　　　　→　改用「ERR_DEPLOY_42」去找
+> where can I find the build log　→　改用「build log」去找
+> the release candidate for alpha　→　改用「release candidate alpha」去找
+
+「when」和「什麼時候」一樣，多講一句「底下每一筆的時間，是我記下那一筆的時候。」
+上面這幾題，剛裝好和用了一陣子答的都一樣。原句找得到的，她不改字。
+
+問的東西她沒看過的，一件事都沒有：「where is the invoice」「where is the invoice for alpha」
+都是。直接打「invoice for alpha」也一樣；上一版會改用「alpha」或「for alpha」去找，畫面上
+剛好寫著那幾個字就拿來湊。
+
+**這樣做有代價：**
+
+- 「log in」這種片語，in 也會被切掉，改用「log」去找，給的是寫著 log 的畫面。
+- 拿掉代名詞之後只剩一個動詞的（why did it fail），在看過 fail 的機器上改用「fail」去找，
+  給的是寫著 fail 的畫面。
+
+**還是找不到的：**
+
+- 主詞後面的動詞照舊是條件。「what does ERR_DEPLOY_42 mean」「when will the release
+  candidate ship」在看過 mean、ship 的機器上，會改用「ERR_DEPLOY_42 mean」「release candidate
+  ship」去找，畫面上沒有那個字就一件事都沒有。只打主題照樣找得到。
+- 問句詞和助動詞中間夾著別的字的（how much is、where exactly is），is 照舊是條件。
+
 ## v0.1.0-alpha.163
 
 **「部署失敗的時間」「部署失敗的原因」「上次看到的月報連結」，她答得和原本的問法一樣。**
