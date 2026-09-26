@@ -1,5 +1,18 @@
 # HANDOFF — 交給下一位 agent（Codex）
 
+**2026-09-26 Phase 7 接手收據：**本分支已替 `sister watch` 加上每次命令明確指定的
+`--remote-json` 與 `--discord-webhook-env`。兩條路只共用封閉、去文字化 schema；Discord
+只准 exact webhook、不 redirect／proxy／retry，並在 physical all-stop admission/fence 內
+完成 transport。新 `sister-notify` 預設沒有 HTTP client，只有 CLI 開 `discord` feature；
+`scripts/check-no-network.sh` 已把它固定成 desktop 四條之外唯一的第五條 outbound。
+
+同一批變更新增 takeover audit：新 `sister do` run 的第一列帶 opaque Run ID 與完整 Grant
+SHA-256 ID；`sister hands runs --json` 從既有 `action-log.jsonl` 算出開始／結束／耗時、
+完整步驟、畫面驗證與摘要，並明列被 limit 隱藏的 run 與讀不懂的列。舊 log 的 ID 維持
+`null`。workspace 測試（Xvfb 需沙箱外）、fmt、clippy、Windows root／desktop cross-check、
+四張同意書、no-keylogging 與 no-network 全綠。CI 不打真 Discord；正式 webhook 的 provider
+收件仍應在 Windows artifact 上做一次人工 smoke，但這不影響本機 JSON 與 transport 邊界測試。
+
 **2026-09-21 交回 Claude 的紀錄在 [`HANDOFF-CLAUDE-2026-09-21.md`](HANDOFF-CLAUDE-2026-09-21.md)。**
 那份寫的是當天 Codex session `01a0c443` 與後續 Grok session 做到哪、main 在 `5cfd22c`、語音／用量已在 main、PDF UIA 與 diagnose 堆疊怎麼修、macOS probe 為何還沒上。下面這份仍是到 alpha.145 為止的長交接。
 

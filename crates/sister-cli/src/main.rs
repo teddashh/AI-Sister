@@ -258,6 +258,9 @@ enum HandsAction {
     Runs {
         #[arg(short, long, default_value_t = 5, value_parser = at_least_one)]
         limit: usize,
+        /// 輸出結構化 run audit JSON：ID、開始／結束／耗時、摘要與完整逐步事件。
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -525,6 +528,12 @@ enum Command {
         /// 停下來的時候發出訊號（終端機響一聲；Windows 再讓工作列那顆按鈕閃、跳一則系統通知）。
         #[arg(long)]
         notify: bool,
+        /// 每次收尾追加一列去文字化 JSON（不含問題、畫面文字、app、網址或路徑）。
+        #[arg(long, value_name = "JSONL")]
+        remote_json: Option<PathBuf>,
+        /// 從這個環境變數讀 Discord webhook；只准 discord.com，秘密不寫入設定或 log。
+        #[arg(long, value_name = "ENV")]
+        discord_webhook_env: Option<String>,
     },
 
     /// 把最近關閉的段落交給設定的 CLI，收回一張 L2 假設卡片。
@@ -893,11 +902,13 @@ fn main() -> Result<()> {
             quiet_for,
             dry_run,
             notify,
+            remote_json,
+            discord_webhook_env,
         } => {
             let every = ops::parse_span(&every)?;
             let stop_after = ops::parse_span(&stop_after)?;
             let quiet_for = quiet_for.as_deref().map(ops::parse_span).transpose()?;
-            ops::watch::run(
+            ops::watch::run_remote(
                 &data_dir,
                 &config()?,
                 &ops::watch::WatchOpts {
@@ -907,6 +918,10 @@ fn main() -> Result<()> {
                     quiet_for,
                     dry_run,
                     notify,
+                },
+                &ops::watch::RemoteWatchOpts {
+                    jsonl: remote_json,
+                    discord_webhook_env,
                 },
             )
         }
@@ -923,7 +938,7 @@ fn main() -> Result<()> {
             HandsAction::Stop => ops::hands_switch::stop(&data_dir),
             HandsAction::Resume => ops::hands_switch::resume(&data_dir),
             HandsAction::Log { limit } => ops::act::log(&data_dir, limit),
-            HandsAction::Runs { limit } => ops::act::runs(&data_dir, limit),
+            HandsAction::Runs { limit, json } => ops::act::runs(&data_dir, limit, json),
         },
         Command::Review {
             dry_run,

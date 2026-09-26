@@ -3,11 +3,15 @@
 一句話：**AI-Sister 是一個在 Windows 上安靜看著螢幕、事後答得出「我昨天在幹嘛」、
 而且每一句話都點得開證據的本機記錄器。**「本機」指的是錄下的截圖、OCR 與記憶留在
 這台機器**；腦（L2/L3）接的是使用者自己已經裝好的 CLI agent，不是內建的 HTTP
-client。desktop 只有四條具名、窄化的內建 outbound：Persona 固定素材包的使用者發起
+client。產品只有五條具名、窄化的內建 outbound：desktop 的 Persona 固定素材包使用者發起
 GET；alpha.110 預設關閉、另行同意後只替最新新答案或手動重播送正文的 Azure TTS POST；
 預設關閉的本機 BreezyVoice loopback（只連 127.0.0.1:8231 的 GET /health 與 POST /tts）；
-以及預設關閉、設定頁明確開啟後對 LimitReset 固定 status／latest 的公開看板 GET。
-它們不能擴散到 recorder／core／capture／brain／hands 或 WebView。
+預設關閉、設定頁明確開啟後對 LimitReset 固定 status／latest 的公開看板 GET；以及
+`sister watch` 該次明確指定環境變數後，由 `sister-notify[discord]` 只向
+`discord.com/api/webhooks/<id>/<token>` POST typed、去文字化的收尾報告。第五條不收
+question／畫面文字／app／網址／路徑／memory id，webhook 不進參數、設定、log 或 DB；
+全停 admission 必須活過 transport。這些能力不能擴散到 recorder／core／capture／brain／
+hands 或 WebView。
 
 先讀 `docs/PHASES.md`（路線圖，退場條件就是驗收條件）、`docs/SPEC.md`、`docs/PRODUCT.md`。
 **接手先讀 `docs/HANDOFF-CODEX.md`**（交接紀錄，含目前狀態與下一步）。
@@ -251,7 +255,7 @@ cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ./scripts/check-windows.sh          # 動到 windows/ 或 apps/desktop/ 才需要，但很便宜
-./scripts/check-no-network.sh       # 隱私：只准 desktop 的 Persona GET、Azure TTS POST、BreezyVoice loopback、LimitReset 公開看板 GET；其餘無 client/socket，WebView 無遠端來源
+./scripts/check-no-network.sh       # 隱私：只准四條 desktop outbound 與 sister-notify 的 typed Discord watch POST；其餘無 client/socket，WebView 無遠端來源
 ```
 
 CI（`.github/workflows/ci.yml`）另外還跑十幾支 `scripts/check-*.{py,mjs,sh}`，

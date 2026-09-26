@@ -27,7 +27,9 @@ pub mod url_policy;
 
 /// 權限階梯（SPEC §9.1）。
 ///
-/// `takeover` 尚未實作，因此不先放進來。
+/// Phase 7 的 bounded takeover 目前走 `SemiAction` + saved grant 的同一條窄路：
+/// `sister do --use-grant --unattended` 每一步仍重新驗 scope、期限、步數與畫面，
+/// 並留下 run audit。它沒有一組更寬的執行權限，所以不另放一個 `Takeover` 變體。
 ///
 /// **這個 enum 沒有 `Default`，而且不要替它加一個。** 字母人那一支唯一的
 /// 呼叫端寫死 [`Self::Suggest`]，因為那條路上會走到 [`execute_with`] 的只有
@@ -971,6 +973,12 @@ pub enum ActionEvent {
     Granted {
         at_ms: i64,
         grant: semi_action::Grant,
+        /// `None` 只代表舊版這一列沒有記；新版每一輪都寫。
+        #[serde(default)]
+        run_id: Option<String>,
+        /// 由完整五維 grant 算出的 SHA-256；不是 permit，也不能拿來執行。
+        #[serde(default)]
+        grant_id: Option<String>,
     },
     Proposed {
         at_ms: i64,
@@ -1014,6 +1022,30 @@ pub enum ActionEvent {
     },
 }
 
+/// 產生一輪 action audit 的關聯 ID。這不是 secret 或授權票；唯一目的只是讓同一
+/// 個 JSONL 裡的開始、步驟和摘要可以對回同一輪。PID、時刻與行程內 nonce 一起
+/// hash，避免同毫秒開兩輪長成同一個 ID。
+pub fn new_audit_run_id(started_at_ms: i64, grant_id: &str) -> String {
+    use sha2::{Digest, Sha256};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NONCE: AtomicU64 = AtomicU64::new(0);
+    let nonce = NONCE.fetch_add(1, Ordering::Relaxed);
+    let mut hasher = Sha256::new();
+    hasher.update(b"AI-Sister takeover audit run v1\0");
+    hasher.update(started_at_ms.to_le_bytes());
+    hasher.update(std::process::id().to_le_bytes());
+    hasher.update(nonce.to_le_bytes());
+    hasher.update(grant_id.as_bytes());
+    let digest = hasher.finalize();
+    let mut out = String::with_capacity(32 + "run-sha256:".len());
+    out.push_str("run-sha256:");
+    for byte in &digest[..16] {
+        use std::fmt::Write as _;
+        write!(&mut out, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    out
+}
+
 impl ActionEvent {
     /// 這一列發生在什麼時候。
     ///
@@ -1036,7 +1068,7 @@ impl ActionEvent {
 }
 
 /// 一列讀不懂的 log。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct UnreadableLine {
     /// 1-indexed，跟人看檔案時的行號一樣。
     pub line_no: usize,

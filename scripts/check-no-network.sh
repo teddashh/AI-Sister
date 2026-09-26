@@ -2,13 +2,14 @@
 #
 # PRIVACY.md 現在守的是一條**能力邊界**：
 #
-#     畫面不離機；root 預設與 recorder/core/brain/hands 沒有 HTTP client。desktop
-#     只有四個窄例外：`sister-assets[download]` 的 fixed Persona GET、
+#     畫面不離機；recorder/core/brain/hands 沒有 HTTP client。desktop 有四個窄例外：
+#     `sister-assets[download]` 的 fixed Persona GET、
 #     `sister-tts[azure]` 在現行第四張同意、enabled 設定下只替最新新答案或
 #     trusted 手動重播走 fixed Azure POST、`sister-tts[local]` 對
 #     127.0.0.1:8231 的 std TCP GET /health 與 POST /tts（無 ureq、無 proxy），
-#     以及 `sister-usage[public-status]` 在使用者明確開啟後對 LimitReset
-#     固定 status/latest 的 GET。
+#     `sister-usage[public-status]` 在使用者明確開啟後對 LimitReset 固定
+#     status/latest 的 GET。第五條在 root CLI：`sister-notify[discord]` 只在該次 `watch`
+#     明確指定環境變數後，向 exact Discord webhook POST 去文字化 typed report。
 #
 # 這支腳本讓那條界線**由 CI 保證，而不是由記性保證**。
 # 它不替使用者設定的外部 CLI 背書：簽了 cloud-reading 後，OCR 原文會交給
@@ -82,10 +83,10 @@ for manifest in "${MANIFESTS[@]}"; do
             fail=1
         fi
         if [ "$manifest" = "Cargo.toml" ]; then
-            if [ -n "$network" ]; then
-                echo "✗ sister.exe／root workspace 的相依樹出現了 HTTP client（$label）："
-                echo "$network" | sed 's/^/    /'
-                echo "  Persona／Azure／公開看板 transport 只能存在 desktop 的三個窄 feature 路徑。"
+            unexpected=$(printf '%s\n' "$network" | grep -vE '^ureq$' || true)
+            if [ -n "$unexpected" ] || ! printf '%s\n' "$network" | grep -qx 'ureq'; then
+                echo "✗ sister.exe／root workspace 的 client 集合不是唯一允許的 ureq（$label）："
+                printf '%s\n' "${network:-（沒有找到 ureq）}" | sed 's/^/    /'
                 fail=1
             fi
         else
@@ -99,12 +100,13 @@ for manifest in "${MANIFESTS[@]}"; do
     done
 done
 
-# 允許 client 不等於讓它散進整個 desktop。manifest 與 source 都要證明三條反向
+# 允許 client 不等於讓它散進整個產品。manifest 與 source 都要證明四條 desktop 反向
 # 路徑恰好是 ureq → sister-assets[download] → sister-desktop，
 # ureq → sister-tts[azure] → sister-desktop，與
-# ureq → sister-usage[public-status] → sister-desktop；core、capture、hands 與 renderer
+# ureq → sister-usage[public-status] → sister-desktop，以及一條 root CLI 路徑：
+# ureq → sister-notify[discord] → sister-cli；core、capture、brain、hands 與 renderer
 # 都拿不到 request builder。
-echo "▶ 檢查 Persona GET、Azure POST 與公開看板 GET 的 crate／feature 邊界"
+echo "▶ 檢查 Persona GET、Azure POST、公開看板 GET 與 Discord watch POST 的 crate／feature 邊界"
 grep -qF 'sister-assets = { path = "crates/sister-assets", default-features = false }' Cargo.toml || {
     echo "✗ root workspace 沒有把 sister-assets 的預設 feature 關掉"
     fail=1
@@ -115,6 +117,10 @@ grep -qF 'sister-tts = { path = "crates/sister-tts", default-features = false }'
 }
 grep -qF 'sister-usage = { path = "crates/sister-usage", default-features = false }' Cargo.toml || {
     echo "✗ root workspace 沒有把 sister-usage 的預設 feature 關掉"
+    fail=1
+}
+grep -qF 'sister-notify = { path = "crates/sister-notify", default-features = false }' Cargo.toml || {
+    echo "✗ root workspace 沒有把 sister-notify 的預設 feature 關掉"
     fail=1
 }
 grep -qF 'download = ["dep:ureq"]' crates/sister-assets/Cargo.toml || {
@@ -145,15 +151,24 @@ grep -qF 'ureq = { workspace = true, optional = true }' crates/sister-usage/Carg
     echo "✗ ureq 不再是 sister-usage 的 optional dependency"
     fail=1
 }
+grep -qF 'discord = ["dep:ureq"]' crates/sister-notify/Cargo.toml || {
+    echo "✗ sister-notify 的 discord feature 不再是唯一 ureq 開關"
+    fail=1
+}
+grep -qF 'ureq = { workspace = true, optional = true }' crates/sister-notify/Cargo.toml || {
+    echo "✗ ureq 不再是 sister-notify 的 optional dependency"
+    fail=1
+}
 ureq_manifest_lines=$(grep -rhE '^[[:space:]]*ureq[[:space:]]*=' . \
     --include='Cargo.toml' --exclude-dir=target --exclude-dir=.git | sort)
 expected_ureq_manifest_lines=$(printf '%s\n' \
     'ureq = { version = "=3.4.1", default-features = false, features = ["native-tls"] }' \
     'ureq = { workspace = true, optional = true }' \
     'ureq = { workspace = true, optional = true }' \
+    'ureq = { workspace = true, optional = true }' \
     'ureq = { workspace = true, optional = true }' | sort)
 if [ "$ureq_manifest_lines" != "$expected_ureq_manifest_lines" ]; then
-    echo "✗ ureq 的 Cargo manifest 宣告不再只有 workspace pin 與三個窄 optional dependency："
+    echo "✗ ureq 的 Cargo manifest 宣告不再只有 workspace pin 與四個窄 optional dependency："
     printf '%s\n' "${ureq_manifest_lines:-（沒有找到）}" | sed 's/^/    /'
     fail=1
 fi
@@ -169,6 +184,10 @@ grep -qF 'sister-usage = { path = "../../../crates/sister-usage", features = ["p
     echo "✗ desktop 沒有經 sister-usage[public-status] 取得公開看板 transport"
     fail=1
 }
+grep -qF 'sister-notify = { workspace = true, features = ["discord"] }' crates/sister-cli/Cargo.toml || {
+    echo "✗ sister-cli 沒有經 sister-notify[discord] 取得唯一 watch transport"
+    fail=1
+}
 
 rc=0
 ureq_source=$(grep -rnE '\bureq::' crates/ apps/ --include='*.rs') || rc=$?
@@ -177,10 +196,10 @@ if [ "$rc" -gt 1 ]; then
     fail=1
 fi
 unexpected_ureq=$(printf '%s\n' "$ureq_source" \
-    | grep -vE '^crates/sister-(assets/src/download|tts/src/native|usage/src/native)\.rs:' || true)
+    | grep -vE '^crates/sister-(assets/src/download|tts/src/native|usage/src/native|notify/src/native)\.rs:' || true)
 if [ -z "$ureq_source" ] || [ -n "$unexpected_ureq" ]; then
-    echo "✗ ureq source 不只存在於 fixed Persona GET、Azure POST 與公開看板 GET transport："
-    printf '%s\n' "${unexpected_ureq:-（兩個 transport 裡都找不到）}" | sed 's/^/    /'
+    echo "✗ ureq source 不只存在於 fixed Persona GET、Azure POST、公開看板 GET 與 Discord POST transport："
+    printf '%s\n' "${unexpected_ureq:-（四個 transport 裡都找不到）}" | sed 's/^/    /'
     fail=1
 fi
 
@@ -229,6 +248,23 @@ for target in "" "x86_64-pc-windows-msvc"; do
     expected=$(printf '%s\n' 0ureq 1sister-assets 2sister-desktop 1sister-tts 2sister-desktop 1sister-usage 2sister-desktop)
     if [ "$reverse" != "$expected" ]; then
         echo "✗ ureq 的 exact 反向相依路徑不是三個窄 crate → sister-desktop（$label）："
+        printf '%s\n' "$reverse" | sed 's/^/    /'
+        fail=1
+    fi
+done
+
+for target in "" "x86_64-pc-windows-msvc"; do
+    args=(tree --manifest-path Cargo.toml --edges normal --invert ureq --prefix depth --format '{p}')
+    label="host"
+    if [ -n "$target" ]; then
+        rustup target list --installed | grep -qx "$target" || continue
+        args+=(--target "$target")
+        label="$target"
+    fi
+    reverse=$(cargo "${args[@]}" 2>/dev/null | sed -E 's/^([0-9]+)([^ ]+).*/\1\2/')
+    expected=$(printf '%s\n' 0ureq 1sister-notify 2sister-cli)
+    if [ "$reverse" != "$expected" ]; then
+        echo "✗ root ureq 的 exact 反向相依路徑不是 sister-notify → sister-cli（$label）："
         printf '%s\n' "$reverse" | sed 's/^/    /'
         fail=1
     fi
@@ -1079,4 +1115,4 @@ if [ -n "$skipped" ]; then
     echo "⚠ 有東西沒檢查到（未安裝 target）：$skipped"
     echo "  底下這句話只涵蓋真的跑過的那幾棵樹。出貨的是 Windows 執行檔。"
 fi
-echo "✓ 未授權網路邊界成立：root 預設與 recorder/core/brain/hands 無 HTTP client，desktop 只有 fixed Persona GET、fixed Azure POST、sister-tts[local] 對 127.0.0.1:8231 的 std TCP GET /health 與 POST /tts，以及 sister-usage[public-status] 對 LimitReset 固定 status/latest GET；installer 內嵌離線 WebView2、無 updater，WebView 只准 IPC"
+echo "✓ 未授權網路邊界成立：recorder/core/brain/hands 無 HTTP client；desktop 只有 fixed Persona GET、fixed Azure POST、BreezyVoice loopback 與 fixed LimitReset GET；sister.exe 只有 sister-notify[discord] 的 typed watch POST；installer 內嵌離線 WebView2、無 updater，WebView 只准 IPC"

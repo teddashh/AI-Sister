@@ -1705,11 +1705,12 @@ Release 1.0 必做、使用者 opt-in 的產品面。主動性繼續用預算和
     她說了結論。中途出錯直接結束是第六種停下來，那一種原本一聲都不響，而它
     偏偏最需要響：他走開一小時，她第三分鐘就死了，終端機安安靜靜——
     「安靜」在這支命令裡本來就是他拿來當證據的東西。
-  - **還缺**：她仍然分不出「卡住了」和「還在想」，`--quiet-for` 只把觀察端到
-    你面前，判斷還是你下的；~~沒有系統 toast，~~**訊號只到這台機器，人離開這台
-    機器就收不到**。（alpha.99 補了系統通知那一格——但那三條通道 BEL、工作列
-    閃爍、`Shell_NotifyIconW` 全都是本機的，所以這一句剩下的那半原封不動還在。
-    要接到別台機器上得多一張同意書，那是產品決定。）
+  - 遠端收尾通報已接上：`--remote-json <JSONL>` 追加 machine-readable typed report；
+    `--discord-webhook-env <ENV>` 只從環境變數讀 exact Discord webhook，POST 同一份
+    去文字化結果。payload 沒有問題、畫面文字、app、URL、path 或 memory ID；不
+    redirect／proxy／retry，secret 不落盤。這是該次命令的明確授權，不借四張同意書。
+    全停在 POST 前與 transport 全程都守同一把 activity fence。她仍然分不出「卡住了」
+    和「還在想」；`--quiet-for` 只回報畫面沒有新文字，不把觀察冒充診斷。
 - 🔶 白名單 #1 的**後半段**（「接著推下去」）在 alpha.77 接上了：
   `sister do --unattended` 憑一張存好的票逐步跑完，不問。它要求 `--use-grant`
   （票必須是前一趟印過「已存授權書：…」的那一張，否則那個範圍從來沒有被端到
@@ -1720,6 +1721,10 @@ Release 1.0 必做、使用者 opt-in 的產品面。主動性繼續用預算和
   - 收尾那句話**不准說「問了」**：`RunConclusionRecord::Completed` 帶
     `decided_by`，「憑票決定了 N 步」和「問到你面前 N 步」是兩句話，而
     「憑票跑完零步（沒有東西可做）」和「有人在時問了零步」也是兩句。
+  - takeover audit 在每輪第一列加入 opaque Run ID 與完整五維 Grant 的 SHA-256 ID；
+    開始、結束、耗時、逐步目標／批准來源／OS 結果／畫面驗證與中止原因仍由同一份
+    `action-log.jsonl` 事件算出。`sister hands runs --json` 產出結構化交接摘要；舊列
+    沒有 ID 時保留 `null`，不補一個假的。`forget` 與既有 action-log 刪除路徑不變。
   - `ask()` 這條已補上：會問人的模式在打開資料庫前先確認 stdin
     是終端機；管子或檔案餵的「好」不再能被記成他當場按了。只看 stdin，
     因為 stdout 經 `tee` 導走時人仍看得到問題，不該擋掉這個真用法。

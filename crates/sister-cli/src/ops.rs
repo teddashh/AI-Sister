@@ -3720,9 +3720,14 @@ pub mod act {
         // 預演不寫：`--dry-run` 什麼都不會發生，寫一列「已授權」進去就等於在
         // 紀錄上留下一輪從來沒有跑過的授權。
         if !opts.dry_run {
+            let started_at_ms = clock();
+            let grant_id = grant.audit_id();
+            let run_id = sister_hands::new_audit_run_id(started_at_ms, &grant_id);
             log.append(&ActionEvent::Granted {
-                at_ms: clock(),
+                at_ms: started_at_ms,
                 grant,
+                run_id: Some(run_id),
+                grant_id: Some(grant_id),
             })?;
         }
 
@@ -4187,11 +4192,16 @@ pub mod act {
     }
 
     /// `sister hands runs`：把 action log 按 run 邊界分組後印出。
-    pub fn runs(data_dir: &Path, limit: usize) -> Result<()> {
-        runs_to(data_dir, limit, &mut std::io::stdout())
+    pub fn runs(data_dir: &Path, limit: usize, json: bool) -> Result<()> {
+        runs_to(data_dir, limit, json, &mut std::io::stdout())
     }
 
-    pub(crate) fn runs_to(data_dir: &Path, limit: usize, out: &mut impl Write) -> Result<()> {
+    pub(crate) fn runs_to(
+        data_dir: &Path,
+        limit: usize,
+        json: bool,
+        out: &mut impl Write,
+    ) -> Result<()> {
         anyhow::ensure!(
             data_dir.exists(),
             "找不到這個資料目錄：{}\n這不是「她沒有動過手」，是我們沒有看到那個目錄。",
@@ -4199,6 +4209,12 @@ pub mod act {
         );
         let log = ActionLog::in_data_dir(data_dir);
         let replay = log.replay()?;
+        if json {
+            let report = sister_hands::replay_copy::takeover_audit_trail(&replay, limit);
+            serde_json::to_writer_pretty(&mut *out, &report)?;
+            writeln!(out)?;
+            return Ok(());
+        }
         if replay.events.is_empty() && replay.unreadable.is_empty() {
             writeln!(
                 out,
@@ -8727,7 +8743,7 @@ pub mod act {
                 })
             ));
             let mut report = Vec::new();
-            runs_to(&run.dir.0, 10, &mut report).unwrap();
+            runs_to(&run.dir.0, 10, false, &mut report).unwrap();
             let report = String::from_utf8(report).unwrap();
             assert!(!report.contains('問'), "{report}");
         }
@@ -8752,7 +8768,7 @@ pub mod act {
                 })
             ));
             let mut report = Vec::new();
-            runs_to(&run.dir.0, 10, &mut report).unwrap();
+            runs_to(&run.dir.0, 10, false, &mut report).unwrap();
             assert!(String::from_utf8(report).unwrap().contains("問到你面前"));
         }
     }
@@ -8779,6 +8795,41 @@ pub mod watch {
         pub quiet_for: Option<Millis>,
         pub dry_run: bool,
         pub notify: bool,
+    }
+
+    #[derive(Debug, Clone, Default)]
+    pub struct RemoteWatchOpts {
+        pub jsonl: Option<PathBuf>,
+        pub discord_webhook_env: Option<String>,
+    }
+
+    struct RemoteRuntime {
+        jsonl: Option<PathBuf>,
+        discord: Option<sister_notify::DiscordWebhook>,
+        discord_env_name: Option<String>,
+    }
+
+    impl RemoteRuntime {
+        fn resolve(opts: &RemoteWatchOpts, dry_run: bool) -> Result<Self> {
+            let discord = if dry_run {
+                None
+            } else {
+                opts.discord_webhook_env
+                    .as_deref()
+                    .map(sister_notify::DiscordWebhook::from_env)
+                    .transpose()
+                    .context("Discord 遠端通報沒有啟用")?
+            };
+            Ok(Self {
+                jsonl: opts.jsonl.clone(),
+                discord,
+                discord_env_name: opts.discord_webhook_env.clone(),
+            })
+        }
+
+        fn requested(&self) -> bool {
+            self.jsonl.is_some() || self.discord_env_name.is_some()
+        }
     }
     /// 這一趟要不要送那一則系統通知。
     ///
@@ -9060,11 +9111,18 @@ pub mod watch {
         Ok(())
     }
 
-    pub fn run(data_dir: &Path, config: &Config, opts: &WatchOpts) -> Result<()> {
-        run_with(
+    pub fn run_remote(
+        data_dir: &Path,
+        config: &Config,
+        opts: &WatchOpts,
+        remote: &RemoteWatchOpts,
+    ) -> Result<()> {
+        let remote = RemoteRuntime::resolve(remote, opts.dry_run)?;
+        run_with_remote_runtime(
             data_dir,
             config,
             opts,
+            Some(&remote),
             &mut sister_core::now_ms,
             &mut |span| std::thread::sleep(std::time::Duration::from_millis(span as u64)),
             &mut std::io::stdout(),
@@ -9081,6 +9139,7 @@ pub mod watch {
     /// 2. **不然 Windows CI 上 `cargo test` 會真的發通知。** 走到這裡的測試有
     ///    好幾條，每一條都會 `RegisterClassW` + `Shell_NotifyIconW` + 佔住
     ///    `DWELL` 那麼久，還在跑測試的機器的通知區留下托盤圖示。
+    #[cfg(test)]
     pub(crate) fn run_with(
         data_dir: &Path,
         config: &Config,
@@ -9089,10 +9148,23 @@ pub mod watch {
         sleep: &mut dyn FnMut(Millis),
         out: &mut impl Write,
     ) -> Result<()> {
-        run_with_signal(
+        run_with_remote_runtime(data_dir, config, opts, None, clock, sleep, out)
+    }
+
+    fn run_with_remote_runtime(
+        data_dir: &Path,
+        config: &Config,
+        opts: &WatchOpts,
+        remote: Option<&RemoteRuntime>,
+        clock: &mut dyn FnMut() -> i64,
+        sleep: &mut dyn FnMut(Millis),
+        out: &mut impl Write,
+    ) -> Result<()> {
+        run_with_remote_signal(
             data_dir,
             config,
             opts,
+            remote,
             clock,
             sleep,
             out,
@@ -9111,6 +9183,7 @@ pub mod watch {
     /// 開跑前就失敗的那幾種（目錄不存在、資料庫開不起來）也會走到這裡。那時候
     /// 還沒答應過任何事，多響一聲是噪音——但他人就坐在終端機前面，因為那幾種
     /// 在第一秒就炸了。多一聲噪音，比她死得無聲無息便宜太多。
+    #[cfg(test)]
     pub(crate) fn run_with_signal(
         data_dir: &Path,
         config: &Config,
@@ -9120,7 +9193,21 @@ pub mod watch {
         out: &mut impl Write,
         signal: &mut dyn FnMut(Toast) -> SystemNotice,
     ) -> Result<()> {
-        let result = watch_body(data_dir, config, opts, clock, sleep, out, signal);
+        run_with_remote_signal(data_dir, config, opts, None, clock, sleep, out, signal)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn run_with_remote_signal(
+        data_dir: &Path,
+        config: &Config,
+        opts: &WatchOpts,
+        remote: Option<&RemoteRuntime>,
+        clock: &mut dyn FnMut() -> i64,
+        sleep: &mut dyn FnMut(Millis),
+        out: &mut impl Write,
+        signal: &mut dyn FnMut(Toast) -> SystemNotice,
+    ) -> Result<()> {
+        let result = watch_body(data_dir, config, opts, remote, clock, sleep, out, signal);
         if result.is_err() && opts.notify && !opts.dry_run {
             // **錯誤路徑不跳系統通知。**
             //
@@ -9136,10 +9223,12 @@ pub mod watch {
         result
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn watch_body(
         data_dir: &Path,
         config: &Config,
         opts: &WatchOpts,
+        remote: Option<&RemoteRuntime>,
         clock: &mut dyn FnMut() -> i64,
         sleep: &mut dyn FnMut(Millis),
         out: &mut impl Write,
@@ -9152,6 +9241,28 @@ pub mod watch {
         );
         let mut db = Db::open(&Config::db_path(data_dir))?;
         let consent = sister_core::consent::load(data_dir);
+        if let Some(remote) = remote.filter(|remote| remote.requested()) {
+            if opts.dry_run {
+                writeln!(
+                    out,
+                    "（遠端通報這一趟用不到：--dry-run 不會開始監控，也不會 POST 或寫 JSON 回報。）"
+                )?;
+            } else {
+                if let Some(path) = &remote.jsonl {
+                    writeln!(out, "收尾會追加去文字化 JSON：{}", path.display())?;
+                    writeln!(
+                        out,
+                        "這個檔案在你指定的位置；sister forget、prune 與記憶匯出不會管理它。"
+                    )?;
+                }
+                if let Some(name) = &remote.discord_env_name {
+                    writeln!(
+                        out,
+                        "收尾會 POST 到 {DISCORD_REPORT_ORIGIN}（webhook 只從環境變數 {name} 讀取，不落盤）。只送 outcome、固定狀態摘要、開始／結束／耗時、退出碼與四個計數；不送問題、畫面文字、app、網址、路徑或記憶 ID。"
+                    )?;
+                }
+            }
+        }
         // 這三句用 `WatchSkip`，**不是** `brain::SkipReason`。它們在開跑當下
         // 就結束，使用者仍坐在終端機前，所以即使有 --notify 也不發訊號。那三句是替
         // `sister interpret` 寫的，其中一句說「超過即靜默降級，只累積 L0/L1」
@@ -9540,6 +9651,72 @@ pub mod watch {
             // 久可以死掉。她盯完了，這是事實，不因為鈴聲沒響完而改變。
             let _ = notify_with(out, signal(Toast::Send));
         }
+        if let Some(remote) = remote {
+            let ended = clock();
+            let report = report_for(&end, started, ended);
+            deliver_remote_report(data_dir, remote, &report, out)?;
+        }
+        Ok(())
+    }
+
+    const DISCORD_REPORT_ORIGIN: &str = "https://discord.com";
+
+    fn report_for(end: &WatchEnd, started: i64, ended: i64) -> sister_notify::WatchReport {
+        use sister_notify::{WatchCounts, WatchOutcome, WatchReport};
+        let (outcome, tally) = match end {
+            WatchEnd::Saw { tally } => (WatchOutcome::ConditionObserved, *tally),
+            WatchEnd::Deadline { tally, .. } => (WatchOutcome::Deadline, *tally),
+            WatchEnd::BudgetRanOut { tally, .. } => (WatchOutcome::BudgetExhausted, *tally),
+            WatchEnd::WentQuiet { tally, .. } => (WatchOutcome::ScreenQuiet, *tally),
+            WatchEnd::ConsentRevoked { tally } => (WatchOutcome::ConsentRevoked, *tally),
+            WatchEnd::MasterStopped { tally } => (WatchOutcome::MasterStopped, *tally),
+        };
+        WatchReport::new(
+            outcome,
+            started,
+            ended,
+            0,
+            WatchCounts {
+                answered: tally.answered,
+                unanswered: tally.unanswered,
+                not_sent: tally.not_sent,
+                no_new_screen_text: tally.blind,
+            },
+        )
+    }
+
+    fn deliver_remote_report(
+        data_dir: &Path,
+        remote: &RemoteRuntime,
+        report: &sister_notify::WatchReport,
+        out: &mut impl Write,
+    ) -> Result<()> {
+        if let Some(path) = &remote.jsonl {
+            sister_notify::append_json_report(path, report)?;
+            writeln!(out, "已追加 JSON 回報：{}", path.display())?;
+        }
+        let Some(webhook) = &remote.discord else {
+            return Ok(());
+        };
+        if report.outcome == sister_notify::WatchOutcome::MasterStopped {
+            writeln!(out, "全停已生效；Discord 通報沒有送出。")?;
+            return Ok(());
+        }
+        let Some(admission) = sister_hands::master_stop::admit(data_dir) else {
+            writeln!(out, "全停正在生效或狀態無法確認；Discord 通報沒有送出。")?;
+            return Ok(());
+        };
+        let Some(_boundary) = admission.boundary() else {
+            writeln!(out, "全停在 POST 前生效；Discord 通報沒有送出。")?;
+            return Ok(());
+        };
+        sister_notify::DiscordClient::new()
+            .send(webhook, report)
+            .context("監控已收尾，但 Discord 通報失敗")?;
+        writeln!(
+            out,
+            "Discord 已接受去文字化通報；這只證明 provider 收下，不代表你已看到。"
+        )?;
         Ok(())
     }
 
@@ -11585,6 +11762,106 @@ pub mod watch {
             let older = said.find("marker-204-").expect("倒數第二段");
             let newest = said.find("marker-205-").expect("最新段");
             assert!(older < newest, "證據沒有由舊到新：{said}");
+        }
+
+        #[test]
+        fn remote_report_maps_each_typed_ending_without_copying_watch_text() {
+            use sister_core::watch::DeadlineLastRound;
+            use sister_notify::WatchOutcome;
+            let tally = Tally {
+                answered: 1,
+                unanswered: 2,
+                not_sent: 3,
+                blind: 4,
+            };
+            let endings = [
+                (WatchEnd::Saw { tally }, WatchOutcome::ConditionObserved),
+                (
+                    WatchEnd::Deadline {
+                        tally,
+                        last_round: DeadlineLastRound::Checked { hopeless: false },
+                    },
+                    WatchOutcome::Deadline,
+                ),
+                (
+                    WatchEnd::BudgetRanOut {
+                        tally,
+                        used: 8,
+                        limit: 8,
+                    },
+                    WatchOutcome::BudgetExhausted,
+                ),
+                (
+                    WatchEnd::WentQuiet {
+                        tally,
+                        quiet_for: 60_000,
+                        last_at: 1,
+                        last_app: Some("private-app-must-not-leave".into()),
+                    },
+                    WatchOutcome::ScreenQuiet,
+                ),
+                (
+                    WatchEnd::ConsentRevoked { tally },
+                    WatchOutcome::ConsentRevoked,
+                ),
+                (
+                    WatchEnd::MasterStopped { tally },
+                    WatchOutcome::MasterStopped,
+                ),
+            ];
+            for (end, expected) in endings {
+                let report = report_for(&end, 100, 900);
+                assert_eq!(report.outcome, expected);
+                assert_eq!(report.duration_ms, Some(800));
+                assert_eq!(report.exit_code, 0);
+                assert_eq!(report.counts.answered, 1);
+                let raw = serde_json::to_string(&report).unwrap();
+                assert!(!raw.contains("private-app-must-not-leave"), "{raw}");
+            }
+        }
+
+        #[test]
+        fn json_report_is_written_but_live_master_stop_blocks_discord_before_transport() {
+            let tmp = crate::ops::tmp::Tmp::new("watch-remote-master-stop");
+            let jsonl = tmp.0.join("remote/reports.jsonl");
+            let token = "abcdefghijklmnopqrstuvwxyz0123456789.ABC_def-ghi";
+            let remote = RemoteRuntime {
+                jsonl: Some(jsonl.clone()),
+                discord: Some(
+                    sister_notify::DiscordWebhook::parse(format!(
+                        "https://discord.com/api/webhooks/123456/{token}"
+                    ))
+                    .unwrap(),
+                ),
+                discord_env_name: Some("SISTER_TEST_WEBHOOK".into()),
+            };
+            sister_hands::master_stop::engage(&tmp.0, 500).unwrap();
+            let report = sister_notify::WatchReport::new(
+                // 刻意不是 MasterStopped outcome：這證明送出前真的重讀 physical
+                // all-stop，而不是只信迴圈收尾時那份舊結果。
+                sister_notify::WatchOutcome::Deadline,
+                100,
+                500,
+                0,
+                sister_notify::WatchCounts::default(),
+            );
+            let mut out = Vec::new();
+            deliver_remote_report(&tmp.0, &remote, &report, &mut out).unwrap();
+            let said = String::from_utf8(out).unwrap();
+            assert!(said.contains("已追加 JSON 回報"), "{said}");
+            assert!(said.contains("Discord 通報沒有送出"), "{said}");
+            assert_eq!(std::fs::read_to_string(jsonl).unwrap().lines().count(), 1);
+        }
+
+        #[test]
+        fn remote_dry_run_never_reads_the_webhook_environment() {
+            let remote = RemoteWatchOpts {
+                jsonl: None,
+                discord_webhook_env: Some("THIS_VARIABLE_IS_INTENTIONALLY_MISSING".into()),
+            };
+            let resolved = RemoteRuntime::resolve(&remote, true).unwrap();
+            assert!(resolved.discord.is_none());
+            assert!(resolved.requested());
         }
     }
 }

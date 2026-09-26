@@ -10,6 +10,7 @@
 use crate::semi_action::RunConclusion;
 use crate::{ActionEvent, ApprovedBy, ExecutionResult, Replay};
 use chrono::{Local, TimeZone};
+use serde::Serialize;
 
 /// epoch 毫秒讀成人看得懂的時刻。
 ///
@@ -27,6 +28,234 @@ pub(crate) fn at(ms: i64) -> String {
     }
 }
 
+#[cfg(test)]
+mod structured_audit_tests {
+    use super::*;
+    use crate::ActionSnapshot;
+    use crate::semi_action::{
+        ActionKind, AllowedActions, AllowedApps, App, Expiry, Grant, RunConclusionRecord,
+        ScreenField, StepLimit, TargetOnScreen, Task,
+    };
+
+    fn grant(task: &str) -> Grant {
+        Grant::new(
+            Task::new(task),
+            AllowedApps::new([App::new("terminal.exe")]),
+            AllowedActions::new([ActionKind::FocusWindow]),
+            Expiry::after_issued(1_000, 60_000),
+            StepLimit::new(3).unwrap(),
+        )
+    }
+
+    #[test]
+    fn grant_ids_are_stable_full_scope_hashes_and_run_ids_are_distinct() {
+        let first = grant("推 milestone");
+        let same = grant("推 milestone");
+        assert_eq!(first.audit_id(), same.audit_id());
+        for other in [
+            grant("整理文件"),
+            Grant::new(
+                Task::new("推 milestone"),
+                AllowedApps::new([App::new("editor.exe")]),
+                AllowedActions::new([ActionKind::FocusWindow]),
+                Expiry::after_issued(1_000, 60_000),
+                StepLimit::new(3).unwrap(),
+            ),
+            Grant::new(
+                Task::new("推 milestone"),
+                AllowedApps::new([App::new("terminal.exe")]),
+                AllowedActions::new([ActionKind::OpenFile]),
+                Expiry::after_issued(1_000, 60_000),
+                StepLimit::new(3).unwrap(),
+            ),
+            Grant::new(
+                Task::new("推 milestone"),
+                AllowedApps::new([App::new("terminal.exe")]),
+                AllowedActions::new([ActionKind::FocusWindow]),
+                Expiry::after_issued(2_000, 60_000),
+                StepLimit::new(3).unwrap(),
+            ),
+            Grant::new(
+                Task::new("推 milestone"),
+                AllowedApps::new([App::new("terminal.exe")]),
+                AllowedActions::new([ActionKind::FocusWindow]),
+                Expiry::after_issued(1_000, 60_000),
+                StepLimit::new(4).unwrap(),
+            ),
+        ] {
+            assert_ne!(first.audit_id(), other.audit_id());
+        }
+        assert!(first.audit_id().starts_with("grant-sha256:"));
+        assert!(!first.audit_id().contains("milestone"));
+
+        let a = crate::new_audit_run_id(1_234, &first.audit_id());
+        let b = crate::new_audit_run_id(1_234, &first.audit_id());
+        assert_ne!(a, b);
+        assert!(a.starts_with("run-sha256:"));
+    }
+
+    #[test]
+    fn structured_report_keeps_ids_times_steps_and_screen_verdict() {
+        let grant = grant("推 milestone");
+        let grant_id = grant.audit_id();
+        let action = ActionSnapshot::FocusWindow {
+            title: "編譯結果".into(),
+        };
+        let replay = Replay {
+            events: vec![
+                ActionEvent::Granted {
+                    at_ms: 1_000,
+                    grant,
+                    run_id: Some("run-sha256:abc".into()),
+                    grant_id: Some(grant_id.clone()),
+                },
+                ActionEvent::Proposed {
+                    at_ms: 1_100,
+                    action: action.clone(),
+                },
+                ActionEvent::Approved {
+                    at_ms: 1_200,
+                    action: action.clone(),
+                    by: Some(ApprovedBy::StandingGrant),
+                },
+                ActionEvent::Executed {
+                    at_ms: 1_300,
+                    action: action.clone(),
+                    result: ExecutionResult::Succeeded {
+                        detail: "focused".into(),
+                    },
+                },
+                ActionEvent::StepFinished {
+                    at_ms: 1_500,
+                    step_number: 1,
+                    action,
+                    evidence: Some(crate::semi_action::StepEvidence::After {
+                        frame_id: 7,
+                        frame_at_ms: 1_450,
+                        has_image: true,
+                        waited_ms: 150,
+                        target: TargetOnScreen::Matched {
+                            field: ScreenField::WindowTitle,
+                            saw: "編譯結果 — terminal".into(),
+                            wanted: "編譯結果".into(),
+                        },
+                    }),
+                },
+                ActionEvent::Concluded {
+                    at_ms: 1_900,
+                    conclusion: RunConclusionRecord::Completed {
+                        asked: Some(1),
+                        decided_by: Some(ApprovedBy::StandingGrant),
+                    },
+                },
+            ],
+            unreadable: vec![],
+        };
+
+        let reports = run_audit_reports(&replay);
+        assert_eq!(reports.len(), 1);
+        let report = &reports[0];
+        assert_eq!(report.run_id.as_deref(), Some("run-sha256:abc"));
+        assert_eq!(report.grant_id.as_deref(), Some(grant_id.as_str()));
+        assert_eq!(report.started_at_ms, Some(1_000));
+        assert_eq!(report.ended_at_ms, Some(1_900));
+        assert_eq!(report.duration_ms, Some(900));
+        assert!(report.complete);
+        assert_eq!(report.summary.steps, 1);
+        assert_eq!(report.summary.approved_by_grant, 1);
+        assert_eq!(report.summary.succeeded, 1);
+        assert_eq!(report.summary.screen_matched, 1);
+        assert_eq!(report.summary.screen_mismatched, 0);
+        assert_eq!(report.events.len(), 6);
+    }
+
+    #[test]
+    fn legacy_grant_row_is_readable_but_does_not_invent_ids() {
+        let raw = serde_json::to_string(&grant("舊任務")).unwrap();
+        let event: ActionEvent = serde_json::from_str(&format!(
+            r#"{{"event":"granted","at_ms":1000,"grant":{raw}}}"#
+        ))
+        .unwrap();
+        let replay = Replay {
+            events: vec![event],
+            unreadable: vec![],
+        };
+        let report = run_audit_reports(&replay).pop().unwrap();
+        assert_eq!(report.run_id, None);
+        assert_eq!(report.grant_id, None);
+        assert_eq!(report.started_at_ms, Some(1_000));
+        assert_eq!(report.ended_at_ms, None);
+        assert!(!report.complete);
+    }
+
+    #[test]
+    fn audit_trail_reports_hidden_runs_and_unreadable_lines() {
+        let replay = Replay {
+            events: vec![
+                ActionEvent::Granted {
+                    at_ms: 1_000,
+                    grant: grant("第一輪"),
+                    run_id: Some("run-sha256:first".into()),
+                    grant_id: Some("grant-sha256:first".into()),
+                },
+                ActionEvent::Concluded {
+                    at_ms: 1_100,
+                    conclusion: RunConclusionRecord::Completed {
+                        asked: Some(0),
+                        decided_by: Some(ApprovedBy::StandingGrant),
+                    },
+                },
+                ActionEvent::Granted {
+                    at_ms: 2_000,
+                    grant: grant("第二輪"),
+                    run_id: Some("run-sha256:second".into()),
+                    grant_id: Some("grant-sha256:second".into()),
+                },
+            ],
+            unreadable: vec![crate::UnreadableLine {
+                line_no: 4,
+                why: "broken json".into(),
+            }],
+        };
+        let report = takeover_audit_trail(&replay, 1);
+        assert_eq!(report.hidden_earlier_runs, 1);
+        assert_eq!(report.runs.len(), 1);
+        assert_eq!(report.runs[0].run_id.as_deref(), Some("run-sha256:second"));
+        assert_eq!(report.unreadable[0].line_no, 4);
+    }
+
+    #[test]
+    fn a_physical_hands_stop_is_a_complete_audited_abort() {
+        let replay = Replay {
+            events: vec![
+                ActionEvent::Granted {
+                    at_ms: 1_000,
+                    grant: grant("接手"),
+                    run_id: Some("run-sha256:stopped".into()),
+                    grant_id: Some("grant-sha256:stopped".into()),
+                },
+                ActionEvent::Aborted {
+                    at_ms: 1_250,
+                    after_completed_steps: 0,
+                    by: crate::semi_action::AbortActor::HandsPulled,
+                },
+            ],
+            unreadable: vec![],
+        };
+        let report = run_audit_reports(&replay).pop().unwrap();
+        assert!(report.complete);
+        assert_eq!(report.ended_at_ms, Some(1_250));
+        assert_eq!(report.duration_ms, Some(250));
+        assert!(matches!(
+            report.events.last(),
+            Some(ActionEvent::Aborted {
+                by: crate::semi_action::AbortActor::HandsPulled,
+                ..
+            })
+        ));
+    }
+}
+
 /// 一列一句話，而且**每一句都自己讀得懂**：時刻、動作、結果。
 ///
 /// 讀不懂的那幾列也要出現。安靜地跳過壞掉的列，等於讓一個「她做過但我們解不開」
@@ -36,7 +265,7 @@ pub fn replay_lines(replay: &Replay) -> Vec<String> {
         .events
         .iter()
         .map(|event| match event {
-            ActionEvent::Granted { at_ms, grant } => {
+            ActionEvent::Granted { at_ms, grant, .. } => {
                 format!("{} 授權：{}", at(*at_ms), grant.describe())
             }
             ActionEvent::Proposed { at_ms, action } => {
@@ -166,25 +395,7 @@ pub fn recent_replay_lines(replay: &Replay, shown: usize) -> Vec<String> {
 /// CI 不會執行那裡的單元測試，run 邊界、批准來源和收尾文案若只在那裡測，綠燈
 /// 並沒有證明這份稽核報告真的分得對輪。CLI 只負責讀檔和印出這裡的結果。
 pub fn recent_run_report_lines(replay: &Replay, shown: usize) -> Vec<String> {
-    let mut runs: Vec<Vec<&ActionEvent>> = Vec::new();
-    let mut current: Vec<&ActionEvent> = Vec::new();
-
-    for event in &replay.events {
-        if matches!(event, ActionEvent::Granted { .. }) && !current.is_empty() {
-            runs.push(std::mem::take(&mut current));
-        }
-        current.push(event);
-        if matches!(
-            event,
-            ActionEvent::Concluded { .. } | ActionEvent::Aborted { .. }
-        ) {
-            runs.push(std::mem::take(&mut current));
-        }
-    }
-    if !current.is_empty() {
-        runs.push(current);
-    }
-
+    let runs = split_runs(&replay.events);
     let hidden = runs.len().saturating_sub(shown);
     let mut lines = Vec::new();
     if hidden > 0 {
@@ -208,11 +419,23 @@ pub fn recent_run_report_lines(replay: &Replay, shown: usize) -> Vec<String> {
 fn run_report_lines(run_number: usize, events: &[&ActionEvent]) -> Vec<String> {
     let mut lines = vec![format!("── 第 {run_number} 輪 ──")];
     match events.first() {
-        Some(ActionEvent::Granted { at_ms, grant }) => lines.push(format!(
-            "開頭：{}；這一輪授權：{}",
-            at(*at_ms),
-            grant.describe()
-        )),
+        Some(ActionEvent::Granted {
+            at_ms,
+            grant,
+            run_id,
+            grant_id,
+        }) => {
+            lines.push(format!(
+                "開頭：{}；這一輪授權：{}",
+                at(*at_ms),
+                grant.describe()
+            ));
+            lines.push(format!(
+                "審計 ID：run={}；grant={}",
+                run_id.as_deref().unwrap_or("舊版沒有記"),
+                grant_id.as_deref().unwrap_or("舊版沒有記")
+            ));
+        }
         // **不可以寫成「開頭不在紀錄裡」。** 那句話斷言有一個開頭、而它不見了，
         // 於是讀的人會去找是誰把它裁掉的。但字母人上那顆按鈕（`Level::Suggest`）
         // 走的根本不是授權書那條路——它從來沒有過開頭。「被裁掉了」和「這條路
@@ -340,6 +563,163 @@ fn run_report_lines(run_number: usize, events: &[&ActionEvent]) -> Vec<String> {
         lines.push("收尾：這一輪的紀錄到這裡就沒有了。".to_string());
     }
     lines
+}
+
+/// 給交接還原與機器讀取的每輪審計摘要。完整的逐步目標、批准來源、執行結果與
+/// 畫面驗證仍保留在 `events`；summary 只計數，不另抄一份可能分家的敘事。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RunAuditReport {
+    pub schema_version: u32,
+    pub run_id: Option<String>,
+    pub grant_id: Option<String>,
+    pub started_at_ms: Option<i64>,
+    pub ended_at_ms: Option<i64>,
+    pub duration_ms: Option<u64>,
+    pub complete: bool,
+    pub summary: RunAuditSummary,
+    pub events: Vec<ActionEvent>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub struct RunAuditSummary {
+    /// `Proposed` 開一步；沒有 `Proposed` 的舊／desktop 路徑由 `Approved` 開一步。
+    pub steps: usize,
+    pub approved_by_press: usize,
+    pub approved_by_grant: usize,
+    pub approved_by_unknown_legacy: usize,
+    pub succeeded: usize,
+    pub failed: usize,
+    pub refused: usize,
+    pub screen_matched: usize,
+    pub screen_mismatched: usize,
+    pub screen_inconclusive: usize,
+}
+
+/// `hands runs --json` 的最外層收據。截斷與讀不懂的列都必須出現在同一份 JSON，
+/// 不能讓一份不完整的 audit 看起來像完整。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct TakeoverAuditTrail {
+    pub schema_version: u32,
+    pub hidden_earlier_runs: usize,
+    pub runs: Vec<RunAuditReport>,
+    pub unreadable: Vec<crate::UnreadableLine>,
+}
+
+pub fn takeover_audit_trail(replay: &Replay, shown: usize) -> TakeoverAuditTrail {
+    let reports = run_audit_reports(replay);
+    let hidden_earlier_runs = reports.len().saturating_sub(shown);
+    TakeoverAuditTrail {
+        schema_version: 1,
+        hidden_earlier_runs,
+        runs: reports.into_iter().skip(hidden_earlier_runs).collect(),
+        unreadable: replay.unreadable.clone(),
+    }
+}
+
+pub fn run_audit_reports(replay: &Replay) -> Vec<RunAuditReport> {
+    split_runs(&replay.events)
+        .into_iter()
+        .map(run_audit_report)
+        .collect()
+}
+
+fn split_runs(events: &[ActionEvent]) -> Vec<Vec<&ActionEvent>> {
+    let mut runs = Vec::new();
+    let mut current = Vec::new();
+    for event in events {
+        if matches!(event, ActionEvent::Granted { .. }) && !current.is_empty() {
+            runs.push(std::mem::take(&mut current));
+        }
+        current.push(event);
+        if matches!(
+            event,
+            ActionEvent::Concluded { .. } | ActionEvent::Aborted { .. }
+        ) {
+            runs.push(std::mem::take(&mut current));
+        }
+    }
+    if !current.is_empty() {
+        runs.push(current);
+    }
+    runs
+}
+
+fn run_audit_report(events: Vec<&ActionEvent>) -> RunAuditReport {
+    use crate::semi_action::{StepEvidence, TargetOnScreen};
+    let (run_id, grant_id, started_at_ms) = match events.first() {
+        Some(ActionEvent::Granted {
+            at_ms,
+            run_id,
+            grant_id,
+            ..
+        }) => (run_id.clone(), grant_id.clone(), Some(*at_ms)),
+        Some(first) => (None, None, Some(first.at_ms())),
+        None => (None, None, None),
+    };
+    let complete = matches!(
+        events.last(),
+        Some(ActionEvent::Concluded { .. } | ActionEvent::Aborted { .. })
+    );
+    let ended_at_ms = complete.then(|| events.last().expect("complete run has an end").at_ms());
+    let duration_ms = started_at_ms
+        .zip(ended_at_ms)
+        .and_then(|(start, end)| end.checked_sub(start))
+        .and_then(|span| u64::try_from(span).ok());
+    let mut summary = RunAuditSummary::default();
+    let mut previous_was_proposed = false;
+    for event in &events {
+        if matches!(event, ActionEvent::Proposed { .. })
+            || matches!(event, ActionEvent::Approved { .. }) && !previous_was_proposed
+        {
+            summary.steps += 1;
+        }
+        previous_was_proposed = matches!(event, ActionEvent::Proposed { .. });
+        match event {
+            ActionEvent::Granted { .. }
+            | ActionEvent::Aborted { .. }
+            | ActionEvent::Concluded { .. } => {}
+            ActionEvent::Proposed { .. } => {}
+            ActionEvent::Approved { by, .. } => match by {
+                Some(ApprovedBy::Press) => summary.approved_by_press += 1,
+                Some(ApprovedBy::StandingGrant) => summary.approved_by_grant += 1,
+                None => summary.approved_by_unknown_legacy += 1,
+            },
+            ActionEvent::Executed { result, .. } => match result {
+                ExecutionResult::Succeeded { .. } => summary.succeeded += 1,
+                ExecutionResult::Failed { .. } => summary.failed += 1,
+            },
+            ActionEvent::Refused { .. } => summary.refused += 1,
+            ActionEvent::StepFinished { evidence, .. } => match evidence {
+                Some(StepEvidence::After {
+                    target: TargetOnScreen::Matched { .. },
+                    ..
+                }) => summary.screen_matched += 1,
+                Some(StepEvidence::After {
+                    target: TargetOnScreen::Mismatched { .. },
+                    ..
+                }) => summary.screen_mismatched += 1,
+                Some(StepEvidence::After {
+                    target: TargetOnScreen::CannotTell { .. },
+                    ..
+                })
+                | Some(StepEvidence::Before { .. })
+                | Some(StepEvidence::NotRecording { .. })
+                | Some(StepEvidence::NoFrameNearby { .. })
+                | None => summary.screen_inconclusive += 1,
+            },
+        }
+    }
+    RunAuditReport {
+        schema_version: 1,
+        run_id,
+        grant_id,
+        started_at_ms,
+        ended_at_ms,
+        duration_ms,
+        complete,
+        summary,
+        events: events.into_iter().cloned().collect(),
+    }
 }
 
 #[cfg(test)]
@@ -909,6 +1289,8 @@ mod tests {
                 ActionEvent::Granted {
                     at_ms: 1,
                     grant: grant("編號"),
+                    run_id: None,
+                    grant_id: None,
                 },
                 proposed(2, "https://refused"),
                 ActionEvent::Refused {
@@ -948,11 +1330,15 @@ mod tests {
                 ActionEvent::Granted {
                     at_ms: 1,
                     grant: grant("第一輪"),
+                    run_id: None,
+                    grant_id: None,
                 },
                 proposed(2, "https://first"),
                 ActionEvent::Granted {
                     at_ms: 4,
                     grant: grant("第二輪"),
+                    run_id: None,
+                    grant_id: None,
                 },
                 proposed(5, "https://second"),
                 ActionEvent::Concluded {
@@ -977,6 +1363,8 @@ mod tests {
                 ActionEvent::Granted {
                     at_ms: 1,
                     grant: grant("未收尾"),
+                    run_id: None,
+                    grant_id: None,
                 },
                 proposed(2, "https://a"),
             ],
@@ -1123,6 +1511,8 @@ mod tests {
             events.push(ActionEvent::Granted {
                 at_ms: n * 10,
                 grant: grant(&format!("第{n}輪")),
+                run_id: None,
+                grant_id: None,
             });
             events.push(proposed(n * 10 + 1, &format!("https://run-{n}")));
             events.push(ActionEvent::Concluded {
