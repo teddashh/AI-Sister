@@ -365,6 +365,8 @@ fn yao_before_qu_leans_on_the_index() {
         let got = ask(&mut db, "月報連結該去哪裡找");
         assert_eq!(got.searched, relaxed("月報連結"), "{label}");
         assert!(got.hits.contains("月報連結已更新"), "{label}：{}", got.hits);
+        let got = clean(&mut db, "月報連結");
+        assert!(got.hits.contains("月報連結已更新"), "{label}：{}", got.hits);
     }
 }
 
