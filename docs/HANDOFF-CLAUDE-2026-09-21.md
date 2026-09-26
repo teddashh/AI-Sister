@@ -3198,3 +3198,140 @@ prerelease，body 前綴和本機 `release-notes.sh` 產的一致。
   `set -o pipefail` 底下的 `rustup target list --installed | grep -qx`，和這一版改掉的
   check-erased-db 同一種形狀。`--installed` 只印幾行，還沒撞過；check-no-network 在隱私那條
   範圍裡，這一版沒動。
+
+## 35. alpha.167：請她幫忙找，「可以幫我找」「麻煩妳幫我找」「can you find」，她答得和只打主題一樣（2026-09-26）
+
+34.5 登記的「請她幫忙找」，這一版補上，英文的 can you find 一起。grok 回 402、codex 沒額度，
+這一版也是我自己寫的。
+
+### 35.1 alpha.166 的出貨收據
+
+tag `v0.1.0-alpha.166` 打在 `44703ae`。分支那一趟（36233230458）第一次 Windows 紅在 UIA 的
+`native_uia_reads_visible_edits_and_documents_and_rejects_excluded_text`：`windows_uia.rs:416`
+的 `retained()` 報「expected retained browser text: ContextChanged」，呼叫端是 276 行
+`fixture.show("document-scrolled")` 之後。這一版對 alpha.165 的 capture 差異 0 行，alpha.165 的
+tag 那一趟同一條是綠的；只重跑失敗的 job，第二次全綠。這是新指紋，記在這裡。本機 gates 在
+detached 的 `44703ae` 上 53 條全綠。tag 那一趟（36237005461）八個 job 第一次就全綠，release 於
+**2026-09-26T11:30:17Z** 發出，四個 asset、prerelease，body 前綴和本機 `release-notes.sh` 產的一致。
+
+### 35.2 拿掉什麼
+
+- 第一次查詢一個字都不改，只動放寬那幾步。都掛在 alpha.166 的 `strip_looking` 上。
+- `HELP_ASKS`（幫我、幫忙、替我）後面接 `HELP_LOOKS`（找、查、搜、看、找找、找出來、找到、查查、
+  查詢、搜尋、搜索、翻一下、翻翻）才算，各自連同簡體。開頭取最短的找法：「幫我找出差報告」要留
+  「出差報告」、「幫我查詢價單」要留「詢價單」；第二個字是不是找法交給索引那一步（「詢月報連結」
+  的「詢月」沒看過，「詢」會被拿掉）。結尾沒有這個問題：「幫我」要緊接在找法前面，「月報連結
+  幫我查詢一下」只對得到「查詢」。
+- `LOOK_HEAD_BEFORES` 加能不能、可不可以、麻煩（你／妳）、請（你／妳），`LOOK_TAIL_BEFORES` 加
+  能不能、可不可以、可以、麻煩（你／妳）、請你、請妳。結尾那張不收單獨的「能」「請」：「匯出功能
+  找不到」「加班申請找不到」會剩「匯出功」「加班申」。
+- 新的 `strip_english_request`，排在英文倒裝後面：please、can／could／would／will ＋ you、
+  help（me）可以接好幾段、不管順序，最後一定要接 `ENGLISH_LOOKS`（look up、look for、search for、
+  pull up、find、search、locate、show）。前面沒有這幾段時只收兩個字的找法：search results、
+  search history 照舊。can 後面一定要接 you：「Will 的 PR」不動。
+- `question.rs` 的 `FILLER_CJK` 加「妳」。
+- recall-phrasing 加四題英文（phrasing-32–35），32 → 36。
+- `WINDOWS-CHECKLIST.md` 新一節；清單引號閘門 215 → 220。
+
+### 35.3 收貨
+
+- 新探針一支，alpha.166 對這一版，93 題 × 四份背景（沒有背景、21 句、repo 文件快照、英文授權檔）＝
+  372 格：
+  - 91 格空手變找到：66 格改用「月報連結」、12 格改用「build log」、4 格「can you look up
+    ERR_DEPLOY_42」改用「ERR_DEPLOY_42」、4 格「可以幫我找月報的連結嗎」改用「月報 連結」、3 格文件
+    背景的客服專線（號碼和原文都有）、2 格「妳有看到月報連結嗎」第一次查詢就找到。找到的都是對的那
+    一張。
+  - 7 格找到變空手，全是湊的：21 句背景「可以幫我找火星嗎」「能不能幫我找火星」「妳可以幫我找火星嗎」
+    改用「幫我」拿「幫我看一下這個」；文件背景「可以幫我找嗎」改用「可以」拿 4 筆；「can you find
+    mars」在沒有背景、21 句、英文背景改用「can」「can you find」各拿 1 筆。
+  - 5 格找到的不同：「妳有看到月報連結嗎」沒有背景與英文背景以前放寬才找到，現在第一次查詢就找到；
+    21 句背景三題客服專線以前改用「幫我找客服專線」之類、只有號碼那一格、原文 0 筆，現在改用「客服
+    專線」，號碼和原文都有。
+  - 7 格空手照舊、說法不同：六格以前印改用「可以幫我找」「能不能幫我找」「麻煩幫我查」「幫我查」
+    「can you find」、0 筆，現在不印；一格是文件背景「可以幫我找最新的月報連結嗎」以前不印，現在
+    改用「最新的月報連結」、0 筆（35.5）。
+  - 其餘 262 格一樣。
+- 英文另兩支小探針，三份資料庫跑兩棵樹：recall-phrasing 的語料加一張「Build log uploaded to
+  artifacts」（語料裡有「release candidate」）、只有那一張、那一張加「I can do it」。
+  - 只問 can／could you find 的 build log 和 mars：alpha.166 在看過 can 的兩份上「can you find
+    the build log」空手、「can you find mars」改用「can」湊；只有那一張的改用「build log」找到。
+    這一版三份都改用「build log」找到，mars 三份都不放寬。
+  - 問法加寬到 12 句 × 三份＝36 格：11 格不同，都是這一版比較好。7 格空手變找到：「can you
+    find」「Can you find」看過 can 的兩份各兩格，「Please search for the build log」三份都是
+    （alpha.166 三份都不放寬）。4 格找到變空手，是看過 can 的兩份上「can you find mars」「Can
+    you find mars」以前改用「can」「Can」湊的。can't／couldn't you、單獨的 find／search／locate
+    開頭、Help me find、find mars 兩版一樣（35.5）。
+- 舊探針 18 支（alpha.161–166）在兩棵樹上重跑，Q 開頭的 2403 行只有 alpha.166 那一支的 8 行不同，
+  全部空手變找到：21 句和文件背景的「可以幫我找月報連結嗎」「能不能幫我找月報連結」「可不可以幫我
+  找月報連結」「你可以幫我找月報連結嗎」。`zz_probe_when2`、`zz_probe_money` 全是非 Q 行，排序後
+  一字不差；`zz_probe_when` 另外 44 行也一樣。alpha.162 那三支的文件背景讀的是各自那棵樹的
+  `docs/`，這一版多了清單那一節，表頭的行數不同，Q 行照樣一樣。`zz_probe_guard` 要環境變數，
+  和 alpha.166 那次一樣不算在內。
+- 新測試搬到 alpha.166 的樹上跑：`help_me_find.rs` 8 條紅 7 條，綠的只有背景前提那條。
+- recall-phrasing 32 → 36：新的四題在這一版全綠；alpha.166 的執行檔紅 12 格，剛好是這四題各三項
+  （recalled、answer_correct、citation_correct）。
+- 清單引號閘門 215 → 220，新加的五句（「改用『出差報告』」兩句、「改用『Atlas shipping
+  manifest』」、「改用『客訴專線』」、「我最後看到的是：」）逐句改一個字都會紅。
+- 上面的格數量完之後只改了說明與測試，產品碼和出貨的一樣。
+
+**突變 71 刀**，對 `642ccfc` 一批：控制組（`--lib` 加上 `help_me_find`）1040 條全綠。68 刀紅在
+retrieval 或 question 的測試上：
+
+| 範圍 | 紅的刀 |
+|---|---|
+| 請她幫忙的字 | `HELP_ASKS` 5 個字各少一個 |
+| 找法 | `HELP_LOOKS` 15 個字各少一個 |
+| 找法前面先接的 | 開頭新加的 12 個、結尾新加的 11 個，各少一個 |
+| 英文的字 | can、could、would、will 各少一個；`ENGLISH_LOOKS` 8 個各少一個 |
+| 虛字 | 少「妳」 |
+| 函式 | 開頭不認「幫我找」；結尾不認「幫我找」；開頭的「幫我」後面取最長的找法；不叫 `strip_english_request`；拿掉 please、help、help 後面的 me；只接一段；can 後面不必接 you；沒有請求也收單字的找法；有請求也只收兩個字的；「search for」只拿掉「search」 |
+
+機器負載高，另有 9 刀順帶紅了 `brain::tests` 的子行程計時、`wakeup::tests::a_stuck_cli_does_not_stall_the_record_loop`
+或 `reviewer::tests::real_review_pass_refuses_a_fact_swapped_after_prompt_was_built`，和這幾刀無關，
+不算數；最後那次控制組也紅在 reviewer 那一條。其餘 3 刀：
+
+- 比對 can、could 這些助動詞改成分大小寫（只紅在 reviewer）；比對 please、help、me、you、找法
+  改成分大小寫（綠）：每一列都是小寫開頭。補「Can you find」「Please search for」「Help me find」
+  「Look up」四列（`f34aa7c`）。
+- 結尾的「幫我」後面取最短的找法（只紅在 wakeup）：「幫我」要緊接在找法前面，找法裡沒有「我」
+  「忙」，同一句話的結尾只對得到一個找法，取最長和取最短一樣。留著；說明原本寫「取最長」，改成
+  這個理由。
+
+補完在 `f34aa7c` 上重跑這三刀，加 `--no-fail-fast`，跳過 `wakeup::tests::`、`brain::tests::` 與
+`reviewer::tests::real_review_pass`：前後兩次控制組都是 963 條全綠；兩刀大小寫都紅在
+`an_english_request_to_look_is_removed_whole`，結尾取最短照樣綠。
+
+### 35.4 我這一輪做錯的
+
+- 第一版 `HELP_LOOKS` 有「找出」，開頭取最長。整合測試照清單記事本那三行跑，「可以幫我找出差報告嗎」
+  改用「差報告」：「找出」吃掉了「出差」的「出」。單元測試全綠，因為那一格的每一列主題都是月報連結。
+  改成開頭取最短、拿掉「找出」、結尾另收「找出來」；「幫我查詢價單」「幫我查詢月報連結」兩列釘住
+  取最短的兩面。
+- `HELP_LOOKS` 的說明寫「所以兩個字的只給結尾用」。「翻一下」「翻翻」前面沒有單獨的「翻」，開頭也用。
+  同一段還寫結尾「取最長」，那個 `.max()` 沒有作用，突變才看出來（35.3）。
+- `strip_english_request` 說明裡「索引看過 can 和 log，頭尾都不拿」是推出來的，寫的時候沒量。事後
+  另寫一支探針，同一句話在三份資料庫上跑 alpha.166：語料裡有「release candidate」的空手、只有
+  「Build log uploaded」的改用「build log」找到、再加一張「I can do it」的又空手。機制對，但說明
+  改成量過的那個形狀。
+- 英文的測試列全是小寫開頭，比對改成分大小寫也全綠，突變才看出來（35.3）。
+- 清單那一條的標題寫成「「可以幫我找」「麻煩妳幫我查一下」」。清單裡的「」是「她逐字說得出來的話」，
+  閘門把使用者要打的字當成產品的話算進去，221 裡有一句不是承諾；原始碼的測試列剛好有那串字，
+  所以是綠的。標題改成散文，220。
+- 「妳」的單元測試第一版斷言 `terms("妳剛剛在做什麼")` 是空字串；全是虛字的時候 `terms` 回整句。
+  改斷言 `shape`。版本說明原本也想寫「妳剛剛在做什麼」修好了：alpha.166 的執行檔本來就把它當成問
+  時間，沒寫。
+
+### 35.5 登記在案、這一版不修的
+
+- 沒說要找什麼的「可以幫我嗎」：文件背景改用「可以」拿 4 筆不相干的畫面，兩版一樣。沒有「找」
+  「查」，不算請她幫忙找；「可以幫我找嗎」這一版不放寬了。候選：「幫我」後面只剩虛字時整段算問法，
+  但要一份看過「可以」、沒看過「幫我」的背景才量得到，`help_me_find` 的背景兩個都看過。
+- 「幫我看一下這個」：第一次查詢就印「我拿去比對的是「幫我」——那是從你打的字黏出來的」，四份背景
+  都是，兩版一樣。那是第一次查詢的判斷，不是放寬。
+- 看過的修飾語仍是條件：文件背景「可以幫我找最新的月報連結嗎」改用「最新的月報連結」、空手
+  （alpha.166 不印、空手）。和 34.5 那條同一族。
+- 前面沒有「幫我」的「查詢」「搜尋」、結尾的「查不到」：文件背景「查詢月報連結」「搜尋月報連結」
+  「月報連結查不到」空手，兩版一樣，版本說明寫了。「幫我搜尋月報連結」四份背景都找得到。
+- 英文沒收的：can't／couldn't you、沒有 can you、please、help 的 find／search／locate 開頭。上面
+  那三份資料庫的語料裡沒有 can't、find、search、locate，兩版都改用「build log」找到；看過這些字
+  的機器沒量。
