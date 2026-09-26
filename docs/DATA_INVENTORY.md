@@ -382,15 +382,21 @@ write 失敗時 failure overlay 明講 recorder 可能仍在跑，使用者可�
 不得重開。只有後來真人 Explicit Start 成功 commit 完整 barrier 才清 cancellation／failure；
 invalid／busy／timeout Start 不會。
 
-沒有遙測、沒有產品帳號。`sister.exe` 與 recorder／core／capture／brain／hands 沒有
-HTTP client；desktop 只有四條內建 outbound：使用者看完揭露並明確按下後，經
+沒有遙測、沒有產品帳號。recorder／core／capture／brain／hands 沒有 HTTP client；
+desktop 有四條內建 outbound：使用者看完揭露並明確按下後，經
 `sister-assets/download` 對固定 Persona pack 發至多一次 GET；Azure 設定、
 Credential Manager key 與現行第四張 consent 都成立後，經 `sister-tts/azure` 只替最新
 新答案或 trusted 手動重播，對 `eastasia`／`southeastasia`／`japaneast` 其中一個 fixed
 endpoint 發一個 POST；設定啟用且 loopback 就緒後，經 `sister-tts/local` 對
 `127.0.0.1:8231` 發 GET `/health` 與 POST `/tts`；以及設定明確開啟後，經
-`sister-usage/public-status` 對 LimitReset 固定 `status`／`latest` 發 GET。
-後者唯一的使用者內容是當前答案正文原文，可能含姓名、電話與金額且不遮罩；不含截圖、
+`sister-usage/public-status` 對 LimitReset 固定 `status`／`latest` 發 GET。第五條由
+`sister.exe` 經 `sister-notify[discord]`，只在該次 `watch` 明確指定 webhook env 後，
+向 exact Discord webhook POST typed 收尾資料：outcome、固定摘要、開始／結束／耗時、
+退出碼與四個計數。沒有 question、畫面文字、app、URL、path 或 memory ID；webhook
+secret 不進 argv、config、log、DB 或 JSON report。`--remote-json <JSONL>` 只把同一份
+typed report 追加到使用者指定的本機檔案，不是網路 transport；該檔不在 data dir 時，
+`forget`／`prune`／memory export 不會碰它，命令開始前會把這個後果直接印出來。
+Azure POST 唯一的使用者內容是當前答案正文原文，可能含姓名、電話與金額且不遮罩；不含截圖、
 來源連結、memory id、DB 或其他文字。它不做 cache，cancel 只阻止 late audio 播放，
 無法 abort 已開始、最長 45 秒的 blocking POST。簽了第二張同意書且
 選好一支 CLI 後，每個文字問題先交給目前選定的 CLI 產生最多三條自然語言查詢；
@@ -1166,12 +1172,20 @@ alpha.69 那句「沒按過就沒有這個檔案」在 alpha.70 之後是假的�
 | `event` | `granted` / `proposed` / `approved` / `executed` / `refused` / `step_finished` / `aborted` / `concluded` |
 | `at_ms` | 這件事發生的時戳 |
 | `grant` | 只在 `granted` 那一列：**你打的 `--task` 原文**、授權的 app 清單、動作種類、有效毫秒數、步數上限 |
+| `run_id` | Phase 7 起只在新 `granted` 列：每次執行新產生的 opaque 關聯 ID（`run-sha256:…`）；不是授權票據。舊列是 `null`，不補造 |
+| `grant_id` | Phase 7 起只在新 `granted` 列：完整 `Grant` canonical JSON 的 SHA-256（`grant-sha256:…`），同一份授權範圍穩定相同；它用來辨識票據，不取代每一步 scope／期限／步數／畫面驗證。舊列是 `null`，不補造 |
 | `action` | 完整的動作與目標——**含完整網址或檔案路徑** |
 | `result` / `reason` | 成功細節、失敗訊息，或她為什麼沒有動手 |
 | `evidence` | 只在 `step_finished` 那一列：這一步做完時她在 `frames` 裡查到什麼。**存的是 frame 的 id 和時戳，不是圖、也不是螢幕上的字**——要看圖還是得回資料庫。查不到的時候存的是查不到的**理由**（沒在錄／才剛起來／狀態檔讀不懂…），不是一個空值。`null` 只有一種意思：那一列是 alpha.72 以前寫的，當時根本沒有去查 |
 
 每一列都重複完整的動作與時間，所以單獨一列就讀得懂（SPEC §9.3）。代價是
 目標字串會在檔案裡出現很多次。
+
+`sister hands runs --json` 不另存第二份審計檔；它直接把上面同一批列按 run 邊界整理成
+開始／結束／耗時、完成狀態、計數摘要與完整步驟／畫面驗證；較早 run 被 `--limit` 隱藏的
+數量與讀不懂的原始列也在最外層回報，不讓殘缺 audit 冒充完整。輸出因此仍含 task、完整
+網址或檔案路徑、結果與理由，不能當成已去敏報告分享。未完成的 run 會把結束與耗時留成
+`null`、`complete=false`；舊列沒有 ID 時也維持 `null`，不拿假 ID 填空。
 
 **它會跟著「忘掉」一起走。** `sister forget --last 7d --yes` 和字母人上的
 「忘掉這一整天」都會把落在那段時間裡的列從檔案裡刪掉——刪的是字本身，不是

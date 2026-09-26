@@ -312,6 +312,18 @@ AI-Sister 不提供或保證免費額度。見 [Azure Speech 定價](https://azu
 升級後要讓 v2 recorder 實際看過該站一次。**同 host 只是一筆來源紀錄，不證明網址
 安全或由你主動開啟，也不證明 path、redirect 或站內內容可信。**
 
+`sister watch` 的收尾可以選擇追加本機 JSONL，或 POST 到該次命令明確給定的 Discord
+webhook。兩者都只含結果、固定摘要、開始／結束／耗時、退出碼與四個計數，不含問題、
+畫面文字、app、網址、路徑或記憶 ID。webhook 放在環境變數，不要放進命令列；全停已觸發
+或狀態不明時不送 Discord。指定的 JSONL 不受 `forget`、`prune` 或記憶匯出管理：
+
+```bash
+sister watch "等測試跑完" --remote-json ./watch-reports.jsonl
+SISTER_DISCORD_WEBHOOK='https://discord.com/api/webhooks/…/…' \
+  sister watch "等測試跑完" --discord-webhook-env SISTER_DISCORD_WEBHOOK
+sister hands runs --json          # 本機完整接手審計；含 task 與動作目標，不是去敏報告
+```
+
 **Linux X11（Ubuntu 24.04）安裝**——從 [Releases](https://github.com/teddashh/AI-Sister/releases)
 下載 `AI-Sister-Linux-X11-amd64.deb`：
 

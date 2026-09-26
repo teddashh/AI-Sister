@@ -1783,6 +1783,7 @@ dependencies = [
  "sister-capture",
  "sister-core",
  "sister-hands",
+ "sister-notify",
  "tracing",
  "tracing-subscriber",
  "windows",
@@ -1820,7 +1821,19 @@ dependencies = [
  "libc",
  "serde",
  "serde_json",
+ "sha2",
  "windows",
+]
+
+[[package]]
+name = "sister-notify"
+version = "0.1.0-alpha.168"
+dependencies = [
+ "anyhow",
+ "fs4",
+ "serde",
+ "serde_json",
+ "ureq",
 ]
 
 [[package]]

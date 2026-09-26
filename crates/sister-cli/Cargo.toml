@@ -26,6 +26,7 @@ sister-capture.workspace = true
 # 忘掉一個下午，那個下午開過的網址還躺在 `action-log.jsonl` 裡，而畫面上寫的
 # 是「已經忘掉了」。格式歸 sister-hands 管，這裡不自己再寫一份 parser。
 sister-hands.workspace = true
+sister-notify = { workspace = true, features = ["discord"] }
 anyhow.workspace = true
 clap.workspace = true
 chrono.workspace = true

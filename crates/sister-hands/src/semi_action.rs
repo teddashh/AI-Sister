@@ -180,6 +180,22 @@ impl Grant {
     pub const fn step_limit(&self) -> StepLimit {
         self.step_limit
     }
+
+    /// 這張授權書的穩定 ID。ID 只辨認五維 scope，不是另一張授權票；拿到 ID
+    /// 不能執行任何一步。canonical JSON 的 map-free 結構由這個具名 struct 固定，
+    /// SHA-256 全長保留，避免把「短 ID 沒撞過」誤寫成「不會撞」。
+    pub fn audit_id(&self) -> String {
+        use sha2::{Digest, Sha256};
+        let bytes = serde_json::to_vec(self).expect("Grant 的具名欄位一定可序列化");
+        let digest = Sha256::digest(bytes);
+        let mut out = String::with_capacity(64 + "grant-sha256:".len());
+        out.push_str("grant-sha256:");
+        for byte in digest {
+            use std::fmt::Write as _;
+            write!(&mut out, "{byte:02x}").expect("writing to String cannot fail");
+        }
+        out
+    }
     pub const fn expiry(&self) -> Expiry {
         self.expiry
     }

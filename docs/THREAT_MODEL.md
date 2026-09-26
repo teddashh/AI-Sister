@@ -34,7 +34,7 @@ AI-Sister 每一拍做完後預設等 400ms 再看；沒有人動鍵盤滑鼠時
 | **拿到未鎖機器的人** | 讀檔案、跑 `sister query` | **部分防禦**：靠 OS 帳號隔離。目前資料庫**未加密** |
 | **同機的惡意程式** | 以使用者身分讀任何檔案 | **不防禦**。同權限即同讀取權，這是 OS 邊界 |
 | **偷走硬碟的人** | 離線讀取 | **依賴 BitLocker/LUKS**。應用層無額外加密 |
-| **遠端攻擊者** | 網路 | **部分防禦**：本程式沒有監聽埠；`sister.exe`、recorder/core/capture/brain/hands 與 WebView 無任意 HTTP 能力。desktop 只有使用者揭露後按下的 Persona fixed-pack GET；設定啟用、獨立現行 consent、Credential Manager key 全成立後只替最新新答案／trusted replay 走的 Azure TTS fixed POST；預設關閉的 127.0.0.1:8231 BreezyVoice loopback；以及設定明確開啟後對 LimitReset 固定 status／latest 的 GET。簽 cloud-reading 後另會把使用者問題與本機查詢命中的 OCR 原文／出處交給使用者設定的 CLI，後續網路與供應商邊界屬於那支 CLI；CLI 不取得 DB path 或畫面 |
+| **遠端攻擊者** | 網路 | **部分防禦**：本程式沒有監聽埠；recorder/core/capture/brain/hands 與 WebView 無任意 HTTP 能力。desktop 只有 Persona fixed-pack GET、Azure TTS fixed POST、127.0.0.1 BreezyVoice loopback 與 LimitReset fixed GET。`sister.exe` 另只有使用者在該次 `watch` 指定 env 後，向 exact Discord webhook 送 typed、去文字化收尾報告的 POST；不 redirect/proxy/retry，secret 不落盤，全停先發生就不送。簽 cloud-reading 後另會把使用者問題與本機查詢命中的 OCR 原文／出處交給使用者設定的 CLI；CLI 不取得 DB path 或畫面 |
 | **供應鏈** | 汙染相依套件 | **部分**：`Cargo.lock` 鎖定；未做 vendoring 或 reproducible build |
 | **好奇的旁人** | 看你的螢幕 | 不適用（他本來就看得到） |
 | **被記錄的第三方** | 無 | **這是最重要的一項，見下方** |

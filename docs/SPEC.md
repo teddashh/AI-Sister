@@ -686,6 +686,23 @@ Microsoft 目前公開列 Azure Speech F0 neural TTS 每月 0.5 million characte
 可用、實際額度與費用以使用者 Azure 帳號、resource、方案及 Microsoft 當下規則為準。
 AI-Sister 不提供、不保證這份免費額度，也不把它當費用上限。
 
+### 11.11 遠端 watch 收尾通報
+
+遠端通報不是預設能力，也不借用四張同意書。只有該次 `sister watch` 明確指定
+`--remote-json <JSONL>` 或 `--discord-webhook-env <ENV>` 才啟用；`--dry-run` 不讀 webhook
+環境變數、不 POST、不寫 JSON。兩條 transport 共用封閉 schema：watch outcome enum、固定
+狀態摘要、開始／結束／耗時、退出碼，以及拿到答案、送出但沒答案、根本沒送出、沒有新畫面
+可問四個計數。不得加入
+問題原文、畫面／OCR 文字、app、網址、檔案路徑、memory ID 或任意自由文字欄位。
+
+JSONL 只追加到使用者指定的本機路徑；它不是 data dir 的記憶，`forget`、`prune` 與 memory
+export 不管理它，命令開始監控前必須把這個後果印出來。Discord webhook secret 只從指定的
+環境變數讀取，不進 argv、config、log、DB 或 JSON report；目的地必須逐字符合
+`https://discord.com/api/webhooks/<digits>/<token>`。native Rust 只做一個 HTTPS POST，
+不 redirect、不走 proxy、不 retry，並禁用 mention。physical all-stop 為已觸發時不送；
+狀態讀不懂時 fail closed。送出前取得的 all-stop admission 與 transport boundary 必須活過
+完整 POST，不能用鎖外 snapshot 讓已成功全停的舊監控才開始送。
+
 ## §12. Replay 評測（第一級公民，不是附件）〔定案：全場唯一無異議的下一步〕
 
 - **Recorder**：capture 層本身即 recorder；`sister replay export` 打包一段
