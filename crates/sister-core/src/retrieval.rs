@@ -231,6 +231,11 @@ const JOINTS: &[char] = &['的', '了'];
 /// 「的」「了」是詞的一部分、不是接頭的：切開會剩一個字而被丟掉。
 const JOINT_INSIDE_WORDS: &[&str] = &["目的", "了解"];
 
+/// 英文的接頭：「the release candidate for alpha」的 for 和「月報的連結」的「的」一樣，
+/// 畫面上不一定有。英文本來就在空白切開，這幾個字切出來那一段丟掉，不當條件。
+/// on、to、up 和 the、a 已經是 [`question::terms`] 的虛字。
+const ENGLISH_JOINTS: &[&str] = &["of", "for", "in", "at", "by", "with", "from", "about"];
+
 /// [`retry_candidate`] 也空手（或根本沒有候選字）之後的最後一步。
 ///
 /// 那一步整段照原樣對。問句裡的「的」「了」是接頭，畫面上不一定有：
@@ -243,6 +248,9 @@ const JOINT_INSIDE_WORDS: &[&str] = &["目的", "了解"];
 ///
 /// - 不到兩個字的段不要：一個字的條件不是條件，是掃描（和 [`candidate_refused`]
 ///   同一個理由）。「改了」的「改」只能丟掉。
+/// - [`ENGLISH_JOINTS`] 那一段也不要：「the release candidate for alpha」的 for
+///   和「的」一樣是接頭，找的是「release candidate alpha」。整段等於那個字才算，
+///   format 裡的 for 不算。
 /// - 兩個字以上的段一律留著，看過沒看過都一樣。沒看過的段和別的段不可能在同一
 ///   筆字裡，所以「客服 退款 專線」照舊空手；看過的段可能就是他要的那個人或那件事，
 ///   丟掉就是答另一題（`indexed_noise_remains_a_required_condition`）。
@@ -260,12 +268,14 @@ const JOINT_INSIDE_WORDS: &[&str] = &["目的", "了解"];
 /// 那 17 句、repo 中文文件 58 萬字且主題字的行排除）：
 ///
 /// - 三份都從 0 筆變成找到那一張：`誰更新了月報連結`（改用「更新 月報連結」）、
-///   `月報的連結`、`月報的連結在哪`（「月報 連結」）、`where is the release candidate`
-///   和 `when is the release candidate`（「is release candidate」，後者多講記下的時間）。
-///   `誰改了月報連結`、`為了部署失敗`、`部署失敗的話怎麼辦` 以前只有 58 萬字那份空手。
+///   `月報的連結`、`月報的連結在哪`（「月報 連結」）。`誰改了月報連結`、`為了部署失敗`、
+///   `部署失敗的話怎麼辦` 以前只有 58 萬字那份空手。這一輪還列著 `where is the release
+///   candidate` 和 `when is the release candidate`（「is release candidate」）：is 是
+///   條件，那張畫面上剛好有 is 才找得到，`when is ERR_DEPLOY_42` 空手。alpha.164 起
+///   問句詞後面的 is 在剝字時就拿掉（[`strip_english_inversion`]），這三題改用
+///   「release candidate」「ERR_DEPLOY_42」，上一步就找到。
 /// - 還是空手：三份都空手的 `部署失敗的期限`（類型詞）、`退款的電話`、
-///   `上次看到的連結`（剝完只剩類型詞，[`candidate_refused`]）。英文 is 仍是條件，
-///   `when is ERR_DEPLOY_42` 空手（`when_questions.rs`）。這一輪還列著 58 萬字那份上的
+///   `上次看到的連結`（剝完只剩類型詞，[`candidate_refused`]）。這一輪還列著 58 萬字那份上的
 ///   `部署失敗的原因`、`上次看到的月報連結`（「原因」「上次看到」看過，是必要條件），
 ///   和三份都空手的 `部署失敗的時間`（類型詞）；alpha.163 起這三題在剝字時就把
 ///   「原因」「上次」「時間」拿掉（[`TAIL_ASKS`]、[`SPOKEN_LEAD_INS`]），三份都找到。
@@ -293,7 +303,11 @@ fn joint_retry(base: &str, tried: &[Option<&str>]) -> Option<String> {
     let candidate = pieces
         .into_iter()
         .map(question::terms)
-        .filter(|piece| !question::only_filler(piece) && piece.chars().count() >= 2)
+        .filter(|piece| {
+            !question::only_filler(piece)
+                && piece.chars().count() >= 2
+                && !ENGLISH_JOINTS.iter().any(|w| piece.eq_ignore_ascii_case(w))
+        })
         .collect::<Vec<_>>()
         .join(" ");
     if candidate.is_empty()
@@ -454,6 +468,144 @@ fn ascii_lead_in_end(trimmed: &str, lower: &str, orig_at: &[usize], word: &str) 
     }
 }
 
+/// 英文問句詞後面倒裝的助動詞。「when is ERR_DEPLOY_42」的 is、「where can I find
+/// the build log」的 can，和中文問句裡的「是」「有」「可以」一樣只是問法，不是他問的
+/// 東西。只認緊接在問句詞後面的那一個，見 [`strip_english_inversion`]。
+const ENGLISH_AUXILIARIES: &[&str] = &[
+    "is",
+    "are",
+    "am",
+    "was",
+    "were",
+    "do",
+    "does",
+    "did",
+    "has",
+    "have",
+    "had",
+    "can",
+    "could",
+    "will",
+    "would",
+    "shall",
+    "should",
+    "may",
+    "might",
+    "must",
+    "isn't",
+    "aren't",
+    "wasn't",
+    "weren't",
+    "don't",
+    "doesn't",
+    "didn't",
+    "hasn't",
+    "haven't",
+    "hadn't",
+    "can't",
+    "cannot",
+    "couldn't",
+    "won't",
+    "wouldn't",
+    "shouldn't",
+    "mustn't",
+];
+
+/// 問句詞縮寫在一起的助動詞：where's、who're、what'd、when'll、how've。
+const ENGLISH_CONTRACTIONS: &[&str] = &["s", "re", "d", "ll", "ve"];
+
+/// 倒裝的助動詞後面緊接的主詞。全大寫的兩個字以上不算：「IT」是部門，不是 it。
+const ENGLISH_SUBJECTS: &[&str] = &["i", "you", "we", "they", "he", "she", "it"];
+
+/// 英文問句的倒裝：開頭是問句詞（[`QUESTION_WORDS`] 和 [`crate::facts::WHEN_ASKS`]
+/// 的英文），後面緊接一個助動詞，就連同助動詞、和它後面的一個主詞代名詞一起拿掉，
+/// 回傳剩下的那段。「when is ERR_DEPLOY_42」剩「ERR_DEPLOY_42」，「where can I find
+/// the build log」剩「find the build log」，下一圈 [`crate::facts::strip_fact_question_edges`]
+/// 再拿掉 find、the。
+///
+/// 不是這個形狀就 `None`，問句詞照舊交給 [`cut_question_words`]：「how much is」
+/// 「where exactly is」的問句詞後面不是助動詞。只看緊接的那一個，所以開頭不是問句詞
+/// 的「Will 的 PR」「May 的帳單」不會被當成助動詞拿掉。
+///
+/// alpha.163 以前，問句詞切掉之後助動詞留在候選字裡，是必要條件：畫面上沒有 is 的
+/// 「部署失敗 ERR_DEPLOY_42」，「when is ERR_DEPLOY_42」就空手；「where is the invoice」
+/// 在沒看過 invoice 的索引上改用「is the」，拿任何一張有 is 的畫面來湊。
+fn strip_english_inversion(text: &str) -> Option<&str> {
+    let trimmed = text.trim_start();
+    let (word, rest) = split_ascii_word(trimmed)?;
+    let word = word.to_ascii_lowercase();
+    let asks = QUESTION_WORDS
+        .iter()
+        .chain(crate::facts::WHEN_ASKS)
+        .any(|w| w.is_ascii() && *w == word);
+    if !asks {
+        return None;
+    }
+    let after_aux = if let Some(contracted) = rest.strip_prefix(|c| matches!(c, '\'' | '’')) {
+        let (tail, after) = split_ascii_word(contracted)?;
+        if !ENGLISH_CONTRACTIONS.contains(&tail.to_ascii_lowercase().as_str()) {
+            return None;
+        }
+        after
+    } else {
+        if !rest.starts_with(char::is_whitespace) {
+            return None;
+        }
+        let (aux, after) = split_ascii_word(rest.trim_start())?;
+        let aux = aux.to_ascii_lowercase().replace('’', "'");
+        if !ENGLISH_AUXILIARIES.contains(&aux.as_str()) {
+            return None;
+        }
+        after
+    };
+    if !after_aux.starts_with(char::is_whitespace) {
+        return Some(after_aux);
+    }
+    let Some((subject, after)) = split_ascii_word(after_aux.trim_start()) else {
+        return Some(after_aux);
+    };
+    let acronym = subject.len() > 1 && subject.chars().all(|c| c.is_ascii_uppercase());
+    if !acronym && ENGLISH_SUBJECTS.contains(&subject.to_ascii_lowercase().as_str()) {
+        Some(after)
+    } else {
+        Some(after_aux)
+    }
+}
+
+/// 開頭一個英文字，和它後面的字。字母開頭，中間可以有一個撇號接字母（isn't、
+/// can’t）；後面要是結尾、空白、非 ASCII 或句讀（`,` `:` `;` `!` `?`），和
+/// [`ascii_lead_in_end`] 同一種邊界：`is_valid`、`is-it` 不是 is。撇號後面是縮寫
+/// 的時候（where's）也回傳到撇號為止，由呼叫端決定要不要吃掉它。
+fn split_ascii_word(text: &str) -> Option<(&str, &str)> {
+    let letters = |s: &str| {
+        s.char_indices()
+            .find(|(_, c)| !c.is_ascii_alphabetic())
+            .map_or(s.len(), |(at, _)| at)
+    };
+    let mut end = letters(text);
+    if end == 0 {
+        return None;
+    }
+    // 撇號後面接 t 才是否定（isn't、can’t）；其他縮寫留給呼叫端。
+    let rest = &text[end..];
+    if let Some(apostrophe) = rest.chars().next().filter(|c| matches!(c, '\'' | '’')) {
+        let after = &rest[apostrophe.len_utf8()..];
+        let tail = letters(after);
+        if tail > 0 && after[..tail].eq_ignore_ascii_case("t") {
+            end += apostrophe.len_utf8() + tail;
+        }
+    }
+    match text[end..].chars().next() {
+        None => {}
+        Some(c)
+            if c.is_whitespace()
+                || !c.is_ascii()
+                || matches!(c, ',' | ':' | ';' | '!' | '?' | '\'' | '’') => {}
+        Some(_) => return None,
+    }
+    Some((&text[..end], &text[end..]))
+}
+
 /// [`peel_retry`] 剝完的字。
 struct Peeled<'q> {
     /// 空字串表示沒有東西可找。
@@ -462,16 +614,18 @@ struct Peeled<'q> {
     tail_when: AsksWhen,
 }
 
-/// 口語開頭、頭尾問句用語、問句詞、尾巴的問法名詞（[`TAIL_ASKS`]），再一次
-/// [`question::terms`]。
+/// 口語開頭、英文問句的倒裝（[`strip_english_inversion`]）、頭尾問句用語、問句詞、
+/// 尾巴的問法名詞（[`TAIL_ASKS`]），再一次 [`question::terms`]。
 fn peel_retry(terms: &str) -> Peeled<'_> {
     let mut current = terms;
-    // 口語開頭至少一個字，拿掉之後一定比這一圈開始時短；長度有下界，所以迴圈一定結束。
-    // 沒有變短就停，避免空詞在原地打轉。
-    // 先看原樣開頭：`question::terms` 會把虛字「到」「那」從「到底」「那麼」的頭上拿掉。
+    // 口語開頭至少一個字、倒裝至少問句詞加助動詞，拿掉之後一定比這一圈開始時短；
+    // 長度有下界，所以迴圈一定結束。沒有變短就停，避免空詞在原地打轉。
+    // 先看原樣開頭：`question::terms` 會把虛字「到」「那」從「到底」「那麼」的頭上拿掉，
+    // 也會把 what 當虛字拿掉，「what does」就認不出是倒裝。
+    let strip_head = |text| strip_spoken_lead_in(text).or_else(|| strip_english_inversion(text));
     loop {
         let before = current;
-        if let Some(rest) = strip_spoken_lead_in(current) {
+        if let Some(rest) = strip_head(current) {
             if rest.len() >= before.len() {
                 break;
             }
@@ -480,7 +634,7 @@ fn peel_retry(terms: &str) -> Peeled<'_> {
         }
         let termed = question::terms(current);
         let edged = crate::facts::strip_fact_question_edges(termed);
-        let Some(rest) = strip_spoken_lead_in(edged) else {
+        let Some(rest) = strip_head(edged) else {
             current = edged;
             break;
         };
@@ -850,6 +1004,11 @@ mod tests {
             ("月報的連結", "月報 連結"),
             ("客服，退款的專線", "客服 退款 專線"),
             ("is the release candidate", "is release candidate"),
+            // 英文的接頭和「的」一樣切開；整段等於那個字才算。
+            ("release candidate for alpha", "release candidate alpha"),
+            ("contract with the vendor", "contract vendor"),
+            ("log For Orion", "log Orion"),
+            ("format of the log", "format log"),
             // `question::terms` 已經把「目的」句尾的「的」剝掉了，「目」只剩一個字。
             ("部署失敗的目", "部署失敗"),
             // 「的」「了」在別的詞裡的照切。
@@ -1893,6 +2052,62 @@ mod tests {
         assert_eq!(peel_retry_terms("So-net 帳單怎麼繳"), "So-net 帳單");
         // 句讀照樣是一個字的結尾。
         assert_eq!(peel_retry_terms("But, why ERR_DEPLOY_42"), "ERR_DEPLOY_42");
+    }
+
+    /// 英文問句詞後面緊接的助動詞，和它後面的一個主詞代名詞，都是問法。縮寫、
+    /// 彎撇號、前面有口語開頭、後面接中文都一樣。
+    #[test]
+    fn an_english_inversion_is_how_he_asks() {
+        for (query, want) in [
+            ("when is ERR_DEPLOY_42", "ERR_DEPLOY_42"),
+            ("When Is ERR_DEPLOY_42", "ERR_DEPLOY_42"),
+            ("so when is ERR_DEPLOY_42", "ERR_DEPLOY_42"),
+            ("please tell me when is ERR_DEPLOY_42", "ERR_DEPLOY_42"),
+            ("when is ERR_DEPLOY_42 發生的", "ERR_DEPLOY_42"),
+            ("where is月報連結", "月報連結"),
+            ("where is the build log?", "build log"),
+            ("who is the vendor", "vendor"),
+            ("who’s the vendor", "vendor"),
+            ("who're the vendors", "vendors"),
+            (
+                "when'll the release candidate ship",
+                "release candidate ship",
+            ),
+            ("where can I find the build log", "build log"),
+            ("where do I find the build log", "build log"),
+            ("where’d you find the build log", "build log"),
+            ("why isn't the build log uploaded", "build log uploaded"),
+            ("why isn’t the build log uploaded", "build log uploaded"),
+            ("when cannot the build run", "build run"),
+            // 主詞後面的動詞照舊是條件。
+            ("what does ERR_DEPLOY_42 mean", "ERR_DEPLOY_42 mean"),
+            ("when did they sign the contract", "sign the contract"),
+            // 只剩主詞，就沒有東西可找。
+            ("when is it", ""),
+            ("where is it", ""),
+            // 全大寫的 IT 是部門，不是 it。
+            ("when is IT support open", "IT support open"),
+        ] {
+            assert_eq!(peel_retry_terms(query), want, "{query}");
+        }
+    }
+
+    /// 不是「問句詞＋緊接的助動詞」就不動：問句詞後面先接別的字、開頭不是問句詞、
+    /// 問句詞是長字的一部分、is 後面連著底線或連字號。
+    #[test]
+    fn only_the_auxiliary_right_after_a_question_word_is_how_he_asks() {
+        for (query, want) in [
+            ("how much is the invoice", "much is the invoice"),
+            ("where exactly is the build log", "exactly is the build log"),
+            ("Will 的 PR", "Will 的 PR"),
+            ("May 的帳單", "May 的帳單"),
+            ("whenever is ERR_DEPLOY_42", "whenever is ERR_DEPLOY_42"),
+            ("ERR_DEPLOY_42 is when", "ERR_DEPLOY_42 is"),
+            ("when is_valid", "is_valid"),
+            ("where is-it", "is-it"),
+        ] {
+            assert_eq!(peel_retry_terms(query), want, "{query}");
+        }
     }
 
     #[test]

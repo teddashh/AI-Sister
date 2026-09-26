@@ -362,13 +362,12 @@ fn a_lead_in_before_a_vague_word_pays_the_same_cost_as_so() {
 /// `docs/WINDOWS-CHECKLIST.md` alpha.163 那一節逐題照打：記事本那三行是同一張畫面。
 /// 清單引號裡的句子就是這裡的字面值，這裡改了清單要跟著改。
 ///
-/// 同一台機器上多半也照 alpha.162 那一節打過那四行，那一張也在。兩節互相不能湊：
+/// 同一台機器上多半也照 alpha.162 那一節打過那三行，那一張也在。兩節互相不能湊：
 /// 這一節的字不可以讓 alpha.162 最重要的那一條（`週報的備份網址`）找到東西。
 #[test]
 fn the_windows_checklist_hears_what_the_checklist_says() {
     const NOTEPAD: &str = "週報網址已更新\n同步失敗 ERR_SYNC_7\n客服專線 0800-000-123";
-    const NOTEPAD_162: &str =
-        "週報網址已更新\n部署失敗 ERR_DEPLOY_42\n客服專線 0800-000-123\nstaging build is ready";
+    const NOTEPAD_162: &str = "週報網址已更新\n部署失敗 ERR_DEPLOY_42\n客服專線 0800-000-123";
     const SYNC_WHEN: &str =
         "我對不到你打的那一串，所以改用「同步失敗」去找。底下每一筆的時間，是我記下那一筆的時候。";
     const SYNC: &str = "我對不到你打的那一串，所以改用「同步失敗」去找。";

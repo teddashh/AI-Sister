@@ -228,10 +228,10 @@ fn a_joint_between_two_topic_words_becomes_two_conditions() {
     same_as_everywhere("月報的連結在哪", "月報 連結");
 }
 
-/// the 是虛字，切段時不再是條件；is 不是虛字，照舊是條件，那張畫面上剛好有。
+/// the 是虛字，for 是英文的接頭，切段時都不是條件，和「的」一樣。
 #[test]
-fn an_english_filler_is_not_a_condition_after_the_split() {
-    same_as_everywhere("where is the release candidate", "is release candidate");
+fn an_english_filler_or_joint_is_not_a_condition_after_the_split() {
+    same_as_everywhere("the release candidate for alpha", "release candidate alpha");
 }
 
 /// 兩個字以上的段不管看過沒有都是必要條件。
@@ -299,13 +299,12 @@ fn a_phrase_the_previous_step_finds_is_not_split() {
     );
 }
 
-/// `docs/WINDOWS-CHECKLIST.md` alpha.162 那一節逐題照打：記事本那四行是同一張畫面，
+/// `docs/WINDOWS-CHECKLIST.md` alpha.162 那一節逐題照打：記事本那三行是同一張畫面，
 /// 索引是用過的（背景看過「改了」）。清單引號裡的句子就是這裡的字面值，這裡改了
 /// 清單要跟著改。
 #[test]
 fn the_windows_checklist_hears_what_the_checklist_says() {
-    const NOTEPAD: &str =
-        "週報網址已更新\n部署失敗 ERR_DEPLOY_42\n客服專線 0800-000-123\nstaging build is ready";
+    const NOTEPAD: &str = "週報網址已更新\n部署失敗 ERR_DEPLOY_42\n客服專線 0800-000-123";
     let mut db = Db::open_in_memory().unwrap();
     let session = db.start_session("test", "test").unwrap();
     for (i, line) in BACKGROUND.iter().enumerate() {
@@ -326,11 +325,10 @@ fn the_windows_checklist_hears_what_the_checklist_says() {
             got.hits
         );
     };
-    for q in ["週報網址", "staging build"] {
-        let got = ask(&mut db, q);
-        assert_eq!(got.searched, None, "基準線「{q}」");
-        notepad_only(&got, q);
-    }
+    let q = "週報網址";
+    let got = ask(&mut db, q);
+    assert_eq!(got.searched, None, "基準線「{q}」");
+    notepad_only(&got, q);
     for (q, said) in [
         (
             "週報的網址",
@@ -347,14 +345,6 @@ fn the_windows_checklist_hears_what_the_checklist_says() {
         (
             "誰更新了週報網址",
             "我對不到你打的那一串，所以改用「更新 週報網址」去找。",
-        ),
-        (
-            "where is the staging build",
-            "我對不到你打的那一串，所以改用「is staging build」去找。",
-        ),
-        (
-            "when is the staging build",
-            "我對不到你打的那一串，所以改用「is staging build」去找。底下每一筆的時間，是我記下那一筆的時候。",
         ),
     ] {
         let got = ask(&mut db, q);

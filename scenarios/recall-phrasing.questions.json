@@ -434,6 +434,54 @@
           }
         ]
       }
+    },
+    {
+      "id": "phrasing-26",
+      "question": "when is ERR_DEPLOY_42",
+      "source": "hand_labeled",
+      "expected": {
+        "outcome": "answer",
+        "any_of": [
+          "ERR_DEPLOY_42"
+        ],
+        "evidence": [
+          {
+            "event_index": 1
+          }
+        ]
+      }
+    },
+    {
+      "id": "phrasing-27",
+      "question": "where is ERR_DEPLOY_42",
+      "source": "hand_labeled",
+      "expected": {
+        "outcome": "answer",
+        "any_of": [
+          "ERR_DEPLOY_42"
+        ],
+        "evidence": [
+          {
+            "event_index": 1
+          }
+        ]
+      }
+    },
+    {
+      "id": "phrasing-28",
+      "question": "what is ERR_DEPLOY_42",
+      "source": "hand_labeled",
+      "expected": {
+        "outcome": "answer",
+        "any_of": [
+          "ERR_DEPLOY_42"
+        ],
+        "evidence": [
+          {
+            "event_index": 1
+          }
+        ]
+      }
     }
   ]
 }

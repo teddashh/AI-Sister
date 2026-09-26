@@ -405,22 +405,17 @@ fn a_head_word_that_starts_like_filler_pays_the_documented_cost() {
     }
 }
 
-/// 英文的 when is 句型：is 不在問法表裡，也不是虛字，所以仍是必要條件。
+/// 英文的 when is 句型：放寬時 is 和 when 一起拿掉，照「什麼時候」多講一句。
 ///
 /// alpha.161 這裡整條空手：改用「is the release candidate」，中間的 the 也是必要
-/// 條件，畫面寫的是「release candidate alpha is ready」。alpha.162 的切段每段再剝
-/// 虛字，the 不再是條件，那張畫面上剛好有 is，就找到了。代價照舊一半：畫面上沒有
-/// is 的（「部署失敗 ERR_DEPLOY_42」那張），一樣空手；中文「ERR_DEPLOY_42 什麼時候
-/// 發生的」找得到。
+/// 條件。alpha.162 的切段每段再剝虛字，the 不再是條件；is 還是，那張畫面上剛好
+/// 有 is 才找得到，「部署失敗 ERR_DEPLOY_42」那張沒有，就空手。alpha.164 起 is 是
+/// 問法，兩張都找得到，和只打主題一樣。英文問句其餘的組合在 `english_questions.rs`。
 #[test]
-fn an_english_when_is_question_still_needs_is_on_the_screen() {
+fn an_english_when_is_question_is_asked_like_the_topic() {
     for (label, mut db) in both() {
         let got = ask(&mut db, "when is the release candidate");
-        assert_eq!(
-            got.searched,
-            relaxed_when("is release candidate"),
-            "{label}"
-        );
+        assert_eq!(got.searched, relaxed_when("release candidate"), "{label}");
         assert_eq!(
             got.hit_texts,
             vec!["release candidate alpha is ready".to_owned()],
@@ -428,15 +423,11 @@ fn an_english_when_is_question_still_needs_is_on_the_screen() {
         );
         assert!(got.raws.is_empty(), "{label}：{:?}", got.raws);
 
-        assert!(
-            !db.search("ERR_DEPLOY_42", 1).unwrap().is_empty(),
-            "前提：看過 ERR_DEPLOY_42"
-        );
         let got = ask(&mut db, "when is ERR_DEPLOY_42");
-        assert!(got.empty, "{label}：{:?} {:?}", got.raws, got.hit_texts);
+        assert_eq!(got.searched, relaxed_when("ERR_DEPLOY_42"), "{label}");
         assert_eq!(
-            got.searched,
-            Some(SearchAdjustment::Relaxed("is ERR_DEPLOY_42".into())),
+            got.hit_texts,
+            vec!["部署失敗 ERR_DEPLOY_42".to_owned()],
             "{label}"
         );
     }

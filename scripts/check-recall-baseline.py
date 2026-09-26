@@ -405,7 +405,7 @@ if session_report is not None:
     )
 
 # 題數只寫這一次：liveness、延遲樣本和最後那一行都讀它。
-PHRASING_COUNT = 26
+PHRASING_COUNT = 29
 
 print("▶ 用真正的 sister CLI 跑口語最小對")
 phrasing = run(CORPUS, ROOT / "scenarios/recall-phrasing.questions.json")
