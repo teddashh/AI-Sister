@@ -98,7 +98,11 @@ c.commit()
 assert n == 1, f'沒有工作階段可以弄成當掉的樣子（改到 {n} 列）'
 EOF
 $C forget --last 24h --yes > crashed-forget.txt
-$C stats | grep -q '工作階段  *[1-9]' \
+# `sister` 的輸出先寫進檔案再 grep。`pipefail` 底下 `grep -q` 一找到就關管線，`sister`
+# 還在寫就 EPIPE、panic，整條算失敗：正面的斷言會假紅；反面的，那句話後面還有字要寫，
+# 就可能在它真的印出來時放過。2026-09-26 在負載 22 的機器上撞到正面這一種。
+$C stats > crashed-stats.txt
+grep -q '工作階段  *[1-9]' crashed-stats.txt \
   || { echo "::error::那一列沒有留下來——這個 fixture 沒驗到它要驗的東西"; exit 1; }
 check ./ci-crashed "當掉之後清空"
 
@@ -110,7 +114,8 @@ grep -q '空殼' s.txt \
   || { echo "::error::stats 上那個 1 沒有標成空殼——它是這一頁唯一一個不是 0 的數字"; exit 1; }
 # 反面：乾淨收尾的那一顆不可以也印「空殼」。少了這條，把那個但書寫成
 # 無條件的也一樣綠。（`s.txt` 被 `check` 蓋掉了，重印一次。）
-if $B --data-dir ./ci-erased stats | grep -q '空殼'; then
+$B --data-dir ./ci-erased stats > erased-stats.txt
+if grep -q '空殼' erased-stats.txt; then
   # 單引號：雙引號裡的反引號會被當成指令替換跑掉（上一版在這裡把
   # `timeout` 跑了一次，錯誤訊息裡多出一段 usage）。
   echo '::error::那一場好好地收尾了，sessions 那一列也真的被刪掉了，不該有空殼'
@@ -551,7 +556,8 @@ grep -qE '零當機.*升上來那天' upgrade.txt \
   || { echo "::error::[升上來的] 那個數字是回填的，句子卻說得像量到的"; grep 零當機 upgrade.txt; exit 1; }
 # 反面：全新的那一顆不准講這句。它的數字是精確的，多一句範圍聲明就是
 # 替一個沒有的問題道歉——而一句每台機器上都有的但書，很快就沒有人讀。
-if $B --data-dir ./ci-normal doctor | grep -q '升上來那天'; then
+$B --data-dir ./ci-normal doctor > normal-doctor.txt
+if grep -q '升上來那天' normal-doctor.txt; then
   echo "::error::[升上來的] 全新的資料庫也在替一個沒發生的升級道歉"
   exit 1
 fi
