@@ -2157,6 +2157,25 @@ mod tests {
         }
     }
 
+    /// 倒裝這一步自己拿掉主詞，不靠後面的 `question::terms`：那裡的虛字表剛好也有
+    /// i、you，走完整個 [`peel_retry`] 看不出主詞表少了這兩個。
+    #[test]
+    fn the_inversion_itself_takes_the_subject() {
+        for (query, want) in [
+            ("where can I find the build log", Some("find the build log")),
+            ("where’d you find the build log", Some("find the build log")),
+            ("when did they sign the contract", Some("sign the contract")),
+            ("when is ERR_DEPLOY_42", Some("ERR_DEPLOY_42")),
+            ("how much is the invoice", None),
+        ] {
+            assert_eq!(
+                strip_english_inversion(query).map(str::trim_start),
+                want,
+                "{query}"
+            );
+        }
+    }
+
     #[test]
     fn na_question_words_are_removed_whole() {
         assert_eq!(peel_retry_terms("哪一個客服電話"), "客服電話");
