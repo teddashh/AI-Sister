@@ -128,6 +128,9 @@ impl SearchAdjustment {
 /// 「哪裡」前後緊接的問法是例外，alpha.165 起一起切掉（[`widen_where`]）：「找得到」
 /// 「可以找到」在那份背景裡看過，索引分不出來，alpha.164 的「哪裡找得到月報連結」
 /// 因此改用「找得到月報連結」、空手。「怎麼找月報連結」的「找」照舊交給索引。
+/// alpha.166 起，說自己怎麼找的「找不到」「有沒有看到」「想找」也是例外
+/// （[`strip_looking`]）：alpha.165 的「為什麼找不到月報連結」改用「找不到月報連結」、
+/// 空手。
 /// 「到底」「那麼」的第一個字是虛字。先跑 [`question::terms`] 再認開頭，整段
 /// 已經不在了，所以每一圈先看原樣開頭；不是口語開頭才跑 terms、剝問句頭尾，
 /// 再認一次。「所以我想問為什麼部署失敗」先拿掉「所以」，terms 剝掉「我」，
@@ -165,6 +168,13 @@ impl SearchAdjustment {
 /// 的畫面來湊。alpha.164 起「where is the invoice for alpha」剝完也是這一串，
 /// 所以這裡一起擋。下一步 [`joint_retry`] 照樣會試，每一段都是條件，invoice
 /// 沒看過就空手。
+///
+/// 候選字從「的」開始，也不放寬：前面的主題沒看過、被索引拿掉，剩下的「的⋯」只是
+/// 在說哪一種。文件背景裡「火星」沒看過、「的畫面」看過，alpha.165 把「火星的畫面」
+/// 改用「的畫面」，拿 5 張不相干的畫面來湊；alpha.166 起「找不到火星的畫面」剝完也是
+/// 這一串。「的」前面沒看過、「的」也一起被拿掉的，照舊改用後面那段：「最新的月報連結」
+/// 問的是月報連結，「最新」沒看過照樣找。不能反過來要求「的」前面看過：那一段常常只是
+/// 修飾，這樣擋，「最新的客服專線」「公司的月報連結」都會空手。
 fn retry_candidate(db: &Db, query: &str, peeled: &str) -> Result<Option<String>> {
     let original = question::terms(query);
     if let Some(head) = before_english_joint(peeled)
@@ -177,7 +187,7 @@ fn retry_candidate(db: &Db, query: &str, peeled: &str) -> Result<Option<String>>
         IndexedCandidate::Unchanged => peeled.to_string(),
         IndexedCandidate::NoneSeen | IndexedCandidate::TooLong => return Ok(None),
     };
-    if candidate.is_empty() || candidate == original {
+    if candidate.is_empty() || candidate == original || candidate.starts_with('的') {
         return Ok(None);
     }
     // `Changed` 和 `Unchanged` 都已經折成 `candidate`，兩道出口只寫一次。
@@ -399,8 +409,21 @@ const QUESTION_WORDS: &[&str] = &[
 /// 問地點的中文問句詞。和 [`QUESTION_WORDS`] 一樣切，緊鄰的問法一起算進來，
 /// 見 [`widen_where`]。「哪」單獨一個字也收（「去哪找」）；同一位置取最長，所以
 /// 「哪個」「哪些」照舊是 [`QUESTION_WORDS`] 的字。英文的 where 留在那張表：
-/// 這裡前後的問法都是中文。
-const WHERE_WORDS: &[&str] = &["哪裡", "哪裏", "哪里", "哪兒", "哪儿", "哪邊", "哪边", "哪"];
+/// 這裡前後的問法都是中文。「哪個地方」整段收：只切「哪個」，「哪個地方有月報連結」
+/// 會剩「地方有月報連結」。「什麼地方」收了也到不了這裡：[`question::terms`] 先把
+/// 開頭的「什麼」當虛字剝掉。
+const WHERE_WORDS: &[&str] = &[
+    "哪裡",
+    "哪裏",
+    "哪里",
+    "哪兒",
+    "哪儿",
+    "哪邊",
+    "哪边",
+    "哪",
+    "哪個地方",
+    "哪个地方",
+];
 
 /// [`WHERE_WORDS`] 前面緊接的「去」「到」「在」：「去哪裡找月報連結」的「去」和
 /// 「哪裡」一起是問法。「到」「在」本來就是虛字，收進來是為了前面再接
@@ -416,12 +439,88 @@ const WHERE_GO_MODALS: &[&str] = &["可以", "應該", "应该", "該", "该"];
 /// 問的都是在哪裡。用過的索引看過「找得到」「找到」，不能交給它。「找到」不另收：
 /// 拿掉「找」之後，「到」本來就是虛字。單獨的「看」也不收：它本來就是虛字，最後一次
 /// [`question::terms`] 會剝掉開頭的它。收「看到」是為了前面接 [`WHERE_FIND_MODALS`]
-/// 的「哪裡可以看到」。
-const WHERE_FINDS: &[&str] = &["找得到", "找", "看得到", "看到"];
+/// 的「哪裡可以看到」。「查詢」「搜尋」在「哪裡」後面是找的動作；在句子開頭常是名詞
+/// （「查詢結果」），所以不在 [`LOOK_HEADS`]。「查得到」「查到」不另收：切完「哪裡」，
+/// 剩下開頭的「查得到」「可以查到」由 [`strip_looking`] 拿掉。
+const WHERE_FINDS: &[&str] = &[
+    "找得到",
+    "找",
+    "看得到",
+    "看到",
+    "查詢",
+    "查询",
+    "搜尋",
+    "搜寻",
+];
 
 /// [`WHERE_FINDS`] 前面可以先隔的「可以」「能」「才」：「哪裡可以找到」「在哪裡
 /// 才找得到」。後面沒有接找法就不算，「哪裡可以下載」的「可以」留著。
 const WHERE_FIND_MODALS: &[&str] = &["可以", "才能", "能", "才"];
+
+/// 他在說自己怎麼找，不是在說要找什麼：「找不到月報連結」「有沒有看到月報連結」
+/// 「我想找月報連結」。畫面上寫的是「月報連結已更新」，不會寫他找的動作。這些說法在
+/// 用過的索引裡看過，索引那一步分不出來，所以和「哪裡」前後的問法一樣，放寬時整段
+/// 拿掉（[`strip_looking`]）。「有沒有看到月報連結」是兩個找法，一次拿掉一個。
+///
+/// 動詞一定要接結果：單獨的「找」「看」「查」「搜」常是名詞的第一個字（找零、看板、
+/// 查核），單獨的「找」照舊交給索引。「查詢」「搜尋」「搜索」不收：「查詢結果」
+/// 「搜尋欄位」是畫面上的名詞，拿掉會剩「結果」「欄位」。「看過」「找過」「查過」
+/// 也不收：「查過期的發票」會剩「期的發票」。
+const LOOK_HEADS: &[&str] = &[
+    "找不到",
+    "找不著",
+    "找不着",
+    "找得到",
+    "找到",
+    "看不到",
+    "看得到",
+    "看到",
+    "查不到",
+    "查得到",
+    "查到",
+    "搜不到",
+    "搜得到",
+    "搜一下",
+    "尋找",
+    "寻找",
+    "想要找",
+    "想要看",
+    "想要查",
+    "想找",
+    "想看",
+    "想查",
+    "有沒有",
+    "有没有",
+];
+
+/// [`LOOK_HEADS`] 前面可以先接的：「沒看到」「怎麼都找不到」「一直找不到」「可以
+/// 查到」。後面沒有接找法就不算，「沒有回覆的郵件」照舊。
+const LOOK_HEAD_BEFORES: &[&str] = &[
+    "沒有", "没有", "沒", "没", "能", "可以", "都", "一直", "還是", "还是", "還", "还",
+];
+
+/// 結尾的找法：「月報連結找不到」「月報連結不見了」「月報連結有沒有」。「查」不收：
+/// 它在結尾常是名詞的最後一個字，「安全檢查不到」會剩「安全檢」。
+const LOOK_TAILS: &[&str] = &[
+    "找不到",
+    "找不著",
+    "找不着",
+    "找得到",
+    "找到",
+    "看不到",
+    "看得到",
+    "看到",
+    "不見",
+    "不见",
+    "有沒有",
+    "有没有",
+];
+
+/// [`LOOK_TAILS`] 前面可以先接的。「都」「還」單獨不收：它們常是名詞的最後一個字
+/// （首都、歸還），「首都找不到」會剩「首」。「還沒」整段收：「月報連結還沒找到」。
+const LOOK_TAIL_BEFORES: &[&str] = &[
+    "還沒", "还没", "沒有", "没有", "沒", "没", "一直", "還是", "还是",
+];
 
 /// 口語開頭。只給放寬用，不進 [`crate::facts::strip_fact_question_edges`]。
 /// 中文整段、只認開頭、同一位置取最長；英文只認獨立的一個字，不認複數 s、
@@ -672,7 +771,11 @@ fn peel_retry(terms: &str) -> Peeled<'_> {
     // 長度有下界，所以迴圈一定結束。沒有變短就停，避免空詞在原地打轉。
     // 先看原樣開頭：`question::terms` 會把虛字「到」「那」從「到底」「那麼」的頭上拿掉，
     // 也會把 what 當虛字拿掉，「what does」就認不出是倒裝。
-    let strip_head = |text| strip_spoken_lead_in(text).or_else(|| strip_english_inversion(text));
+    let strip_head = |text| {
+        strip_spoken_lead_in(text)
+            .or_else(|| strip_english_inversion(text))
+            .or_else(|| strip_looking(text))
+    };
     loop {
         let before = current;
         if let Some(rest) = strip_head(current) {
@@ -694,7 +797,11 @@ fn peel_retry(terms: &str) -> Peeled<'_> {
         }
         current = rest;
     }
-    let cut = cut_question_words(current);
+    let mut cut = cut_question_words(current);
+    // 問句詞拿掉之後露出來的找法：「為什麼找不到月報連結」「月報連結找不到怎麼辦」。
+    while let Some(rest) = strip_looking(cut) {
+        cut = rest;
+    }
     let (cut, tail_when) = cut_tail_asks(cut);
     let text = if question::only_filler(cut) {
         ""
@@ -888,6 +995,72 @@ fn longest_prefix(text: &str, words: &[&str]) -> Option<usize> {
         .filter(|word| text.starts_with(**word))
         .map(|word| word.len())
         .max()
+}
+
+/// 開頭或結尾的一個找法（[`LOOK_HEADS`]、[`LOOK_TAILS`]）拿掉，回傳剩下的；沒有就
+/// `None`。開頭那一個前面、結尾那一個後面只能是虛字：「我看不到月報連結」「月報
+/// 連結不見了」。結尾那一個前面要還有內容，而且不是「哪裡」：「月報連結可以在哪裡
+/// 找到」的「找到」是「哪裡」的找法，留給 [`widen_where`]；先拿掉的話，問句頭尾那張
+/// 表會把「在哪裡」切走，留下「可以」。要在原句上認：[`question::terms`] 把「看」當
+/// 虛字剝掉，「看不到月報連結」會剩「不到月報連結」。
+fn strip_looking(text: &str) -> Option<&str> {
+    look_head_end(text)
+        .map(|end| &text[end..])
+        .or_else(|| look_tail_start(text).map(|start| &text[..start]))
+}
+
+/// 開頭那一個找法結束的位置。
+fn look_head_end(text: &str) -> Option<usize> {
+    for (at, _) in text.char_indices() {
+        if !question::only_filler(&text[..at]) {
+            continue;
+        }
+        let rest = &text[at..];
+        let mut before = 0;
+        while let Some(len) = longest_prefix(&rest[before..], LOOK_HEAD_BEFORES) {
+            before += len;
+        }
+        if let Some(len) = longest_prefix(&rest[before..], LOOK_HEADS) {
+            return Some(at + before + len);
+        }
+    }
+    None
+}
+
+/// `text` 的結尾是 [`WHERE_WORDS`]，或 [`WHERE_WORDS`] 後面再接一個
+/// [`WHERE_FIND_MODALS`]：「在哪裡」「在哪裡可以」。
+fn ends_with_where(text: &str) -> bool {
+    let text = match longest_suffix(text, WHERE_FIND_MODALS) {
+        Some(len) => &text[..text.len() - len],
+        None => text,
+    };
+    longest_suffix(text, WHERE_WORDS).is_some()
+}
+
+/// 結尾那一個找法開始的位置。
+fn look_tail_start(text: &str) -> Option<usize> {
+    let ends = text
+        .char_indices()
+        .map(|(at, _)| at)
+        .chain([text.len()])
+        .rev();
+    for end in ends {
+        if !question::only_filler(&text[end..]) {
+            continue;
+        }
+        let Some(len) = longest_suffix(&text[..end], LOOK_TAILS) else {
+            continue;
+        };
+        let mut start = end - len;
+        if ends_with_where(&text[..start]) {
+            return None;
+        }
+        while let Some(len) = longest_suffix(&text[..start], LOOK_TAIL_BEFORES) {
+            start -= len;
+        }
+        return (!question::only_filler(&text[..start])).then_some(start);
+    }
+    None
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2320,6 +2493,132 @@ mod tests {
             ("晨會在哪裡開", "晨會"),
             ("匯出功能在哪裡找得到", "匯出功能"),
             ("心得在哪裡找得到", "心得"),
+        ] {
+            assert_eq!(peel_retry_terms(query), want, "{query}");
+        }
+    }
+
+    /// 說自己怎麼找的整段拿掉：開頭的、結尾的，連同前面先接的「沒」「一直」「還是」。
+    /// 每一張表上的每一個字各有一題：少了哪一個，那一題就會多剩下字。
+    #[test]
+    fn how_he_looked_is_removed_whole() {
+        for (query, want) in [
+            // 開頭（LOOK_HEADS）。
+            ("找不到月報連結", "月報連結"),
+            ("找不著月報連結", "月報連結"),
+            ("找不着月报链接", "月报链接"),
+            ("找得到月報連結嗎", "月報連結"),
+            ("找到月報連結了嗎", "月報連結"),
+            ("看不到月報連結", "月報連結"),
+            ("看得到月報連結嗎", "月報連結"),
+            ("看到月報連結了嗎", "月報連結"),
+            ("查不到月報連結", "月報連結"),
+            ("查得到月報連結嗎", "月報連結"),
+            ("查到月報連結了嗎", "月報連結"),
+            ("搜不到月報連結", "月報連結"),
+            ("搜得到月報連結嗎", "月報連結"),
+            ("搜一下月報連結", "月報連結"),
+            ("尋找月報連結", "月報連結"),
+            ("寻找月报链接", "月报链接"),
+            ("想要找月報連結", "月報連結"),
+            ("想要看月報連結", "月報連結"),
+            ("想要查月報連結", "月報連結"),
+            ("我想找月報連結", "月報連結"),
+            ("想看月報連結", "月報連結"),
+            ("想查月報連結", "月報連結"),
+            ("有沒有月報連結", "月報連結"),
+            ("有没有月报链接", "月报链接"),
+            // 開頭前面先接的（LOOK_HEAD_BEFORES）。
+            ("沒有看到月報連結", "月報連結"),
+            ("没有看到月报链接", "月报链接"),
+            ("沒看到月報連結", "月報連結"),
+            ("没看到月报链接", "月报链接"),
+            ("能找到月報連結嗎", "月報連結"),
+            ("可以查到月報連結嗎", "月報連結"),
+            ("怎麼都找不到月報連結", "月報連結"),
+            ("一直找不到月報連結", "月報連結"),
+            ("還是找不到月報連結", "月報連結"),
+            ("还是找不到月报链接", "月报链接"),
+            ("還沒看到月報連結", "月報連結"),
+            ("还没看到月报链接", "月报链接"),
+            // 兩個找法連著，一次拿掉一個；前面的虛字不擋。
+            ("有沒有看到月報連結", "月報連結"),
+            ("有沒有找到月報連結", "月報連結"),
+            ("我看不到月報連結", "月報連結"),
+            // 結尾（LOOK_TAILS）。
+            ("月報連結找不到", "月報連結"),
+            ("月報連結找不著", "月報連結"),
+            ("月报链接找不着", "月报链接"),
+            ("月報連結找得到嗎", "月報連結"),
+            ("月報連結有找到嗎", "月報連結"),
+            ("月報連結看不到", "月報連結"),
+            ("月報連結看得到嗎", "月報連結"),
+            ("月報連結有看到嗎", "月報連結"),
+            ("月報連結不見了", "月報連結"),
+            ("月报链接不见了", "月报链接"),
+            ("月報連結有沒有", "月報連結"),
+            ("月报链接有没有", "月报链接"),
+            // 結尾前面先接的（LOOK_TAIL_BEFORES）。
+            ("月報連結還沒找到", "月報連結"),
+            ("月报链接还没找到", "月报链接"),
+            ("月報連結沒有找到", "月報連結"),
+            ("月报链接没有找到", "月报链接"),
+            ("月報連結沒找到", "月報連結"),
+            ("月报链接没找到", "月报链接"),
+            ("月報連結一直找不到", "月報連結"),
+            ("月報連結還是找不到", "月報連結"),
+            ("月报链接还是找不到", "月报链接"),
+            // 問句詞拿掉之後才露出來的。
+            ("為什麼找不到月報連結", "月報連結"),
+            ("怎麼沒看到月報連結", "月報連結"),
+            ("為什麼我看不到月報連結", "月報連結"),
+            ("月報連結找不到怎麼辦", "月報連結"),
+            // 「哪裡」後面的找法歸「哪裡」：結尾那一步不先拿。
+            ("月報連結可以在哪裡找到", "月報連結"),
+            ("月報連結在哪裡可以找到", "月報連結"),
+            ("月報連結哪裡看得到", "月報連結"),
+            // 只有找法，什麼都不剩。
+            ("找不到", ""),
+            ("有沒有", ""),
+        ] {
+            assert_eq!(peel_retry_terms(query), want, "{query}");
+        }
+    }
+
+    /// 單獨的「找」「看」「查」「搜」、「查詢」「搜尋」、「看過」「查過」都常是名詞的一部分；
+    /// 結尾不收「查」和單獨的「都」「還」。這些照舊留著。
+    #[test]
+    fn a_name_that_starts_or_ends_like_looking_is_kept() {
+        for (query, want) in [
+            ("查詢結果", "查詢結果"),
+            ("搜尋欄位", "搜尋欄位"),
+            ("查核報告", "查核報告"),
+            ("找零錢", "找零錢"),
+            ("查過期的發票", "查過期的發票"),
+            ("沒有回覆的郵件", "沒有回覆的郵件"),
+            ("安全檢查不到", "安全檢查不"),
+            ("首都找不到", "首都"),
+            ("歸還找不到", "歸還"),
+            ("匯出功能找不到", "匯出功能"),
+        ] {
+            assert_eq!(peel_retry_terms(query), want, "{query}");
+        }
+    }
+
+    /// 「哪個地方」整段是問地點的字；「查詢」「搜尋」在「哪裡」後面是找的動作；
+    /// 「查得到」「可以查到」切完「哪裡」由找法那一步拿掉。
+    #[test]
+    fn where_also_takes_which_place_and_searching() {
+        for (query, want) in [
+            ("哪個地方有月報連結", "月報連結"),
+            ("哪个地方有月报链接", "月报链接"),
+            ("哪裡查詢月報連結", "月報連結"),
+            ("哪裡可以查詢月報連結", "月報連結"),
+            ("哪里查询月报链接", "月报链接"),
+            ("去哪裡搜尋月報連結", "月報連結"),
+            ("去哪里搜寻月报链接", "月报链接"),
+            ("哪裡查得到月報連結", "月報連結"),
+            ("哪裡可以查到月報連結", "月報連結"),
         ] {
             assert_eq!(peel_retry_terms(query), want, "{query}");
         }
