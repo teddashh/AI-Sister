@@ -2130,6 +2130,7 @@ mod tests {
             ("contract  with   vendor", Some("contract")),
             ("部署失敗 in staging", Some("部署失敗")),
             ("format of the log", Some("format")),
+            ("format for alpha", Some("format")),
             ("for the vendor", None),
             ("login page", None),
             ("build log", None),
