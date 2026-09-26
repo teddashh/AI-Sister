@@ -494,9 +494,33 @@ const LOOK_HEADS: &[&str] = &[
 ];
 
 /// [`LOOK_HEADS`] 前面可以先接的：「沒看到」「怎麼都找不到」「一直找不到」「可以
-/// 查到」。後面沒有接找法就不算，「沒有回覆的郵件」照舊。
+/// 查到」。後面沒有接找法就不算，「沒有回覆的郵件」照舊。請她幫忙的客氣話也在這裡：
+/// 「能不能幫我找」「麻煩你幫我查」「請幫我找」（[`HELP_ASKS`]）。
 const LOOK_HEAD_BEFORES: &[&str] = &[
-    "沒有", "没有", "沒", "没", "能", "可以", "都", "一直", "還是", "还是", "還", "还",
+    "沒有",
+    "没有",
+    "沒",
+    "没",
+    "能不能",
+    "能",
+    "可不可以",
+    "可以",
+    "都",
+    "一直",
+    "還是",
+    "还是",
+    "還",
+    "还",
+    "麻煩你",
+    "麻煩妳",
+    "麻烦你",
+    "麻煩",
+    "麻烦",
+    "請你",
+    "請妳",
+    "请你",
+    "請",
+    "请",
 ];
 
 /// 結尾的找法：「月報連結找不到」「月報連結不見了」「月報連結有沒有」。「查」不收：
@@ -518,8 +542,65 @@ const LOOK_TAILS: &[&str] = &[
 
 /// [`LOOK_TAILS`] 前面可以先接的。「都」「還」單獨不收：它們常是名詞的最後一個字
 /// （首都、歸還），「首都找不到」會剩「首」。「還沒」整段收：「月報連結還沒找到」。
+/// 客氣話和開頭那張一樣，只少了單獨的「能」「請」：「匯出功能找不到」「加班申請
+/// 找不到」會剩「匯出功」「加班申」。
 const LOOK_TAIL_BEFORES: &[&str] = &[
-    "還沒", "还没", "沒有", "没有", "沒", "没", "一直", "還是", "还是",
+    "還沒",
+    "还没",
+    "沒有",
+    "没有",
+    "沒",
+    "没",
+    "一直",
+    "還是",
+    "还是",
+    "能不能",
+    "可不可以",
+    "可以",
+    "麻煩你",
+    "麻煩妳",
+    "麻烦你",
+    "麻煩",
+    "麻烦",
+    "請你",
+    "請妳",
+    "请你",
+];
+
+/// 請她幫忙找：「幫我找月報連結」「幫忙查一下客服專線」「月報連結幫我找一下」。
+/// 和 [`LOOK_HEADS`] 一樣，說的是要她做什麼，不是要找什麼，放寬時整段拿掉。
+/// 後面要接 [`HELP_LOOKS`] 才算：「幫我看一下這個」剝完什麼都不剩，「幫我買」
+/// 「幫忙的人」照舊。
+const HELP_ASKS: &[&str] = &["幫我", "帮我", "幫忙", "帮忙", "替我"];
+
+/// [`HELP_ASKS`] 後面的找法。單獨一個字的「找」「查」「搜」「看」在這裡收：前面是
+/// 「幫我」，它們只會是動詞。
+///
+/// 開頭取最短的：「幫我找出差報告」要留下「出差報告」，「幫我查詢價單」要留下「詢價單」。
+/// 第二個字是找法的一部分還是名詞的第一個字，這一步分不出來，交給索引那一步：「幫我查詢
+/// 月報連結」剝完剩「詢月報連結」，索引沒看過「詢月」，會把「詢」拿掉。結尾沒有這個問題，
+/// 「幫我」在找法前面，取最長：「月報連結幫我查詢一下」「月報連結幫我找找」。所以第一個字
+/// 自己就是找法的（找找、找出來、找到、查查、查詢、搜尋），只有結尾用得到。「找到」是給
+/// 「月報連結幫我找到了嗎」的：[`LOOK_TAILS`] 也有「找到」，只認得那一個的話，會剩
+/// 「月報連結幫」。「查到」不收：結尾那張沒有它，「到」本來就是虛字。「看看」不收，後一個
+/// 「看」本來就是虛字。單獨的「翻」不收：「幫我翻譯」會剩「譯」。「翻一下」「翻翻」整段收，
+/// 前面沒有單獨的「翻」可以讓，開頭結尾都用得到。
+const HELP_LOOKS: &[&str] = &[
+    "找找",
+    "找出來",
+    "找到",
+    "找",
+    "查查",
+    "查詢",
+    "查询",
+    "查",
+    "搜尋",
+    "搜寻",
+    "搜索",
+    "搜",
+    "看",
+    "翻一下",
+    "翻翻",
 ];
 
 /// 口語開頭。只給放寬用，不進 [`crate::facts::strip_fact_question_edges`]。
@@ -666,6 +747,22 @@ const ENGLISH_CONTRACTIONS: &[&str] = &["s", "re", "d", "ll", "ve"];
 /// 倒裝的助動詞後面緊接的主詞。全大寫的兩個字以上不算：「IT」是部門，不是 it。
 const ENGLISH_SUBJECTS: &[&str] = &["i", "you", "we", "they", "he", "she", "it"];
 
+/// 英文請她幫忙找（[`strip_english_request`]）開頭的「can you」「could you」。後面
+/// 一定要接 you：「Will 的 PR」的 Will 不是在問她。
+const ENGLISH_REQUEST_AUXILIARIES: &[&str] = &["can", "could", "would", "will"];
+
+/// 英文的找法。兩個字的整段收：「look up」「search for」。
+const ENGLISH_LOOKS: &[&[&str]] = &[
+    &["look", "up"],
+    &["look", "for"],
+    &["search", "for"],
+    &["pull", "up"],
+    &["find"],
+    &["search"],
+    &["locate"],
+    &["show"],
+];
+
 /// 英文問句的倒裝：開頭是問句詞（[`QUESTION_WORDS`] 和 [`crate::facts::WHEN_ASKS`]
 /// 的英文），後面緊接一個助動詞，就連同助動詞、和它後面的一個主詞代名詞一起拿掉，
 /// 回傳剩下的那段。「when is ERR_DEPLOY_42」剩「ERR_DEPLOY_42」，「where can I find
@@ -721,6 +818,55 @@ fn strip_english_inversion(text: &str) -> Option<&str> {
     }
 }
 
+/// 英文請她幫忙找：「can you find the build log」「could you please look up
+/// ERR_DEPLOY_42」「help me find the build log」。和 [`HELP_ASKS`] 一樣，說的是要她
+/// 做什麼，放寬時整段拿掉，回傳後面那段。「please」「can you」（[`ENGLISH_REQUEST_AUXILIARIES`]）
+/// 「help」「help me」可以接好幾段、不管順序，最後一定要接 [`ENGLISH_LOOKS`]。前面沒有這
+/// 幾段時，只收兩個字的找法（look up、search for）：單獨的 search、find 常是名詞的頭
+/// （search results、Find My iPhone），照舊交給後面幾步。不是這個形狀就 `None`。
+///
+/// alpha.166 以前這些字留在候選字裡。索引看過 can 的話（隨便一張「I can do it」），
+/// 「can you find the build log」頭尾都不拿，剝完和第一次查詢一樣，不放寬，空手；
+/// 「can you find mars」改用「can」或「can you find」，拿一張不相干的畫面來湊。
+fn strip_english_request(text: &str) -> Option<&str> {
+    let mut rest = text;
+    let mut asked = false;
+    loop {
+        let next = after_ascii_word(rest, "please")
+            .or_else(|| {
+                let (aux, after) = split_ascii_word(rest.trim_start())?;
+                ENGLISH_REQUEST_AUXILIARIES
+                    .iter()
+                    .any(|w| aux.eq_ignore_ascii_case(w))
+                    .then(|| after_ascii_word(after, "you"))?
+            })
+            .or_else(|| {
+                after_ascii_word(rest, "help")
+                    .map(|after| after_ascii_word(after, "me").unwrap_or(after))
+            });
+        let Some(after) = next else {
+            break;
+        };
+        rest = after;
+        asked = true;
+    }
+    ENGLISH_LOOKS
+        .iter()
+        .filter(|words| asked || words.len() > 1)
+        .filter_map(|words| {
+            words
+                .iter()
+                .try_fold(rest, |at, word| after_ascii_word(at, word))
+        })
+        .min_by_key(|after| after.len())
+}
+
+/// `text` 開頭（空白先略過）是獨立的英文字 `word`（不分大小寫），回傳它後面那段。
+fn after_ascii_word<'a>(text: &'a str, word: &str) -> Option<&'a str> {
+    let (first, after) = split_ascii_word(text.trim_start())?;
+    first.eq_ignore_ascii_case(word).then_some(after)
+}
+
 /// 開頭一個英文字，和它後面的字。字母開頭，中間可以有一個撇號接字母（isn't、
 /// can’t）；後面要是結尾、空白、非 ASCII 或句讀（`,` `:` `;` `!` `?`），和
 /// [`ascii_lead_in_end`] 同一種邊界：`is_valid`、`is-it` 不是 is。撇號後面是縮寫
@@ -763,7 +909,8 @@ struct Peeled<'q> {
     tail_when: AsksWhen,
 }
 
-/// 口語開頭、英文問句的倒裝（[`strip_english_inversion`]）、頭尾問句用語、問句詞、
+/// 口語開頭、英文問句的倒裝（[`strip_english_inversion`]）、英文請她幫忙找
+/// （[`strip_english_request`]）、找法（[`strip_looking`]）、頭尾問句用語、問句詞、
 /// 尾巴的問法名詞（[`TAIL_ASKS`]），再一次 [`question::terms`]。
 fn peel_retry(terms: &str) -> Peeled<'_> {
     let mut current = terms;
@@ -774,6 +921,7 @@ fn peel_retry(terms: &str) -> Peeled<'_> {
     let strip_head = |text| {
         strip_spoken_lead_in(text)
             .or_else(|| strip_english_inversion(text))
+            .or_else(|| strip_english_request(text))
             .or_else(|| strip_looking(text))
     };
     loop {
@@ -997,7 +1145,30 @@ fn longest_prefix(text: &str, words: &[&str]) -> Option<usize> {
         .max()
 }
 
-/// 開頭或結尾的一個找法（[`LOOK_HEADS`]、[`LOOK_TAILS`]）拿掉，回傳剩下的；沒有就
+/// `text` 開頭的 [`HELP_ASKS`] 加 [`HELP_LOOKS`] 的 byte 長度。找法取最短的，理由在
+/// [`HELP_LOOKS`]。
+fn help_look_prefix(text: &str) -> Option<usize> {
+    let ask = longest_prefix(text, HELP_ASKS)?;
+    HELP_LOOKS
+        .iter()
+        .filter(|look| text[ask..].starts_with(**look))
+        .map(|look| ask + look.len())
+        .min()
+}
+
+/// `text` 結尾的 [`HELP_ASKS`] 加 [`HELP_LOOKS`] 的 byte 長度。
+fn help_look_suffix(text: &str) -> Option<usize> {
+    HELP_LOOKS
+        .iter()
+        .filter(|look| text.ends_with(**look))
+        .filter_map(|look| {
+            longest_suffix(&text[..text.len() - look.len()], HELP_ASKS).map(|ask| ask + look.len())
+        })
+        .max()
+}
+
+/// 開頭或結尾的一個找法（[`LOOK_HEADS`]、[`LOOK_TAILS`]，或請她幫忙找的
+/// [`HELP_ASKS`] 加 [`HELP_LOOKS`]）拿掉，回傳剩下的；沒有就
 /// `None`。開頭那一個前面、結尾那一個後面只能是虛字：「我看不到月報連結」「月報
 /// 連結不見了」。結尾那一個前面不能緊接著「哪裡」：「月報連結可以在哪裡找到」的
 /// 「找到」是「哪裡」的找法，留給 [`widen_where`]；先拿掉的話，問句頭尾那張表會把
@@ -1020,7 +1191,8 @@ fn look_head_end(text: &str) -> Option<usize> {
         while let Some(len) = longest_prefix(&rest[before..], LOOK_HEAD_BEFORES) {
             before += len;
         }
-        if let Some(len) = longest_prefix(&rest[before..], LOOK_HEADS) {
+        let look = &rest[before..];
+        if let Some(len) = longest_prefix(look, LOOK_HEADS).max(help_look_prefix(look)) {
             return Some(at + before + len);
         }
     }
@@ -1038,7 +1210,9 @@ fn look_tail_start(text: &str) -> Option<usize> {
         if !question::only_filler(&text[end..]) {
             continue;
         }
-        let Some(len) = longest_suffix(&text[..end], LOOK_TAILS) else {
+        let Some(len) =
+            longest_suffix(&text[..end], LOOK_TAILS).max(help_look_suffix(&text[..end]))
+        else {
             continue;
         };
         let mut start = end - len;
@@ -2580,8 +2754,138 @@ mod tests {
         }
     }
 
+    /// 請她幫忙找的整段拿掉，連同前面的「能不能」「麻煩你」「請」。每一張表上的每一個字
+    /// 各有一題：少了哪一個，那一題就會多剩下字。
+    #[test]
+    fn a_request_to_help_look_is_removed_whole() {
+        for (query, want) in [
+            // 幫忙的說法（HELP_ASKS）。
+            ("幫我搜一下月報連結", "月報連結"),
+            ("帮我找月报链接", "月报链接"),
+            ("幫忙找月報連結", "月報連結"),
+            ("帮忙找月报链接", "月报链接"),
+            ("替我找月報連結", "月報連結"),
+            // 後面的找法（HELP_LOOKS）。兩個字的只給結尾用。
+            ("月報連結幫我找找", "月報連結"),
+            ("月報連結可以幫我找出來嗎", "月報連結"),
+            ("月報連結幫我找到了嗎", "月報連結"),
+            ("月報連結幫我查查", "月報連結"),
+            ("月報連結幫我查詢一下", "月報連結"),
+            ("月报链接帮我查询一下", "月报链接"),
+            ("月報連結幫忙查一下", "月報連結"),
+            ("月報連結幫我搜尋一下", "月報連結"),
+            ("月报链接帮我搜寻一下", "月报链接"),
+            ("月报链接帮我搜索一下", "月报链接"),
+            ("幫我翻一下月報連結", "月報連結"),
+            ("月報連結幫我翻翻", "月報連結"),
+            // 「查到」不在表上：「到」是虛字。
+            ("月報連結幫我查到了嗎", "月報連結"),
+            // 開頭取最短的：第二個字可能是名詞的第一個字。是找法的一部分的，留給索引
+            // 那一步拿掉（「詢月」沒看過）。
+            ("可以幫我找出差報告嗎", "出差報告"),
+            ("幫我查詢價單", "詢價單"),
+            ("幫我查詢月報連結", "詢月報連結"),
+            // 開頭前面先接的客氣話（LOOK_HEAD_BEFORES）。
+            ("能不能幫我找月報連結", "月報連結"),
+            ("能幫我找月報連結嗎", "月報連結"),
+            ("可不可以幫我找月報連結", "月報連結"),
+            ("可以幫我找月報連結嗎", "月報連結"),
+            ("能不能找到月報連結", "月報連結"),
+            ("可不可以找到月報連結", "月報連結"),
+            ("麻煩你幫我找月報連結", "月報連結"),
+            ("麻煩妳幫我查一下月報連結", "月報連結"),
+            ("麻烦你帮我找月报链接", "月报链接"),
+            ("麻煩幫我找月報連結", "月報連結"),
+            ("麻烦帮我找月报链接", "月报链接"),
+            ("請你幫我找月報連結", "月報連結"),
+            ("請妳幫我找月報連結", "月報連結"),
+            ("请你帮我找月报链接", "月报链接"),
+            ("請幫忙找月報連結", "月報連結"),
+            ("请帮忙找月报链接", "月报链接"),
+            ("可以請你幫我找月報連結嗎", "月報連結"),
+            ("妳可以幫我找月報連結嗎", "月報連結"),
+            // 結尾前面先接的客氣話（LOOK_TAIL_BEFORES）。
+            ("月報連結能不能幫我找", "月報連結"),
+            ("月報連結可不可以幫我找", "月報連結"),
+            ("月報連結可以找到嗎", "月報連結"),
+            ("月報連結麻煩你幫我找一下", "月報連結"),
+            ("月報連結麻煩妳幫我查一下", "月報連結"),
+            ("月报链接麻烦你帮我找一下", "月报链接"),
+            ("月報連結麻煩幫我找一下", "月報連結"),
+            ("月报链接麻烦帮我找一下", "月报链接"),
+            ("月報連結請你幫我找一下", "月報連結"),
+            ("月報連結請妳幫我找一下", "月報連結"),
+            ("月报链接请你帮我找一下", "月报链接"),
+            ("月報連結妳可以幫我找嗎", "月報連結"),
+            // 只有請她幫忙，什麼都不剩。
+            ("可以幫我找嗎", ""),
+            ("麻煩妳幫我查一下", ""),
+            ("幫我看一下這個", ""),
+        ] {
+            assert_eq!(peel_retry_terms(query), want, "{query}");
+        }
+    }
+
+    /// 英文請她幫忙找的整段拿掉：「can you」「please」「help me」後面接找法。每一張表上的
+    /// 每一個字各有一題。
+    #[test]
+    fn an_english_request_to_look_is_removed_whole() {
+        for (query, want) in [
+            // 開頭的 can you（ENGLISH_REQUEST_AUXILIARIES）。
+            ("can you find the build log", "build log"),
+            ("could you find the build log", "build log"),
+            ("would you look up ERR_DEPLOY_42", "ERR_DEPLOY_42"),
+            ("will you search for the build log", "build log"),
+            // please、help、help me，不管順序、可以接好幾段。
+            ("please search for the build log", "build log"),
+            ("help me find the build log", "build log"),
+            ("help find the build log", "build log"),
+            ("can you help me find the build log", "build log"),
+            (
+                "could you please help me look up ERR_DEPLOY_42",
+                "ERR_DEPLOY_42",
+            ),
+            ("can you please find the build log", "build log"),
+            ("please can you find the build log", "build log"),
+            // 找法（ENGLISH_LOOKS）。
+            ("can you look up ERR_DEPLOY_42", "ERR_DEPLOY_42"),
+            ("could you look for the build log", "build log"),
+            ("can you pull up the build log", "build log"),
+            ("can you search the build log", "build log"),
+            ("can you locate the build log", "build log"),
+            ("can you show me the build log", "build log"),
+            // 前面沒有 can you、please、help，只收兩個字的找法。
+            ("look up ERR_DEPLOY_42", "ERR_DEPLOY_42"),
+            ("look for the build log", "build log"),
+            ("search for the build log", "build log"),
+            ("pull up the build log", "build log"),
+            // 後面接中文也一樣。
+            ("can you find 月報連結", "月報連結"),
+            ("can you find月報連結", "月報連結"),
+        ] {
+            assert_eq!(peel_retry_terms(query), want, "{query}");
+        }
+    }
+
+    /// 單獨的 search 常是名詞的頭；can、Will 後面不是 you、後面沒有接找法的，照舊留著。
+    #[test]
+    fn english_that_only_starts_like_a_request_is_kept() {
+        for (query, want) in [
+            ("search results", "search results"),
+            ("search history", "search history"),
+            ("Will find the build log", "Will find the build log"),
+            (
+                "can you remember the meeting",
+                "can you remember the meeting",
+            ),
+            ("help desk", "help desk"),
+        ] {
+            assert_eq!(peel_retry_terms(query), want, "{query}");
+        }
+    }
+
     /// 單獨的「找」「看」「查」「搜」、「查詢」「搜尋」、「看過」「查過」都常是名詞的一部分；
-    /// 結尾不收「查」和單獨的「都」「還」。這些照舊留著。
+    /// 結尾不收「查」和單獨的「都」「還」「能」「請」。這些照舊留著。
     #[test]
     fn a_name_that_starts_or_ends_like_looking_is_kept() {
         for (query, want) in [
@@ -2595,6 +2899,13 @@ mod tests {
             ("首都找不到", "首都"),
             ("歸還找不到", "歸還"),
             ("匯出功能找不到", "匯出功能"),
+            ("加班申請找不到", "加班申請"),
+            // 「幫我」「幫忙」後面沒有接找法、客氣話後面沒有接找法，照舊留著。
+            ("幫忙的人", "幫忙的人"),
+            ("幫我買咖啡", "幫我買咖啡"),
+            ("幫我翻譯月報", "幫我翻譯月報"),
+            ("麻煩的月報連結", "麻煩的月報連結"),
+            ("請假單", "請假單"),
         ] {
             assert_eq!(peel_retry_terms(query), want, "{query}");
         }

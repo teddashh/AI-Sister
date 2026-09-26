@@ -531,6 +531,70 @@
           }
         ]
       }
+    },
+    {
+      "id": "phrasing-32",
+      "question": "can you look up ERR_DEPLOY_42",
+      "source": "hand_labeled",
+      "expected": {
+        "outcome": "answer",
+        "any_of": [
+          "ERR_DEPLOY_42"
+        ],
+        "evidence": [
+          {
+            "event_index": 1
+          }
+        ]
+      }
+    },
+    {
+      "id": "phrasing-33",
+      "question": "can you find the release candidate",
+      "source": "hand_labeled",
+      "expected": {
+        "outcome": "answer",
+        "any_of": [
+          "release candidate"
+        ],
+        "evidence": [
+          {
+            "event_index": 2
+          }
+        ]
+      }
+    },
+    {
+      "id": "phrasing-34",
+      "question": "please search for ERR_DEPLOY_42",
+      "source": "hand_labeled",
+      "expected": {
+        "outcome": "answer",
+        "any_of": [
+          "ERR_DEPLOY_42"
+        ],
+        "evidence": [
+          {
+            "event_index": 1
+          }
+        ]
+      }
+    },
+    {
+      "id": "phrasing-35",
+      "question": "can you help me find the release candidate",
+      "source": "hand_labeled",
+      "expected": {
+        "outcome": "answer",
+        "any_of": [
+          "release candidate"
+        ],
+        "evidence": [
+          {
+            "event_index": 2
+          }
+        ]
+      }
     }
   ]
 }
