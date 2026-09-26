@@ -2820,3 +2820,115 @@ job 全綠，Release 被跳過。`rerun --failed` 第二次 Windows、Release、
 - 突變那一輪 load 21 上下時，`brain::tests::inherited_output_pipe_in_a_descendant_cannot_hold_the_invocation_open`
   和 `brain::tests::timeout_still_runs_when_provider_never_reads_a_pipe_filling_stdin` 一起紅過一次
   （兩條都有 2 秒牆鐘上限）。這兩條在控制組和其餘 17 刀的那幾趟都綠。已知 flake 再多兩條。
+
+## 32. alpha.164：英文問句「when is ERR_DEPLOY_42」「where can I find the build log」，她答得和只打主題一樣（2026-09-25）
+
+30.5 登記的「英文的 is 還是條件」，這一版補上。grok 回 402、codex 沒額度，這一版也是我自己寫的。
+
+### 32.1 alpha.163 的出貨收據
+
+tag `v0.1.0-alpha.163` 打在 `a53362b`。分支那一趟（36204636060）六個 job 全綠。本機 gates 在
+detached 的 `a53362b`（樹 `8c34de46abfd3b59`）上 53 條全綠。tag 那一趟（36207332387）八個 job
+第一次就全綠，release 於 **2026-09-26T02:00:04Z** 發出，四個 asset、prerelease，body 前綴和本機
+`release-notes.sh` 產的一致。
+
+### 32.2 拿掉什麼、切開什麼
+
+- 第一次查詢一個字都不改，只動放寬那幾步。
+- `strip_english_inversion`：開頭是英文問句詞（`question::QUESTION_WORDS` 和 `facts::WHEN_ASKS`
+  裡的 ASCII 字，when 只在後者），**緊接著**是 `ENGLISH_AUXILIARIES` 裡的助動詞，連同後面至多
+  一個 `ENGLISH_SUBJECTS`（i、you、we、they、he、she、it）一起剝掉。縮寫（'s、're、'd、'll、've，
+  直撇號和彎撇號都認）和 n't 也算。全大寫的 IT 不是主詞。問句詞要是整個字（whenever 不算），
+  is 後面連著底線或連字號（is_valid、is-it）也不算。`peel_retry` 的兩處都經 `strip_head`：
+  先試口語開頭，再試這一條。
+- `ENGLISH_JOINTS`（of、for、in、at、by、with、from、about）：`joint_retry` 切出來的段整段等於
+  其中一個字就丟掉，和「的」一樣。format 裡的 for 不算。
+- `retry_candidate` 多一條：第一個英文接頭前面那一段整段沒看過（`IndexedCandidate::NoneSeen`），
+  索引那一步不出候選字；`joint_retry` 照樣會試。為什麼要這條，見 32.4 第一點。
+
+### 32.3 收貨
+
+- 探針 69 題 × 四份背景（沒有背景、17 句、repo 文件、英文授權檔）＝276 格，alpha.163 的樹對這一版：
+  - 96 格空手變找到。
+  - 16 格找到的一樣：改用的字從「is release candidate」變「release candidate」，那張畫面上剛好有 is。
+  - 6 格找到變空手，全是拿來湊的：「where is it」「where is the invoice」以前改用「is」拿 1 筆，
+    或改用「is the」拿 5 筆（文件、英文兩份背景）。
+  - 7 格空手照舊、說法不同：改用的字少了 is、will、would、has 或 the；英文背景的「what does
+    ERR_DEPLOY_42 mean」以前不印「改用」，現在改用「ERR_DEPLOY_42 mean」、0 筆；文件背景的
+    「where is it」以前改用「is it」、0 筆，現在不印。
+  - 其餘 151 格一樣。加上接頭前段那條規則前後，276 格一格都沒動。
+- 第二份探針（沒看過的頭＋英文接頭，16 題 × 4＝64 格），alpha.163 對這一版：
+  - 10 格找到變空手，全是拿來湊的：「invoice for alpha」以前改用「alpha」或「for alpha」，
+    「the invoice for the release candidate」改用「release candidate」，「plorkin with the vendor」
+    改用「vendor」，「invoice of ERR_DEPLOY_42」改用「ERR_DEPLOY_42」；英文背景的「why did it crash」
+    以前改用「it」拿 5 筆。
+  - 9 格空手變找到：「where is the build log for staging／plorkin」改用「build log」、「where is
+    the contract of plorkin」改用「contract」（沒有背景和 17 句，6 格）；文件背景的「why did it
+    crash」「why did it fail」「when did it fail」改用「crash」「fail」、各拿 5 筆（3 格，代價）。
+  - 2 格找到的不一樣：英文背景的「why／when did it fail」以前改用「it fail」拿 1 筆，現在改用
+    「fail」拿 5 筆（代價）。
+  - 29 格空手照舊、說法不同，14 格一樣。
+  - 只看接頭前段那條規則：加之前對加之後，18 格找到變空手（上面那幾題，加上「where is the
+    invoice for alpha」這一類剝完才變成同一串的），14 格空手照舊、說法不同，32 格一樣。
+- 新測試搬到 alpha.163 的樹上跑：`english_questions.rs` 7 條紅 6 條，綠的是背景前提那條；
+  `when_questions.rs` 改寫的那條紅，其餘 10 條綠；`joint_relax.rs` 改寫的那條紅，其餘 9 條綠；
+  `asked_another_way.rs` 只改記事本，10 條綠。
+- `when_questions.rs` 和 `joint_relax.rs` 各有一條舊測試釘著「is 還是條件」的代價
+  （`an_english_when_is_question_still_needs_is_on_the_screen`、`an_english_filler_is_not_a_condition_after_the_split`）。
+  這一版就是要改那個代價，兩條改寫成相反的斷言；alpha.162 那一節清單的英文題和記事本那一行
+  一起拿掉，英文改在新的一節驗。
+- recall-phrasing 26 → 29 題。alpha.163 的執行檔紅在「when is ERR_DEPLOY_42」「where is
+  ERR_DEPLOY_42」兩題；「what is ERR_DEPLOY_42」alpha.163 本來就答得出來，只釘不退步。
+- 清單引號閘門 203 → 207，新加的每一句逐句改一個字都會紅。
+
+**突變 31 刀**，兩批切了 33 次，都跳過已知 flake 的 `wakeup::tests::` 與
+`reviewer::tests::real_review_pass`。第一批 23 次對 `de09f95`（接頭前段那條規則之前），控制組
+core 1210 條全綠；第二批 10 次對 `3377a5d`，控制組 1212 條全綠：接頭前段 7 刀，第一批沒抓到和
+編不過的兩刀重切，加上「主詞少 you」。31 刀最後全紅：
+
+| 範圍 | 紅的刀 |
+|---|---|
+| 問句詞 | 不看 `WHEN_ASKS`；分大小寫；字的邊界放寬 |
+| 助動詞 | 少 is；少 can；不查助動詞表；分大小寫 |
+| 縮寫與否定 | 不認縮寫；縮寫少 s；不認彎撇號的否定；不認 n't |
+| 主詞 | 不拿掉；全大寫也算；什麼字都當主詞；少 I；少 you |
+| `peel_retry` 兩處 | 第一處不認倒裝；第二處不認；兩處都不認 |
+| 切段的接頭 | 不丟；分大小寫；用包含；少 with；少 for |
+| 接頭前段 | 整段拿掉；開頭的接頭也算；分大小寫；用包含；查整串不查前段；不記位置；前段不修空白 |
+
+- 第一批「主詞少 I」是綠的，1210 條全綠：`question::terms` 的虛字表剛好也有 i、you，走完整個
+  `peel_retry` 看不出主詞表少了這兩個。補一條直接問 `strip_english_inversion` 的測試
+  （`3377a5d`，和它註解裡的例子一樣），第二批重切「少 I」「少 you」都紅。
+- 第一批「切段的接頭分大小寫」那一刀編不過（`piece` 是 `&&str`），紅的是編譯器，不算。第二批
+  改寫法重切，紅在切段的單元測試。
+- 接頭前段「不記位置」只有 `format for alpha` 那一列抓得到：`for` 先在 `format` 裡找到，前段就變成
+  空的。那一列是切之前先寫的（`1f5c7f8`）。「前段不修空白」「開頭的接頭也算」「分大小寫」只有
+  單元測試紅，單元測試直接呼叫產品那一支 `before_english_joint`。
+
+### 32.4 我這一輪做錯的
+
+- 版本說明第一稿寫「問的東西她沒看過的，一件事都沒有」，只量了「where is the invoice」這一種。
+  另寫 64 格的探針才看到「where is the invoice for alpha」：剝完是「invoice for alpha」，索引那一步
+  把沒看過的 invoice 當成頭拿掉，改用「alpha」或「for alpha」去湊；而直接打「invoice for alpha」
+  上一版就已經這樣。補了接頭前段那條規則（32.2），版本說明照量到的寫。
+- 版本說明第二稿又有三句沒量過：上一版「invoice for alpha」「拿寫著 alpha 的畫面來湊」，英文
+  背景那一格是「for alpha」、0 筆，改成「畫面上剛好寫著那幾個字就拿來湊」；第三個例子
+  「the contract with the vendor」不在四份背景的探針裡，換成量過的「the release candidate for
+  alpha」；「why did it fail」改用「fail」只發生在看過 fail 的機器上，沒有背景和 17 句兩格什麼都
+  不印，補上條件。
+- 整合測試第一稿把「why is ERR_DEPLOY_42 failing」放在正向。語料的「release candidate alpha is
+  ready」有 is，我自己寫的英文背景有 failing；這題是主詞後面的動詞，搬到代價那條，正向換成
+  「what is ERR_DEPLOY_42」。「when did they sign the contract」的 sign 和 signed 在 trigram 上
+  分不開，拿掉。
+- commit 訊息第一稿寫 alpha.162 那一節的英文題「移過來」。實際是刪掉、在新的一節重寫；push 前
+  amend。
+
+### 32.5 登記在案、這一版不修的
+
+- 接頭後面那段沒看過：「where is the build log for staging」在沒看過 for 的機器上改用「build log」、
+  找到；用過的機器上改用「build log for」、空手（for 看過，不是沒看過的尾巴）。fail-closed，
+  和中文沒看過的尾巴同一族。
+- 拿掉代名詞之後只剩一個動詞（why did it fail）、主詞後面的動詞（mean、ship）、「log in」改用
+  「log」、how much is／where exactly is 的 is 照舊是條件：版本說明都寫了。
+- 中文「去哪裡找月報連結」四份背景、兩版都空手；「在哪裡可以找到月報連結」「哪裡找得到月報連結」
+  在文件背景改用「可以找到月報連結」「找得到月報連結」、空手，兩版一樣。
