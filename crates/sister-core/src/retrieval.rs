@@ -125,14 +125,17 @@ impl SearchAdjustment {
 /// 裡量到、又會被第二輪留在前面的那些說法；「找」「查」「打」這種索引分得出來的
 /// 字不寫進來。只給放寬用，是因為 [`crate::facts::strip_fact_question_edges`]
 /// 那張表 facts 主題也在用，加進去第一次查詢的答案就變了。
+/// 「哪裡」前後緊接的問法是例外，alpha.165 起一起切掉（[`widen_where`]）：「找得到」
+/// 「可以找到」在那份背景裡看過，索引分不出來，alpha.164 的「哪裡找得到月報連結」
+/// 因此改用「找得到月報連結」、空手。「怎麼找月報連結」的「找」照舊交給索引。
 /// 「到底」「那麼」的第一個字是虛字。先跑 [`question::terms`] 再認開頭，整段
 /// 已經不在了，所以每一圈先看原樣開頭；不是口語開頭才跑 terms、剝問句頭尾，
 /// 再認一次。「所以我想問為什麼部署失敗」先拿掉「所以」，terms 剝掉「我」，
 /// 再拿掉「想問」。
 ///
-/// 「哪」單獨一個字會切在詞中間，所以「哪裡」「哪個」「哪一個」整段收進
-/// [`QUESTION_WORDS`]。同一位置本來就取最長。「哪裡有客服電話」拿掉「哪裡」，
-/// 最後一次 [`question::terms`] 再剝掉「有」。
+/// 「哪」單獨一個字會切在詞中間，所以「哪個」「哪一個」整段收進
+/// [`QUESTION_WORDS`]，「哪裡」「哪兒」整段收進 [`WHERE_WORDS`]。同一位置本來就
+/// 取最長。「哪裡有客服電話」拿掉「哪裡」，最後一次 [`question::terms`] 再剝掉「有」。
 ///
 /// 最後的候選字，不論索引改過（[`IndexedCandidate::Changed`]）還是原樣留著
 /// （[`IndexedCandidate::Unchanged`]），都再過兩道出口，過不了就不放寬：
@@ -358,8 +361,8 @@ fn candidate_refused(candidate: &str) -> bool {
 }
 
 /// 封閉問句詞。加字之前先看 [`retry_candidate`] 上面為什麼不收。
-/// 「哪裡」「哪個」「哪一個」要整段在這張表裡；只留「哪」會切在詞中間。
-/// 口語開頭不在這裡，見 [`SPOKEN_LEAD_INS`]。
+/// 「哪個」「哪一個」要整段在這張表裡；只留「哪」會切在詞中間。問地點的「哪裡」
+/// 另在 [`WHERE_WORDS`]。口語開頭不在這裡，見 [`SPOKEN_LEAD_INS`]。
 const QUESTION_WORDS: &[&str] = &[
     "為什麼",
     "为什么",
@@ -376,20 +379,12 @@ const QUESTION_WORDS: &[&str] = &[
     "什么",
     "甚麼",
     "啥",
-    "哪裡",
-    "哪裏",
-    "哪里",
-    "哪兒",
-    "哪儿",
-    "哪邊",
-    "哪边",
     "哪個",
     "哪个",
     "哪些",
     "哪一個",
     "哪一个",
     "哪位",
-    "哪",
     "誰",
     "谁",
     "多少",
@@ -400,6 +395,33 @@ const QUESTION_WORDS: &[&str] = &[
     "who",
     "which",
 ];
+
+/// 問地點的中文問句詞。和 [`QUESTION_WORDS`] 一樣切，緊鄰的問法一起算進來，
+/// 見 [`widen_where`]。「哪」單獨一個字也收（「去哪找」）；同一位置取最長，所以
+/// 「哪個」「哪些」照舊是 [`QUESTION_WORDS`] 的字。英文的 where 留在那張表：
+/// 這裡前後的問法都是中文。
+const WHERE_WORDS: &[&str] = &["哪裡", "哪裏", "哪里", "哪兒", "哪儿", "哪邊", "哪边", "哪"];
+
+/// [`WHERE_WORDS`] 前面緊接的「去」「到」「在」：「去哪裡找月報連結」的「去」和
+/// 「哪裡」一起是問法。「到」「在」本來就是虛字，收進來是為了前面再接
+/// [`WHERE_GO_MODALS`]：「月報連結可以在哪裡找到」。
+const WHERE_GOES: &[&str] = &["去", "到", "在"];
+
+/// [`WHERE_GOES`] 再前面的「可以」「應該」「該」。「要」「能」「會」「得」不收：它們
+/// 常是名詞的最後一個字（「摘要」「功能」「晨會」「心得」），「晨會在哪裡開」切掉
+/// 「會在」就只剩「晨」。
+const WHERE_GO_MODALS: &[&str] = &["可以", "應該", "应该", "該", "该"];
+
+/// [`WHERE_WORDS`] 後面緊接的找法：「哪裡找得到月報連結」「我在哪裡找到月報連結的」
+/// 問的都是在哪裡。用過的索引看過「找得到」「找到」，不能交給它。「找到」不另收：
+/// 拿掉「找」之後，「到」本來就是虛字。單獨的「看」也不收：它本來就是虛字，最後一次
+/// [`question::terms`] 會剝掉開頭的它。收「看到」是為了前面接 [`WHERE_FIND_MODALS`]
+/// 的「哪裡可以看到」。
+const WHERE_FINDS: &[&str] = &["找得到", "找", "看得到", "看到"];
+
+/// [`WHERE_FINDS`] 前面可以先隔的「可以」「能」「才」：「哪裡可以找到」「在哪裡
+/// 才找得到」。後面沒有接找法就不算，「哪裡可以下載」的「可以」留著。
+const WHERE_FIND_MODALS: &[&str] = &["可以", "才能", "能", "才"];
 
 /// 口語開頭。只給放寬用，不進 [`crate::facts::strip_fact_question_edges`]。
 /// 中文整段、只認開頭、同一位置取最長；英文只認獨立的一個字，不認複數 s、
@@ -726,8 +748,9 @@ fn cut_tail_asks(text: &str) -> (&str, AsksWhen) {
     }
 }
 
-/// 由左往右第一個問句詞；落在類型詞裡的跳過，問時間的不跳。前面有內容就留下
-/// 前面；前面只有虛字就拿掉這個詞，繼續看後面。
+/// 由左往右第一個問句詞；落在類型詞裡的跳過，問時間的不跳。問地點的連同前後
+/// 緊接的問法一起算（[`widen_where`]）。前面有內容就留下前面；前面只有虛字就拿掉
+/// 這個詞，繼續看後面。
 fn cut_question_words(text: &str) -> &str {
     let (lower, orig_at) = crate::facts::lowercase_with_orig_bytes(text);
     let mut search_from = 0;
@@ -737,14 +760,20 @@ fn cut_question_words(text: &str) -> &str {
         };
         let abs_lo = search_from + found.lo;
         let abs_hi = search_from + found.hi;
-        let orig_lo = orig_at[abs_lo];
-        let orig_hi = orig_at[abs_hi];
         // 問時間的字自己也是類型詞，所以要先看它：不先看的話，下一行會把它當成
         // 「多少錢」那一種跳過去。
-        if !found.asks_when && crate::facts::condition_is_kind_word(text, orig_lo, orig_hi) {
+        if found.kind != QuestionKind::When
+            && crate::facts::condition_is_kind_word(text, orig_at[abs_lo], orig_at[abs_hi])
+        {
             search_from = abs_hi;
             continue;
         }
+        let (abs_lo, abs_hi) = match found.kind {
+            QuestionKind::Where => widen_where(&lower, abs_lo, abs_hi),
+            QuestionKind::Plain | QuestionKind::When => (abs_lo, abs_hi),
+        };
+        let orig_lo = orig_at[abs_lo];
+        let orig_hi = orig_at[abs_hi];
         if question::only_filler(&text[..orig_lo]) {
             return cut_question_words(&text[orig_hi..]);
         }
@@ -756,23 +785,38 @@ fn cut_question_words(text: &str) -> &str {
 struct FoundQuestionWord {
     lo: usize,
     hi: usize,
-    /// 是 [`crate::facts::WHEN_ASKS`] 裡的字，不是 [`QUESTION_WORDS`] 裡的。
-    asks_when: bool,
+    kind: QuestionKind,
+}
+
+/// 問句詞在哪一張表上。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum QuestionKind {
+    /// [`QUESTION_WORDS`]。
+    Plain,
+    /// [`WHERE_WORDS`]。
+    Where,
+    /// [`crate::facts::WHEN_ASKS`]。
+    When,
 }
 
 /// `lower` 裡最左邊的問句詞，同一位置取最長的：「什麼時候」贏過「什麼」。
 fn find_question_word(lower: &str) -> Option<FoundQuestionWord> {
     let words = QUESTION_WORDS
         .iter()
-        .map(|word| (*word, false))
-        .chain(crate::facts::WHEN_ASKS.iter().map(|word| (*word, true)));
+        .map(|word| (*word, QuestionKind::Plain))
+        .chain(WHERE_WORDS.iter().map(|word| (*word, QuestionKind::Where)))
+        .chain(
+            crate::facts::WHEN_ASKS
+                .iter()
+                .map(|word| (*word, QuestionKind::When)),
+        );
     let mut best: Option<FoundQuestionWord> = None;
     let mut i = 0;
     while i < lower.len() {
         if best.as_ref().is_some_and(|found| i > found.lo) {
             break;
         }
-        for (word, asks_when) in words.clone() {
+        for (word, kind) in words.clone() {
             let Some(end) = crate::facts::kind_word_match_end(lower, word, i) else {
                 continue;
             };
@@ -783,7 +827,7 @@ fn find_question_word(lower: &str) -> Option<FoundQuestionWord> {
                 best = Some(FoundQuestionWord {
                     lo: i,
                     hi: end,
-                    asks_when,
+                    kind,
                 });
             }
         }
@@ -791,6 +835,59 @@ fn find_question_word(lower: &str) -> Option<FoundQuestionWord> {
         i += ch.len_utf8();
     }
     best
+}
+
+/// [`WHERE_WORDS`] 連同前後緊接的問法：前面的 [`WHERE_GOES`]，再往前至多一個
+/// [`WHERE_GO_MODALS`]；後面的 [`WHERE_FINDS`]，中間可以先隔一個
+/// [`WHERE_FIND_MODALS`]。`lo..hi` 是問句詞在 `lower` 的 byte 範圍。
+fn widen_where(lower: &str, lo: usize, hi: usize) -> (usize, usize) {
+    let mut lo = lo;
+    if let Some(go) = longest_suffix(&lower[..lo], WHERE_GOES) {
+        lo -= go;
+        lo -= longest_suffix(&lower[..lo], WHERE_GO_MODALS).unwrap_or(0);
+    }
+    let modal = longest_prefix(&lower[hi..], WHERE_FIND_MODALS).unwrap_or(0);
+    let hi = match where_find_len(&lower[hi + modal..]) {
+        Some(find) => hi + modal + find,
+        None => hi,
+    };
+    (lo, hi)
+}
+
+/// `rest` 開頭的 [`WHERE_FINDS`] 的 byte 長度。找法在句尾的時候，最後的虛字已經被
+/// [`question::terms`] 剝掉了：「哪裡找得到」到這裡是「哪裡找得」，「哪裡可以看到」
+/// 是「哪裡可以」。整段剩下的是某個找法少了尾巴的虛字，也算。
+fn where_find_len(rest: &str) -> Option<usize> {
+    WHERE_FINDS
+        .iter()
+        .filter_map(|find| {
+            if rest.starts_with(find) {
+                Some(find.len())
+            } else if find.starts_with(rest) && question::only_filler(&find[rest.len()..]) {
+                Some(rest.len())
+            } else {
+                None
+            }
+        })
+        .max()
+}
+
+/// `text` 結尾對得上的 `words` 裡最長那個的 byte 長度。
+fn longest_suffix(text: &str, words: &[&str]) -> Option<usize> {
+    words
+        .iter()
+        .filter(|word| text.ends_with(**word))
+        .map(|word| word.len())
+        .max()
+}
+
+/// `text` 開頭對得上的 `words` 裡最長那個的 byte 長度。
+fn longest_prefix(text: &str, words: &[&str]) -> Option<usize> {
+    words
+        .iter()
+        .filter(|word| text.starts_with(**word))
+        .map(|word| word.len())
+        .max()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2180,6 +2277,51 @@ mod tests {
     fn na_question_words_are_removed_whole() {
         assert_eq!(peel_retry_terms("哪一個客服電話"), "客服電話");
         assert_eq!(peel_retry_terms("哪裡有客服電話"), "客服電話");
+    }
+
+    /// 「哪裡」連同前後緊接的問法一起拿掉。每一張表上的每一個字各有一題：少了哪一個，
+    /// 那一題就會多剩下問法。
+    #[test]
+    fn where_takes_the_asking_words_around_it() {
+        for (query, want) in [
+            ("去哪裡找月報連結", "月報連結"),
+            ("去哪裏找月報連結", "月報連結"),
+            ("去哪里找月报链接", "月报链接"),
+            ("去哪兒找月報連結", "月報連結"),
+            ("去哪儿找月报链接", "月报链接"),
+            ("去哪邊找月報連結", "月報連結"),
+            ("去哪边找月报链接", "月报链接"),
+            ("去哪找月報連結", "月報連結"),
+            ("月報連結可以到哪裡找", "月報連結"),
+            ("月報連結可以在哪裡找到", "月報連結"),
+            ("月報連結應該在哪裡找", "月報連結"),
+            ("月报链接应该在哪里找", "月报链接"),
+            ("月報連結該去哪裡找", "月報連結"),
+            ("月报链接该去哪里找", "月报链接"),
+            ("哪裡找得到月報連結", "月報連結"),
+            ("哪裡看得到月報連結", "月報連結"),
+            ("哪裡可以看到月報連結", "月報連結"),
+            ("哪裡可以找到月報連結", "月報連結"),
+            ("哪裡才能找到月報連結", "月報連結"),
+            ("哪裡能找到月報連結", "月報連結"),
+            ("在哪裡才找得到月報連結", "月報連結"),
+            ("我在哪裡找到月報連結的", "月報連結"),
+            // 單獨的「看」不在表上，最後一次 terms 剝掉。
+            ("哪裡看月報連結", "月報連結"),
+            // 只有問法，什麼都不剩。句尾的「到」在切問法之前已經當虛字剝掉。
+            ("哪裡找得到", ""),
+            ("哪裡看得到", ""),
+            ("哪裡可以看到", ""),
+            ("去哪裡找", ""),
+            // 後面沒有接找法，「可以」留著。
+            ("哪裡可以下載月報", "可以下載月報"),
+            // 名詞的最後一個字不在「可以」「應該」「該」裡，照舊留著。
+            ("摘要去哪裡找", "摘要"),
+            ("晨會在哪裡開", "晨會"),
+            ("匯出功能在哪裡找得到", "匯出功能"),
+        ] {
+            assert_eq!(peel_retry_terms(query), want, "{query}");
+        }
     }
 
     /// 尾巴的「時間」「原因」前面還有內容才切，可以連著切；有沒有切掉「時間」要

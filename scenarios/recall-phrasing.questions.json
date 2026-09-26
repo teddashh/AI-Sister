@@ -482,6 +482,55 @@
           }
         ]
       }
+    },
+    {
+      "id": "phrasing-29",
+      "question": "去哪裡找客服專線",
+      "source": "hand_labeled",
+      "expected": {
+        "outcome": "answer",
+        "any_of": [
+          "0800-000-123",
+          "+886800000123"
+        ],
+        "evidence": [
+          {
+            "event_index": 0
+          }
+        ]
+      }
+    },
+    {
+      "id": "phrasing-30",
+      "question": "去哪找 ERR_DEPLOY_42",
+      "source": "hand_labeled",
+      "expected": {
+        "outcome": "answer",
+        "any_of": [
+          "ERR_DEPLOY_42"
+        ],
+        "evidence": [
+          {
+            "event_index": 1
+          }
+        ]
+      }
+    },
+    {
+      "id": "phrasing-31",
+      "question": "去哪裡找部署失敗的原因",
+      "source": "hand_labeled",
+      "expected": {
+        "outcome": "answer",
+        "any_of": [
+          "部署失敗"
+        ],
+        "evidence": [
+          {
+            "event_index": 1
+          }
+        ]
+      }
     }
   ]
 }
