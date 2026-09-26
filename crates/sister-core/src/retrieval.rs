@@ -8,7 +8,7 @@ use anyhow::{Result, ensure};
 
 use crate::activity::Activity;
 use crate::answer::{Answer, Answers, answers_during};
-use crate::db::{Db, IndexedCandidate};
+use crate::db::{Db, IndexedCandidate, Kept};
 use crate::model::{Millis, SearchHit};
 use crate::question::{self, Shape};
 
@@ -172,9 +172,13 @@ impl SearchAdjustment {
 /// 候選字從「的」開始，也不放寬：前面的主題沒看過、被索引拿掉，剩下的「的⋯」只是
 /// 在說哪一種。文件背景裡「火星」沒看過、「的畫面」看過，alpha.165 把「火星的畫面」
 /// 改用「的畫面」，拿 5 張不相干的畫面來湊；alpha.166 起「找不到火星的畫面」剝完也是
-/// 這一串。「的」前面沒看過、「的」也一起被拿掉的，照舊改用後面那段：「最新的月報連結」
-/// 問的是月報連結，「最新」沒看過照樣找。不能反過來要求「的」前面看過：那一段常常只是
-/// 修飾，這樣擋，「最新的客服專線」「公司的月報連結」都會空手。
+/// 這一串。「的」前面沒看過、「的」也一起被拿掉的，照舊改用後面那段：「公司的月報連結」
+/// 問的是月報連結，「公司」沒看過照樣找。不能反過來要求「的」前面看過：那一段常常只是
+/// 修飾，這樣擋，「公司的客服專線」「客戶的月報連結」都會空手。
+///
+/// 反過來，最後一個「的」「了」後面那段整段被拿掉的，也不放寬（[`drops_the_last_piece`]）。
+/// 那一段才是他問的東西，前面只是在說是誰的、做了什麼：文件背景裡「火星」沒看過、「公司」
+/// 看過，alpha.167 把「公司的火星」改用「公司」，拿 2 筆不相干的字來湊。
 fn retry_candidate(db: &Db, query: &str, peeled: &str) -> Result<Option<String>> {
     let original = question::terms(query);
     if let Some(head) = before_english_joint(peeled)
@@ -182,12 +186,15 @@ fn retry_candidate(db: &Db, query: &str, peeled: &str) -> Result<Option<String>>
     {
         return Ok(None);
     }
-    let candidate = match db.indexed_candidate(peeled)? {
-        IndexedCandidate::Changed(candidate) => candidate,
-        IndexedCandidate::Unchanged => peeled.to_string(),
+    let (candidate, end) = match db.indexed_candidate(peeled)? {
+        IndexedCandidate::Changed(Kept { text, end }) => (text, end),
+        IndexedCandidate::Unchanged => (peeled.to_string(), peeled.len()),
         IndexedCandidate::NoneSeen | IndexedCandidate::TooLong => return Ok(None),
     };
     if candidate.is_empty() || candidate == original || candidate.starts_with('的') {
+        return Ok(None);
+    }
+    if drops_the_last_piece(peeled, end) {
         return Ok(None);
     }
     // `Changed` 和 `Unchanged` 都已經折成 `candidate`，兩道出口只寫一次。
@@ -196,6 +203,22 @@ fn retry_candidate(db: &Db, query: &str, peeled: &str) -> Result<Option<String>>
         return Ok(None);
     }
     Ok(Some(candidate))
+}
+
+/// 最後一個接頭（[`joints`]）後面那段剝掉虛字還有兩個字以上，`text[..end]` 卻留不到
+/// 其中兩個字：他問的東西整段被拿掉了。「公司的火星」留下「公司」或「公司的」，「誰改了
+/// 火星」留下「改了」。一個字的段不算，和 [`joint_retry`] 丟掉一個字的段同一個理由：
+/// 「部署失敗的話」的「話」本來就不是條件。
+fn drops_the_last_piece(text: &str, end: usize) -> bool {
+    let Some(&(at, joint)) = joints(text).last() else {
+        return false;
+    };
+    let after = at + joint.len_utf8();
+    let asked = |piece: &str| {
+        let piece = question::terms(piece);
+        !question::only_filler(piece) && piece.chars().count() >= 2
+    };
+    asked(&text[after..]) && !asked(&text[after..end.max(after)])
 }
 
 /// 第一個英文接頭前面那一段：「invoice for alpha」的「invoice」。沒有接頭，或
@@ -272,6 +295,19 @@ const JOINTS: &[char] = &['的', '了'];
 /// 「的」「了」是詞的一部分、不是接頭的：切開會剩一個字而被丟掉。
 const JOINT_INSIDE_WORDS: &[&str] = &["目的", "了解"];
 
+/// `text` 裡當接頭用的「的」「了」和它們的位置。[`JOINT_INSIDE_WORDS`] 裡的不算。
+/// [`joint_retry`] 在這裡切段，[`drops_the_last_piece`] 看最後一個後面那段。
+fn joints(text: &str) -> Vec<(usize, char)> {
+    let inside: Vec<std::ops::Range<usize>> = JOINT_INSIDE_WORDS
+        .iter()
+        .flat_map(|word| text.match_indices(word))
+        .map(|(at, word)| at..at + word.len())
+        .collect();
+    text.char_indices()
+        .filter(|&(at, c)| JOINTS.contains(&c) && !inside.iter().any(|word| word.contains(&at)))
+        .collect()
+}
+
 /// 英文的接頭：「the release candidate for alpha」的 for 和「月報的連結」的「的」一樣，
 /// 畫面上不一定有。英文本來就在空白切開，這幾個字切出來那一段丟掉，不當條件。
 /// on、to、up 和 the、a 已經是 [`question::terms`] 的虛字。
@@ -326,16 +362,11 @@ const ENGLISH_JOINTS: &[&str] = &["of", "for", "in", "at", "by", "with", "from",
 /// （上一步把沒看過的尾巴拿掉）。「的」「了」在別的詞裡、又不在
 /// [`JOINT_INSIDE_WORDS`] 的照切：「受不了部署失敗」去找「受不 部署失敗」。
 fn joint_retry(base: &str, tried: &[Option<&str>]) -> Option<String> {
-    let inside: Vec<std::ops::Range<usize>> = JOINT_INSIDE_WORDS
-        .iter()
-        .flat_map(|word| base.match_indices(word))
-        .map(|(at, word)| at..at + word.len())
-        .collect();
+    let joints = joints(base);
     let mut pieces = Vec::new();
     let mut start = 0;
     for (at, c) in base.char_indices() {
-        let joint = JOINTS.contains(&c) && !inside.iter().any(|word| word.contains(&at));
-        if joint || c.is_whitespace() || question::is_cjk_punct(c) {
+        if joints.contains(&(at, c)) || c.is_whitespace() || question::is_cjk_punct(c) {
             pieces.push(&base[start..at]);
             start = at + c.len_utf8();
         }
@@ -645,6 +676,26 @@ const SPOKEN_LEAD_INS: &[&str] = &[
     "上次",
     "上一次",
     "之前",
+    // 「最新的月報連結」「最後一次看到的月報連結」：「最新」「最後」和「上次」一樣是在說
+    // 哪一次，畫面上不會寫在那個東西旁邊。後面緊接的「一次」「一版」「一期」「一份」「版本」
+    // 整段收，不然會剩「一份的月報連結」；「最新版」也收。拿掉只是不當條件，不是改成照時間
+    // 排：排序照舊先比字、同分才新的在前，最前面那一筆不一定是最新的。「最早」「第一次」
+    // 不收：同分時名額滿了先被擠掉的是最早那幾筆，拿掉它就是去找另一題。「最後一個」不收：
+    // 「最後一個月的帳單」會剩「月的帳單」。代價同上一段：後面只剩「結果」「進度」「一步」
+    // 「東西」「那個人」時，看過的話改用「結果」「進度」「一步」「東西」「個人」去找。
+    "最新",
+    "最新版",
+    "最新版本",
+    "最新一版",
+    "最新一期",
+    "最新一份",
+    "最新一次",
+    "最後",
+    "最後版本",
+    "最後一版",
+    "最後一期",
+    "最後一份",
+    "最後一次",
     "so",
     "but",
     "and",
@@ -1447,6 +1498,14 @@ impl Retrieval {
 mod tests {
     use super::*;
     use crate::model::{FocusSnapshot, FrameCapture, OcrBlock};
+
+    /// 索引改過的候選字，和它停在原字串的哪裡。
+    fn kept(text: &str, end: usize) -> IndexedCandidate {
+        IndexedCandidate::Changed(Kept {
+            text: text.into(),
+            end,
+        })
+    }
 
     /// 空手之後會依序拿去找的每一串字，兩步都算。產品路徑用的是同一個
     /// [`relax_plan`]，這裡只是把它攤平。
@@ -2280,13 +2339,13 @@ mod tests {
         );
         assert_eq!(
             db.indexed_candidate("請問客服").unwrap(),
-            IndexedCandidate::Changed("客服".into())
+            kept("客服", "請問客服".len())
         );
         let within = format!("{}客服", "啊".repeat(126));
         assert_eq!(within.chars().count(), 128);
         assert_eq!(
             db.indexed_candidate(&within).unwrap(),
-            IndexedCandidate::Changed("客服".into())
+            kept("客服", within.len())
         );
         let over = format!("{}客服", "啊".repeat(127));
         assert_eq!(over.chars().count(), 129);
@@ -2311,7 +2370,7 @@ mod tests {
 
         assert_eq!(
             db.indexed_candidate("電信帳戶").unwrap(),
-            IndexedCandidate::Changed("電信帳".into())
+            kept("電信帳", "電信帳".len())
         );
         let clean = RetrievalProfile::TextAndFacts
             .retrieve(&mut db, "電信帳", 5)
@@ -3011,6 +3070,104 @@ mod tests {
             "前提：沒有出口的話，「回」會被放出去"
         );
         assert_eq!(tries(&db, "怎麼回事"), Vec::<String>::new());
+    }
+
+    /// 「最新」「最後」說的是哪一次，和「上次」一樣在開頭拿掉；整段收的「最新版」
+    /// 「最新一份」「最後一次」不會剩下「版」「一份」「一次」。「最早」「第一次」
+    /// 「最後一個」不收，開頭以外的也不收。
+    #[test]
+    fn which_time_at_the_head_is_peeled() {
+        for (query, want) in [
+            ("最新的月報連結", "月報連結"),
+            ("最新月報連結", "月報連結"),
+            ("最新版的月報連結", "月報連結"),
+            ("最新版本的月報連結", "月報連結"),
+            ("最新一版的月報連結", "月報連結"),
+            ("最新一期的月報連結", "月報連結"),
+            ("最新一份月報連結", "月報連結"),
+            ("最新一次的月報連結", "月報連結"),
+            ("最後的月報連結", "月報連結"),
+            ("最後版本的月報連結", "月報連結"),
+            ("最後一版的月報連結", "月報連結"),
+            ("最後一期的月報連結", "月報連結"),
+            ("最後一份月報連結", "月報連結"),
+            ("最後一次看到的月報連結", "月報連結"),
+            ("找不到最新的月報連結", "月報連結"),
+            ("最早的月報連結", "最早的月報連結"),
+            ("第一次看到的月報連結", "第一次看到的月報連結"),
+            ("公司最新的月報連結", "公司最新的月報連結"),
+            ("最後一個月的帳單", "一個月的帳單"),
+        ] {
+            assert_eq!(peel_retry_terms(query), want, "{query}");
+        }
+    }
+
+    /// 最後一個「的」「了」後面那段剝掉虛字還有兩個字以上，而 `end` 前面留不到其中
+    /// 兩個字，才算整段拿掉。「目的」「了解」裡的不是接頭；一個字的段不算。
+    #[test]
+    fn dropping_the_last_piece_is_counted_on_what_follows_the_last_joint() {
+        for (text, kept, want) in [
+            ("公司的火星", "公司", true),
+            ("公司的火星", "公司的", true),
+            ("公司的火星", "公司的火", true),
+            ("公司的那個火星", "公司的那個", true),
+            ("公司的月報的火星", "公司的月報", true),
+            ("改了火星", "改了", true),
+            ("出差的目的地", "出差", true),
+            ("公司的火星", "公司的火星", false),
+            ("公司的電信帳戶", "公司的電信帳", false),
+            ("部署失敗的話", "部署失敗", false),
+            ("部署失敗的目", "部署失敗", false),
+            ("月報連結", "月報", false),
+        ] {
+            assert!(text.starts_with(kept), "前提：「{kept}」是「{text}」的開頭");
+            assert_eq!(
+                drops_the_last_piece(text, kept.len()),
+                want,
+                "「{text}」留下「{kept}」"
+            );
+        }
+    }
+
+    /// 「公司」「改了」看過、「火星」沒看過。索引會把「火星」當成沒看過的尾巴拿掉，
+    /// 剩下的「公司」「改了」不是他問的東西，這一步不出候選字。下一步切段的每一段都是
+    /// 條件，候選字裡還有「火星」，湊不出東西。
+    #[test]
+    fn a_piece_after_the_last_joint_never_seen_is_not_relaxed_away() {
+        let mut db = Db::open_in_memory().unwrap();
+        let privacy = crate::config::PrivacyConfig {
+            remember_told: true,
+            ..Default::default()
+        };
+        db.remember_told(&privacy, 100, "公司尾牙在週五").unwrap();
+        db.remember_told(&privacy, 200, "我改了密碼").unwrap();
+        for (query, peeled, left) in [
+            ("公司的火星", "公司的火星", "公司"),
+            ("誰改了火星", "改了火星", "改了"),
+        ] {
+            assert_eq!(peel_retry_terms(query), peeled, "{query}");
+            assert_eq!(
+                db.indexed_candidate(peeled).unwrap(),
+                kept(left, left.len()),
+                "前提：沒有這道出口，「{query}」會改用「{left}」"
+            );
+            let plan = relax_plan(&db, query).unwrap().expect("剝完有字");
+            assert_eq!(plan.indexed, None, "{query}");
+            let tried = tries(&db, query);
+            assert!(!tried.is_empty(), "前提：「{query}」還有切段那一步");
+            for candidate in tried {
+                assert!(
+                    candidate.contains("火星"),
+                    "「{query}」改用「{candidate}」：他問的東西不見了"
+                );
+            }
+        }
+        let plan = relax_plan(&db, "火星的尾牙").unwrap().expect("剝完有字");
+        assert_eq!(
+            plan.indexed.as_deref(),
+            Some("尾牙"),
+            "對照：「的」前面沒看過的照舊拿掉"
+        );
     }
 
     /// 「電話」看過，而且是類型詞、沒有主題。沒有出口就會改用「電話」。

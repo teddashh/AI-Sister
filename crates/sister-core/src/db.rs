@@ -2957,7 +2957,7 @@ impl Db {
     ///
     /// 回傳把三件事分開：[`IndexedCandidate::NoneSeen`] 一個看過的條件都沒有、
     /// [`IndexedCandidate::Unchanged`] 不用改、[`IndexedCandidate::Changed`]
-    /// 改成這段字。超過 128 字不探測索引，回 [`IndexedCandidate::TooLong`]；
+    /// 改成這段字，連同它停在原字串的哪裡。超過 128 字不探測索引，回 [`IndexedCandidate::TooLong`]；
     /// 那不是「一個都沒看過」。呼叫端的類型詞保護只擋 `NoneSeen`。
     pub(crate) fn indexed_candidate(&self, query: &str) -> Result<IndexedCandidate> {
         let chars: Vec<(usize, char)> = query.char_indices().take(129).collect();
@@ -2994,11 +2994,16 @@ impl Db {
             last -= 1;
         }
 
-        let candidate = query[conditions[first].0..conditions[last].1].trim();
+        let span = &query[conditions[first].0..conditions[last].1];
+        let end = conditions[first].0 + span.trim_end().len();
+        let candidate = span.trim();
         if candidate.is_empty() || candidate == query.trim() {
             Ok(IndexedCandidate::Unchanged)
         } else {
-            Ok(IndexedCandidate::Changed(candidate.to_owned()))
+            Ok(IndexedCandidate::Changed(Kept {
+                text: candidate.to_owned(),
+                end,
+            }))
         }
     }
 
@@ -7486,9 +7491,19 @@ pub(crate) enum IndexedCandidate {
     /// 看過，頭尾都沒有可放掉的零命中條件。
     Unchanged,
     /// 放掉頭尾零命中之後，實際拿去查的那一段。
-    Changed(String),
+    Changed(Kept),
     /// 超過 128 字，沒有逐條件問索引。
     TooLong,
+}
+
+/// [`IndexedCandidate::Changed`] 留下的那一段。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Kept {
+    /// 實際拿去查的字。
+    pub(crate) text: String,
+    /// `text` 在傳進 [`Db::indexed_candidate`] 那串字裡結束的位置（位元組）。這之後
+    /// 就是被當成沒看過的尾巴拿掉的那一段：呼叫端要看拿掉的是不是他問的東西。
+    pub(crate) end: usize,
 }
 
 fn is_cjk(c: char) -> bool {
