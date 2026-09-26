@@ -348,6 +348,26 @@ fn a_two_character_name_before_zai_nali_is_still_nothing() {
     assert!(!got.empty, "對照組：換個問法找得到");
 }
 
+/// 登記在案、這一版不修：「要」不在「去」前面的問法裡（「摘要去哪裡找」要留著「摘要」），
+/// 「月報連結要去哪裡找」剝完是「月報連結要」，要靠索引那一步把沒看過的「結要」放掉。
+/// 畫面上看過「連結要」的機器上，那一步停在「結要」，改用「月報連結要」、空手。「該去」
+/// 在表上，不靠索引，所以 Windows 清單問「該去」不問「要去」。
+#[test]
+fn yao_before_qu_leans_on_the_index() {
+    for (label, background) in [("沒有背景", false), ("有背景", true)] {
+        let mut db = fixture(background);
+        let session = db.start_session("test", "test").unwrap();
+        add(&mut db, session, 7_000, 130, "這個連結要記得更新");
+        assert_seen(&db, &["連結要"]);
+        let got = ask(&mut db, "月報連結要去哪裡找");
+        assert!(got.empty, "{label}：{}", got.hits);
+        assert_eq!(got.searched, relaxed("月報連結要"), "{label}");
+        let got = ask(&mut db, "月報連結該去哪裡找");
+        assert_eq!(got.searched, relaxed("月報連結"), "{label}");
+        assert!(got.hits.contains("月報連結已更新"), "{label}：{}", got.hits);
+    }
+}
+
 /// `docs/WINDOWS-CHECKLIST.md` alpha.165 那一節逐題照打：記事本那兩行是同一張畫面。
 /// 清單引號裡的句子就是這裡的字面值，這裡改了清單要跟著改。
 ///
@@ -394,7 +414,7 @@ fn the_windows_checklist_hears_what_the_checklist_says() {
         }
         for (q, said, want) in [
             ("去哪裡找報價單連結", LINK, &link),
-            ("報價單連結要去哪裡找", LINK, &link),
+            ("報價單連結該去哪裡找", LINK, &link),
             ("哪裡找得到報價單連結", LINK, &link),
             ("報價單連結可以在哪裡找到", LINK, &link),
             ("去哪裡找維修專線", PHONE, &phone),
