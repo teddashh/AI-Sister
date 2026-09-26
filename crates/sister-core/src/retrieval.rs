@@ -155,8 +155,20 @@ impl SearchAdjustment {
 ///   「誰」拿掉之後「改了」在那 24 萬字裡看過，整段留著，對不到「月報連結已更新」。
 ///   bg=0「改了」沒看過，會縮成「月報連結」並命中那一筆，answers 仍是空的。
 ///   這一支到現在還是這樣；alpha.162 起由下一步 [`joint_retry`] 在「了」切開接住。
+///
+/// 英文接頭（[`ENGLISH_JOINTS`]）前面那一段整段沒看過，這一步就不出候選字。
+/// 「invoice for alpha」問的是 invoice，for 後面那段只是在說哪一張；invoice 沒看過，
+/// 索引會把它當成沒看過的頭拿掉，改用「for alpha」或「alpha」去找，拿寫著 alpha
+/// 的畫面來湊。alpha.164 起「where is the invoice for alpha」剝完也是這一串，
+/// 所以這裡一起擋。下一步 [`joint_retry`] 照樣會試，每一段都是條件，invoice
+/// 沒看過就空手。
 fn retry_candidate(db: &Db, query: &str, peeled: &str) -> Result<Option<String>> {
     let original = question::terms(query);
+    if let Some(head) = before_english_joint(peeled)
+        && db.indexed_candidate(head)? == IndexedCandidate::NoneSeen
+    {
+        return Ok(None);
+    }
     let candidate = match db.indexed_candidate(peeled)? {
         IndexedCandidate::Changed(candidate) => candidate,
         IndexedCandidate::Unchanged => peeled.to_string(),
@@ -171,6 +183,22 @@ fn retry_candidate(db: &Db, query: &str, peeled: &str) -> Result<Option<String>>
         return Ok(None);
     }
     Ok(Some(candidate))
+}
+
+/// 第一個英文接頭前面那一段：「invoice for alpha」的「invoice」。沒有接頭，或
+/// 接頭就在開頭（「for the vendor」），是 `None`。接頭要是空白隔開的一整個字，
+/// format 裡的 for 不算。
+fn before_english_joint(text: &str) -> Option<&str> {
+    let mut at = 0;
+    for word in text.split_whitespace() {
+        let start = at + text[at..].find(word)?;
+        if ENGLISH_JOINTS.iter().any(|w| word.eq_ignore_ascii_case(w)) {
+            let before = text[..start].trim_end();
+            return (!before.is_empty()).then_some(before);
+        }
+        at = start + word.len();
+    }
+    None
 }
 
 /// 空手之後要依序找的候選字。
@@ -2090,6 +2118,23 @@ mod tests {
             ("when is IT support open", "IT support open"),
         ] {
             assert_eq!(peel_retry_terms(query), want, "{query}");
+        }
+    }
+
+    /// 接頭前面那一段：接頭要是一整個字，在開頭就沒有前面。
+    #[test]
+    fn the_part_before_an_english_joint_is_what_he_asked_about() {
+        for (text, want) in [
+            ("invoice for alpha", Some("invoice")),
+            ("the build log FOR alpha", Some("the build log")),
+            ("contract  with   vendor", Some("contract")),
+            ("部署失敗 in staging", Some("部署失敗")),
+            ("format of the log", Some("format")),
+            ("for the vendor", None),
+            ("login page", None),
+            ("build log", None),
+        ] {
+            assert_eq!(before_english_joint(text), want, "{text}");
         }
     }
 

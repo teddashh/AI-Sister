@@ -60,8 +60,9 @@ ERR_UPLOAD_9 retry queued
 - [ ] **for、with 切開。**問 `where is the build log for Orion`，會說「我對不到你打的那一串，所以改用『build log Orion』去找。」
       問 `the contract with the vendor`，會說「我對不到你打的那一串，所以改用『contract vendor』去找。」
       兩題都要找到記事本那一張。
-- [ ] **反過來驗：她沒看過的主題。**問 `where is the zorblat`（你的螢幕上出現過 zorblat 的話，換一個
-      你確定沒看過的英文字）。要印「沒有找到。」，標題下面**不可以**有「改用」那一行。
+- [ ] **反過來驗：她沒看過的主題。**問 `where is the zorblat` 和 `where is the zorblat for Orion`
+      （你的螢幕上出現過 zorblat 的話，換一個你確定沒看過的英文字）。兩題都要印「沒有找到。」，
+      標題下面**不可以**有「改用」那一行，也不可以拿記事本那一張來湊。
       **這一條是這一節最重要的一條。**
 
 ### alpha.163 說成「的時間」「的原因」「上次看到的」，她答得和原本的問法一樣

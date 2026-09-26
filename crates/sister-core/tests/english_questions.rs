@@ -328,7 +328,8 @@ fn a_joint_word_is_split_like_de() {
     }
 }
 
-/// 主題沒看過就是空手，不拿寫著 is the 的畫面來湊。
+/// 主題沒看過就是空手，不拿寫著 is the 的畫面來湊。for、with、of 後面那段看過
+/// 也一樣，不改用那一段去找。
 #[test]
 fn a_topic_never_seen_is_still_nothing() {
     for q in [
@@ -336,6 +337,11 @@ fn a_topic_never_seen_is_still_nothing() {
         format!("when is the {NEVER_SEEN}"),
         format!("who is the {NEVER_SEEN}"),
         format!("where can I find the {NEVER_SEEN}"),
+        // 接頭後面那段看過也一樣：問的是接頭前面那個東西。
+        format!("where is the {NEVER_SEEN} for alpha"),
+        format!("{NEVER_SEEN} for alpha"),
+        format!("where is the {NEVER_SEEN} with the vendor"),
+        format!("the {NEVER_SEEN} of ERR_DEPLOY_42"),
         "where is it".to_string(),
         "when is it".to_string(),
     ] {
@@ -457,16 +463,17 @@ fn the_windows_checklist_hears_what_the_checklist_says() {
                 assert_eq!(got.same_things, want.same_things, "{label}「{q}」");
             }
         }
-        let q = "where is the zorblat";
         assert!(
             db.search("zorblat", 1).unwrap().is_empty(),
             "前提：沒看過 zorblat"
         );
-        let got = ask(&mut db, q);
-        assert!(got.empty, "{label}「{q}」要印「沒有找到。」：{}", got.hits);
-        assert_eq!(
-            got.searched, None,
-            "{label}「{q}」標題下面不可以有「改用」那一行"
-        );
+        for q in ["where is the zorblat", "where is the zorblat for Orion"] {
+            let got = ask(&mut db, q);
+            assert!(got.empty, "{label}「{q}」要印「沒有找到。」：{}", got.hits);
+            assert_eq!(
+                got.searched, None,
+                "{label}「{q}」標題下面不可以有「改用」那一行"
+            );
+        }
     }
 }
