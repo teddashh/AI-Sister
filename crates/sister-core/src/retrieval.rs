@@ -2085,7 +2085,8 @@ mod tests {
             // 只剩主詞，就沒有東西可找。
             ("when is it", ""),
             ("where is it", ""),
-            // 全大寫的 IT 是部門，不是 it。
+            // 主詞只認代名詞；全大寫的 IT 是部門，不是 it。
+            ("when is staging ready", "staging ready"),
             ("when is IT support open", "IT support open"),
         ] {
             assert_eq!(peel_retry_terms(query), want, "{query}");
