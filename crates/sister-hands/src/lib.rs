@@ -467,6 +467,8 @@ define_gaps! { UrlOriginGap {
     TargetOnlyInScreenText,
     /// 目標那張畫面的位址列沒量到，不能拿空值冒充相同。
     TargetAddressUnmeasured,
+    /// 來源畫面不屬於可採信的 Windows 錄製，不能借另一場的紀錄授權。
+    TargetSourceUntrusted,
 }}
 
 impl UrlOriginGap {
@@ -535,6 +537,11 @@ impl UrlOriginGap {
             }
             Self::TargetAddressUnmeasured => {
                 "這一步的來源畫面沒有可確認的位址列網址，無法證明要開的正是當時瀏覽的頁面。\
+                 無人值守先不開；要開請你當場看過再按。"
+                    .to_string()
+            }
+            Self::TargetSourceUntrusted => {
+                "這一步的來源畫面不是可採信的 Windows 錄製，不能用另一場的網址紀錄替它授權。\
                  無人值守先不開；要開請你當場看過再按。"
                     .to_string()
             }
@@ -705,7 +712,8 @@ impl RefusalReason {
                 | UrlOriginGap::PathNotInHerRecord
                 | UrlOriginGap::DestinationNotTheRecordedOne
                 | UrlOriginGap::TargetOnlyInScreenText
-                | UrlOriginGap::TargetAddressUnmeasured => RefusalBucket::UrlOriginUnknown,
+                | UrlOriginGap::TargetAddressUnmeasured
+                | UrlOriginGap::TargetSourceUntrusted => RefusalBucket::UrlOriginUnknown,
             },
             Self::NeverInherited { .. } => RefusalBucket::NeverInheritsTaskGrant,
             Self::NeedsLivePress { .. } => RefusalBucket::NeedsALivePressThisRun,
@@ -1345,7 +1353,8 @@ mod tests {
                     | UrlOriginGap::PathNotInHerRecord
                     | UrlOriginGap::DestinationNotTheRecordedOne
                     | UrlOriginGap::TargetOnlyInScreenText
-                    | UrlOriginGap::TargetAddressUnmeasured => RefusalBucket::UrlOriginUnknown,
+                    | UrlOriginGap::TargetAddressUnmeasured
+                    | UrlOriginGap::TargetSourceUntrusted => RefusalBucket::UrlOriginUnknown,
                 },
             }
         }

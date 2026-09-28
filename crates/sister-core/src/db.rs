@@ -5343,8 +5343,10 @@ impl Db {
     }
 
     /// 無人值守開網址時，目標 fact 必須來自同一張畫面的 OCR，且那張畫面的
-    /// 位址列正好是這個網址。別張畫面去過同一網址，不能讓這張畫面裡的指令
-    /// 借它的來源票。讀不到畫面／位址列時明確保留「沒量到」。
+    /// 位址列是同一去處，且來源畫面屬於可採信的 Windows 錄製。別張畫面去過
+    /// 同一網址，或 replay 畫面剛好寫了同一網址，都不能借它的來源票。
+    /// Chromium 會省略 scheme／www.，比較去處而非逐字比較。讀不到畫面／
+    /// 位址列時明確保留「沒量到」。
     pub fn target_address_on_source_frame(
         &self,
         id: i64,
@@ -5360,16 +5362,29 @@ impl Db {
         let Some(frame_id) = fact.frame_id else {
             return Ok(Origin::AddressUnmeasured);
         };
-        let frame_url: Option<Option<String>> = self
+        let source: Option<(Option<String>, Option<String>)> = self
             .conn
-            .query_row("SELECT url FROM frames WHERE id = ?1", [frame_id], |row| {
-                row.get(0)
-            })
+            .query_row(
+                "SELECT f.url, s.platform
+                   FROM frames AS f
+                   LEFT JOIN sessions AS s ON s.id = f.session_id
+                  WHERE f.id = ?1",
+                [frame_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
             .optional()?;
-        Ok(match frame_url.flatten() {
-            Some(url) if url == expected_raw => Origin::SameFrameAddress,
-            Some(_) => Origin::OtherScreenText,
+        Ok(match source {
             None => Origin::AddressUnmeasured,
+            Some((_, platform)) if platform.as_deref() != Some(TRUSTED_URL_ORIGIN_PLATFORM) => {
+                Origin::UntrustedSourceFrame
+            }
+            Some((Some(url), _))
+                if sister_hands::target_policy::same_destination(&url, expected_raw) =>
+            {
+                Origin::SameFrameAddress
+            }
+            Some((Some(_), _)) => Origin::OtherScreenText,
+            Some((None, _)) => Origin::AddressUnmeasured,
         })
     }
 
@@ -9936,22 +9951,44 @@ mod tests {
     #[test]
     fn unattended_url_target_must_be_the_address_on_its_own_frame() {
         use sister_hands::url_policy::TargetAddressOrigin as Origin;
-        let db = test_db();
-        let target = "https://example.com/collect";
+        let mut db = test_db();
+        let target = "https://www.example.com/collect?id=7#receipt";
+        let trusted = db
+            .start_session(TRUSTED_URL_ORIGIN_PLATFORM, "test")
+            .unwrap();
+        let replay = db
+            .start_session("untrusted/windows/replay", "test")
+            .unwrap();
         assert_eq!(
             db.target_address_on_source_frame(999, target).unwrap(),
             Origin::AddressUnmeasured
         );
-        for (frame_url, expected) in [
-            (Some(target), Origin::SameFrameAddress),
-            (Some("https://example.com/help"), Origin::OtherScreenText),
-            (None, Origin::AddressUnmeasured),
+        for (session_id, frame_url, expected) in [
+            (Some(trusted), Some(target), Origin::SameFrameAddress),
+            (
+                Some(trusted),
+                Some("example.com/collect?id=7#receipt"),
+                Origin::SameFrameAddress,
+            ),
+            (
+                Some(trusted),
+                Some("example.com/collect?id=8#receipt"),
+                Origin::OtherScreenText,
+            ),
+            (
+                Some(trusted),
+                Some("example.com/help?id=7#receipt"),
+                Origin::OtherScreenText,
+            ),
+            (Some(trusted), None, Origin::AddressUnmeasured),
+            (Some(replay), Some(target), Origin::UntrustedSourceFrame),
+            (None, Some(target), Origin::UntrustedSourceFrame),
         ] {
             db.conn
                 .execute(
-                    "INSERT INTO frames(ts, monitor, width, height, dhash, url)
-                     VALUES(1, 0, 1, 1, 0, ?1)",
-                    [frame_url],
+                    "INSERT INTO frames(ts, session_id, monitor, width, height, dhash, url)
+                     VALUES(1, ?1, 0, 1, 1, 0, ?2)",
+                    params![session_id, frame_url],
                 )
                 .unwrap();
             let frame_id = db.conn.last_insert_rowid();

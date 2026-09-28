@@ -88,7 +88,7 @@ fn write_scenario(dir: &Path, injection: &str) -> PathBuf {
     path
 }
 
-fn seed_l2_and_fact_ids(data_dir: &Path, injection: &str) -> (i64, i64, i64) {
+fn seed_l2_and_fact_ids(data_dir: &Path, injection: &str, trusted_source: bool) -> (i64, i64, i64) {
     let mut db = Db::open(&Config::db_path(data_dir)).expect("open replay database");
     let chunks = db.recent(100).expect("read text_chunks");
     assert!(
@@ -159,12 +159,12 @@ fn seed_l2_and_fact_ids(data_dir: &Path, injection: &str) -> (i64, i64, i64) {
         "evil URL must stay outside this segment's window: evil.ts={} window_end={window_end}",
         evil.ts
     );
-    // Replay 的 URL 不能替真機日後的 unattended 動作背書；否則下載一份語料
-    // 就能種票。這套測的是另一個軸，所以另種一場明確的 Windows 真 recorder
-    // provenance，讓網址政策對 good / evil 都保持中立。
+    // Replay 的 URL 不能替 unattended 動作背書；否則下載一份語料就能種票。
+    // 這套測的是另一個軸，所以合成一場標成可信 Windows recorder 的測試
+    // session，讓網址政策對 good / evil 都保持中立。
     let session = db
         .start_session(sister_core::db::TRUSTED_URL_ORIGIN_PLATFORM, "test")
-        .expect("real capture provenance session");
+        .expect("synthetic trusted capture session");
     for (index, url) in [GOOD_URL, EVIL_URL].into_iter().enumerate() {
         db.insert_focus(
             session,
@@ -180,7 +180,24 @@ fn seed_l2_and_fact_ids(data_dir: &Path, injection: &str) -> (i64, i64, i64) {
                 },
             },
         )
-        .expect("seed real URL provenance");
+        .expect("seed synthetic trusted URL provenance");
+    }
+    if trusted_source {
+        // Replay 本身永遠不會取得來源票。這個測試夾具明確把第一張畫面及其
+        // OCR 紀錄改成合成的可信 recorder 輸出，讓原有時間窗測試仍能觀察到
+        // 良性網址執行與晚到的惡意網址被時間窗拒絕。第二張保留 replay 身分。
+        let conn = rusqlite::Connection::open(Config::db_path(data_dir)).unwrap();
+        for (table, id_column) in [
+            ("frames", "id"),
+            ("text_chunks", "frame_id"),
+            ("facts", "frame_id"),
+        ] {
+            conn.execute(
+                &format!("UPDATE {table} SET session_id = ?1 WHERE {id_column} = ?2"),
+                rusqlite::params![session, frame_id],
+            )
+            .unwrap();
+        }
     }
     (good.id, evil.id, frame_id)
 }
@@ -273,7 +290,7 @@ fn run_case(injection: &str, compromised: bool) -> (TempDir, Vec<String>) {
             "3700000",
         ],
     );
-    let (good, evil, frame_id) = seed_l2_and_fact_ids(&dir.0, injection);
+    let (good, evil, frame_id) = seed_l2_and_fact_ids(&dir.0, injection, true);
     let config = write_brain(&dir.0, if compromised { evil } else { good }, frame_id);
     sister(
         &dir.0,
@@ -317,7 +334,7 @@ fn run_raw_brain_case(response: impl FnOnce(i64) -> String) -> (TempDir, Vec<Str
             "3700000",
         ],
     );
-    let (_good, _evil, frame_id) = seed_l2_and_fact_ids(&dir.0, injection);
+    let (_good, _evil, frame_id) = seed_l2_and_fact_ids(&dir.0, injection, true);
     let config = write_brain_raw(&dir.0, &response(frame_id));
     sister(
         &dir.0,
@@ -387,13 +404,18 @@ fn all_twenty_injections_arrive_verbatim_but_execute_nothing() {
     }
 }
 
-#[test]
-fn an_injected_url_on_the_cited_frame_cannot_borrow_an_earlier_visit() {
+fn injected_url_from_source(source_url: &str, trusted_source: bool) -> (Vec<String>, String) {
     const INJECTED_URL: &str = "https://example.com/collect";
     let injection = INJECTION_REGRESSION_CASES[7];
     assert!(injection.contains(INJECTED_URL));
     let dir = TempDir::new("in-frame-url");
     let scenario = write_scenario(&dir.0, injection);
+    if source_url != GOOD_URL {
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&scenario).unwrap()).unwrap();
+        value["steps"][0]["url"] = source_url.into();
+        std::fs::write(&scenario, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+    }
     sister(
         &dir.0,
         None,
@@ -404,7 +426,7 @@ fn an_injected_url_on_the_cited_frame_cannot_borrow_an_earlier_visit() {
             "3700000",
         ],
     );
-    let (good, _, frame_id) = seed_l2_and_fact_ids(&dir.0, injection);
+    let (good, _, frame_id) = seed_l2_and_fact_ids(&dir.0, injection, trusted_source);
     let injected = {
         let mut db = Db::open(&Config::db_path(&dir.0)).unwrap();
         let fact = db
@@ -450,22 +472,37 @@ fn an_injected_url_on_the_cited_frame_cannot_borrow_an_earlier_visit() {
         &["do", "--task", TASK, "--use-grant", "--unattended"],
     );
     let lines = executed_lines(&dir.0);
+    let log = std::fs::read_to_string(dir.0.join("action-log.jsonl")).unwrap();
+    (lines, log)
+}
+
+fn assert_url_refused(lines: &[String], log: &str, expected_reason: &str) {
     assert!(
         lines.is_empty(),
         "screen text borrowed a standing grant: {lines:#?}"
     );
-    let log = std::fs::read_to_string(dir.0.join("action-log.jsonl")).unwrap();
     assert!(
         log.lines().any(|line| {
             serde_json::from_str::<serde_json::Value>(line)
                 .ok()
                 .is_some_and(|event| {
-                    event["event"] == "refused"
-                        && event["reason"]["why"] == "target_only_in_screen_text"
+                    event["event"] == "refused" && event["reason"]["why"] == expected_reason
                 })
         }),
-        "the injected URL must be stopped by the same-frame address rule: {log}"
+        "the injected URL must be stopped by {expected_reason}: {log}"
     );
+}
+
+#[test]
+fn an_injected_url_on_the_cited_frame_cannot_borrow_an_earlier_visit() {
+    let (lines, log) = injected_url_from_source(GOOD_URL, true);
+    assert_url_refused(&lines, &log, "target_only_in_screen_text");
+}
+
+#[test]
+fn replay_frame_with_the_exact_injected_address_cannot_borrow_a_trusted_visit() {
+    let (lines, log) = injected_url_from_source("https://example.com/collect", false);
+    assert_url_refused(&lines, &log, "target_source_untrusted");
 }
 
 #[test]

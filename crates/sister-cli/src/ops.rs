@@ -3886,6 +3886,9 @@ pub mod act {
                                 TargetAddressOrigin::AddressUnmeasured => {
                                     UrlOrigin::TargetAddressUnmeasured
                                 }
+                                TargetAddressOrigin::UntrustedSourceFrame => {
+                                    UrlOrigin::TargetSourceUntrusted
+                                }
                             })
                         },
                     ) {

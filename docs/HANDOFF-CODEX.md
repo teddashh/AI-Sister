@@ -1,5 +1,13 @@
 # HANDOFF — 交給下一位 agent（Codex）
 
+**2026-09-28 Phase 6 候選修復：**無人值守開 URL 的來源畫面現在必須屬於
+`TRUSTED_URL_ORIGIN_PLATFORM` session；replay／無 session 的同網址畫面會以
+`target_source_untrusted` 拒絕。位址列改用既有 `same_destination` 比較，接受 Chromium
+省略 scheme／www. 的形式，仍拒絕不同 path、query、fragment。反向端到端測試涵蓋
+replay 畫面位址列恰好等於注入 URL、另有可信瀏覽紀錄的情境；良性控制仍執行一次。
+`cargo fmt --all -- --check`、workspace Clippy／測試、`check-no-network.sh` 通過。
+這只修候選的兩個退件點；Phase 6 三項退場條件仍未完成，下一步照 `PHASES.md` 收驗。
+
 **2026-09-21 交回 Claude 的紀錄在 [`HANDOFF-CLAUDE-2026-09-21.md`](HANDOFF-CLAUDE-2026-09-21.md)。**
 那份寫的是當天 Codex session `01a0c443` 與後續 Grok session 做到哪、main 在 `5cfd22c`、語音／用量已在 main、PDF UIA 與 diagnose 堆疊怎麼修、macOS probe 為何還沒上。下面這份仍是到 alpha.145 為止的長交接。
 

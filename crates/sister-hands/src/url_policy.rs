@@ -170,6 +170,8 @@ pub enum UrlOrigin {
     TargetOnlyInScreenText,
     /// 目標來源畫面的位址列沒有量到，不能說它和這串字相同。
     TargetAddressUnmeasured,
+    /// 來源畫面不是可採信的 Windows 錄製，不能借另一場的網址紀錄授權。
+    TargetSourceUntrusted,
     /// 目前沒有可確認為已完成 URL、能替這一步背書的錄製來源。
     /// 舊版錄製可能仍留著 URL，但無法排除是正在輸入的半截字，所以不採信。
     NoTrustedRecordedUrls,
@@ -184,6 +186,7 @@ pub enum TargetAddressOrigin {
     SameFrameAddress,
     OtherScreenText,
     AddressUnmeasured,
+    UntrustedSourceFrame,
 }
 
 /// 這一步的網址過不過得了他選的那道規則——過得了回 `None`。
@@ -222,6 +225,7 @@ pub fn try_url_origin_gap<E>(
             }
             UrlOrigin::TargetOnlyInScreenText => Some(UrlOriginGap::TargetOnlyInScreenText),
             UrlOrigin::TargetAddressUnmeasured => Some(UrlOriginGap::TargetAddressUnmeasured),
+            UrlOrigin::TargetSourceUntrusted => Some(UrlOriginGap::TargetSourceUntrusted),
             UrlOrigin::NoTrustedRecordedUrls => Some(UrlOriginGap::NoTrustedRecordedUrls),
             UrlOrigin::NotAReadableSite => Some(UrlOriginGap::NotAReadableSite),
         },
@@ -419,6 +423,10 @@ mod tests {
             (
                 UrlOrigin::TargetAddressUnmeasured,
                 UrlOriginGap::TargetAddressUnmeasured,
+            ),
+            (
+                UrlOrigin::TargetSourceUntrusted,
+                UrlOriginGap::TargetSourceUntrusted,
             ),
         ];
         let mut said = Vec::new();
