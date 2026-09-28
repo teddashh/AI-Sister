@@ -209,13 +209,22 @@ fn a_request_for_help_without_a_subject_does_not_borrow_politeness_as_the_subjec
     assert!(!db.search("麻煩你", 1).unwrap().is_empty());
     assert!(db.search("幫我", 1).unwrap().is_empty());
 
-    for q in ["可以幫我嗎", "可不可以幫我嗎", "麻煩你幫我嗎", "請你幫我嗎"] {
+    for q in [
+        "可以幫我嗎",
+        "可不可以幫我嗎",
+        "麻煩你幫我嗎",
+        "請你幫我嗎",
+        "可以幫我找一下嗎",
+        "麻煩你幫我查一下嗎",
+        "請你幫我看一下嗎",
+    ] {
         let got = ask(&mut db, q);
         assert!(got.empty, "「{q}」不該拿客氣話找到畫面：{}", got.hits);
         assert_eq!(got.searched, None, "「{q}」沒有主題，不應宣稱改用別的字");
         assert!(help_request_without_subject(q), "「{q}」應要求補上主題");
     }
     assert!(!help_request_without_subject("可以幫我找月報連結嗎"));
+    assert!(!help_request_without_subject("可以幫我找一下月報連結嗎"));
     assert!(!help_request_without_subject("幫我買咖啡嗎"));
     let rewritten = RetrievalProfile::TextAndFacts
         .retrieve_for_question_at(
@@ -243,6 +252,17 @@ fn a_request_for_help_without_a_subject_does_not_borrow_politeness_as_the_subjec
         .retrieve(&mut db, "可以幫我嗎", 5)
         .unwrap();
     assert!(!exact_retrieval.needs_subject);
+    add(&mut db, session, 3_100, 4, "可以幫我找一下嗎");
+    let exact_look = RetrievalProfile::TextAndFacts
+        .retrieve(&mut db, "可以幫我找一下嗎", 5)
+        .unwrap();
+    assert!(
+        exact_look
+            .hits
+            .iter()
+            .any(|hit| hit.text == "可以幫我找一下嗎")
+    );
+    assert!(!exact_look.needs_subject);
 }
 
 fn both() -> [(&'static str, Db); 2] {

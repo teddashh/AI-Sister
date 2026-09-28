@@ -295,16 +295,17 @@ fn relax_base<'q>(db: &Db, query: &'q str) -> Result<Option<Peeled<'q>>> {
     Ok(Some(peeled))
 }
 
-/// 請她幫忙、卻沒有說要找什麼。供 CLI、desktop 在進大腦之前判斷；
+/// 請她幫忙（含「幫我找一下」）、卻沒有說要找什麼。供 CLI、desktop 在進大腦之前判斷；
 /// 完整原句仍可先在本機比對，真的記過就照常給出處。
 pub fn help_request_without_subject(query: &str) -> bool {
     let text = query.trim_end_matches(|c: char| {
         c.is_whitespace() || matches!(c, '嗎' | '吗' | '呢' | '吧' | '?' | '？')
     });
-    let Some(help) = HELP_ASKS.iter().find(|help| text.ends_with(**help)) else {
+    let text = text.strip_suffix("一下").unwrap_or(text);
+    let Some(help_len) = longest_suffix(text, HELP_ASKS).max(help_look_suffix(text)) else {
         return false;
     };
-    let mut before = text[..text.len() - help.len()].trim_start();
+    let mut before = text[..text.len() - help_len].trim_start();
     while let Some(len) = longest_prefix(before, LOOK_HEAD_BEFORES) {
         before = &before[len..];
     }
