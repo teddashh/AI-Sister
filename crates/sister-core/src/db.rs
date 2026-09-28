@@ -5342,6 +5342,37 @@ impl Db {
         })
     }
 
+    /// 無人值守開網址時，目標 fact 必須來自同一張畫面的 OCR，且那張畫面的
+    /// 位址列正好是這個網址。別張畫面去過同一網址，不能讓這張畫面裡的指令
+    /// 借它的來源票。讀不到畫面／位址列時明確保留「沒量到」。
+    pub fn target_address_on_source_frame(
+        &self,
+        id: i64,
+        expected_raw: &str,
+    ) -> Result<sister_hands::url_policy::TargetAddressOrigin> {
+        use sister_hands::url_policy::TargetAddressOrigin as Origin;
+        let Some(fact) = self.fact_by_id(id)? else {
+            return Ok(Origin::AddressUnmeasured);
+        };
+        if fact.raw != expected_raw || fact.source_kind != "ocr" {
+            return Ok(Origin::AddressUnmeasured);
+        }
+        let Some(frame_id) = fact.frame_id else {
+            return Ok(Origin::AddressUnmeasured);
+        };
+        let frame_url: Option<Option<String>> = self
+            .conn
+            .query_row("SELECT url FROM frames WHERE id = ?1", [frame_id], |row| {
+                row.get(0)
+            })
+            .optional()?;
+        Ok(match frame_url.flatten() {
+            Some(url) if url == expected_raw => Origin::SameFrameAddress,
+            Some(_) => Origin::OtherScreenText,
+            None => Origin::AddressUnmeasured,
+        })
+    }
+
     /// 在一個有界時間窗裡挑這一步的畫面憑據：**動作之後的優先，然後取最新的
     /// 那一張**；一張動作之後的都沒有，才退回動作之前最接近的那一張。
     ///
@@ -9900,6 +9931,49 @@ mod tests {
                 origin: FactOrigin::ScreenTextWithoutFrame,
             }
         );
+    }
+
+    #[test]
+    fn unattended_url_target_must_be_the_address_on_its_own_frame() {
+        use sister_hands::url_policy::TargetAddressOrigin as Origin;
+        let db = test_db();
+        let target = "https://example.com/collect";
+        assert_eq!(
+            db.target_address_on_source_frame(999, target).unwrap(),
+            Origin::AddressUnmeasured
+        );
+        for (frame_url, expected) in [
+            (Some(target), Origin::SameFrameAddress),
+            (Some("https://example.com/help"), Origin::OtherScreenText),
+            (None, Origin::AddressUnmeasured),
+        ] {
+            db.conn
+                .execute(
+                    "INSERT INTO frames(ts, monitor, width, height, dhash, url)
+                     VALUES(1, 0, 1, 1, 0, ?1)",
+                    [frame_url],
+                )
+                .unwrap();
+            let frame_id = db.conn.last_insert_rowid();
+            db.conn
+                .execute(
+                    "INSERT INTO facts(ts, kind, raw, normalized, source_kind, frame_id)
+                     VALUES(1, 'url', ?1, ?1, 'ocr', ?2)",
+                    params![target, frame_id],
+                )
+                .unwrap();
+            let fact_id = db.conn.last_insert_rowid();
+            assert_eq!(
+                db.target_address_on_source_frame(fact_id, target).unwrap(),
+                expected
+            );
+            assert_eq!(
+                db.target_address_on_source_frame(fact_id, "https://changed.example")
+                    .unwrap(),
+                Origin::AddressUnmeasured,
+                "an old fact id cannot authorize a different target"
+            );
+        }
     }
 
     #[test]

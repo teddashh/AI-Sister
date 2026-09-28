@@ -463,6 +463,10 @@ define_gaps! { UrlOriginGap {
     PathNotInHerRecord,
     /// 路徑對得上，但 query／fragment 不是紀錄裡那一條去處。
     DestinationNotTheRecordedOne,
+    /// 目標是畫面裡的字；那張畫面的位址列是另一個網址。
+    TargetOnlyInScreenText,
+    /// 目標那張畫面的位址列沒量到，不能拿空值冒充相同。
+    TargetAddressUnmeasured,
 }}
 
 impl UrlOriginGap {
@@ -522,6 +526,16 @@ impl UrlOriginGap {
             Self::DestinationNotTheRecordedOne => {
                 "你說過我可以自己按網址，條件是我要說得出它從哪來。這一頁的路徑我記過，\
                  但 query 或 fragment 不是紀錄裡那一條去處，所以票跑不動它。要開請你當場看過再按。"
+                    .to_string()
+            }
+            Self::TargetOnlyInScreenText => {
+                "這個網址出現在來源畫面的文字裡；當時的位址列是另一個網址。\
+                 授權票不能替畫面裡的字決定要開哪一頁。要開請你當場看過再按。"
+                    .to_string()
+            }
+            Self::TargetAddressUnmeasured => {
+                "這一步的來源畫面沒有可確認的位址列網址，無法證明要開的正是當時瀏覽的頁面。\
+                 無人值守先不開；要開請你當場看過再按。"
                     .to_string()
             }
         }
@@ -689,7 +703,9 @@ impl RefusalReason {
                 | UrlOriginGap::NoTrustedRecordedUrls
                 | UrlOriginGap::NotAReadableSite
                 | UrlOriginGap::PathNotInHerRecord
-                | UrlOriginGap::DestinationNotTheRecordedOne => RefusalBucket::UrlOriginUnknown,
+                | UrlOriginGap::DestinationNotTheRecordedOne
+                | UrlOriginGap::TargetOnlyInScreenText
+                | UrlOriginGap::TargetAddressUnmeasured => RefusalBucket::UrlOriginUnknown,
             },
             Self::NeverInherited { .. } => RefusalBucket::NeverInheritsTaskGrant,
             Self::NeedsLivePress { .. } => RefusalBucket::NeedsALivePressThisRun,
@@ -1327,7 +1343,9 @@ mod tests {
                     | UrlOriginGap::NoTrustedRecordedUrls
                     | UrlOriginGap::NotAReadableSite
                     | UrlOriginGap::PathNotInHerRecord
-                    | UrlOriginGap::DestinationNotTheRecordedOne => RefusalBucket::UrlOriginUnknown,
+                    | UrlOriginGap::DestinationNotTheRecordedOne
+                    | UrlOriginGap::TargetOnlyInScreenText
+                    | UrlOriginGap::TargetAddressUnmeasured => RefusalBucket::UrlOriginUnknown,
                 },
             }
         }

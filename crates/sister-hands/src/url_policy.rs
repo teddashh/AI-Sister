@@ -87,7 +87,7 @@ define_url_open_answers! {
     /// 「可以，但你要說得出它從哪來。」
     WhenYouCanNameTheOrigin => (
         "when-you-can-name-the-origin",
-        "可以自己按，但條件是你說得出這個網址從哪來（那個站要在你自己的紀錄裡出現過）。"
+        "可以自己按，但只限來源畫面當時正在瀏覽、且在可採信紀錄裡出現過的同一網址；畫面文字裡的其他網址要我當場按。"
     ),
 }
 
@@ -166,11 +166,24 @@ pub enum UrlOrigin {
     SameSiteDifferentPath,
     /// 路徑對得上，但 query／fragment 不是紀錄裡那一條去處。
     SamePathDifferentDestination,
+    /// 目標從同一張畫面的 OCR 文字抽出，但當時位址列是另一個網址。
+    TargetOnlyInScreenText,
+    /// 目標來源畫面的位址列沒有量到，不能說它和這串字相同。
+    TargetAddressUnmeasured,
     /// 目前沒有可確認為已完成 URL、能替這一步背書的錄製來源。
     /// 舊版錄製可能仍留著 URL，但無法排除是正在輸入的半截字，所以不採信。
     NoTrustedRecordedUrls,
     /// 那一串字讀不出一個站名。
     NotAReadableSite,
+}
+
+/// 同一張目標畫面的位址列，是否就是模型指向的網址。
+/// 只供無人值守使用；當場按的路仍由使用者核准具體目標。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TargetAddressOrigin {
+    SameFrameAddress,
+    OtherScreenText,
+    AddressUnmeasured,
 }
 
 /// 這一步的網址過不過得了他選的那道規則——過得了回 `None`。
@@ -207,6 +220,8 @@ pub fn try_url_origin_gap<E>(
             UrlOrigin::SamePathDifferentDestination => {
                 Some(UrlOriginGap::DestinationNotTheRecordedOne)
             }
+            UrlOrigin::TargetOnlyInScreenText => Some(UrlOriginGap::TargetOnlyInScreenText),
+            UrlOrigin::TargetAddressUnmeasured => Some(UrlOriginGap::TargetAddressUnmeasured),
             UrlOrigin::NoTrustedRecordedUrls => Some(UrlOriginGap::NoTrustedRecordedUrls),
             UrlOrigin::NotAReadableSite => Some(UrlOriginGap::NotAReadableSite),
         },
@@ -379,9 +394,9 @@ mod tests {
         assert_eq!(asked.get(), 1, "說得出來源那條路沒有真的去查");
     }
 
-    /// 四種「說不出來」各自是一句不同的話。同站不同路徑不可以講成「沒去過這個站」。
+    /// 每種「說不出來」各自是一句不同的話。同站不同路徑不可以講成「沒去過這個站」。
     #[test]
-    fn the_three_ways_of_not_knowing_name_different_causes() {
+    fn unavailable_url_origins_name_different_causes() {
         let cases = [
             (UrlOrigin::NotInHerRecord, UrlOriginGap::NotInHerRecord),
             (
@@ -397,6 +412,14 @@ mod tests {
                 UrlOriginGap::NoTrustedRecordedUrls,
             ),
             (UrlOrigin::NotAReadableSite, UrlOriginGap::NotAReadableSite),
+            (
+                UrlOrigin::TargetOnlyInScreenText,
+                UrlOriginGap::TargetOnlyInScreenText,
+            ),
+            (
+                UrlOrigin::TargetAddressUnmeasured,
+                UrlOriginGap::TargetAddressUnmeasured,
+            ),
         ];
         let mut said = Vec::new();
         for (origin, expected) in cases {
@@ -438,6 +461,8 @@ mod tests {
             "同 path 不同參數那一句要說得出不是換頁：{}",
             said[2]
         );
+        assert!(said[5].contains("另一個網址"), "位址列不同：{}", said[5]);
+        assert!(said[6].contains("沒有可確認"), "位址列沒量到：{}", said[6]);
     }
 
     /// 來源查詢說「路徑對、參數不對」時鑄不出票；當場按仍放行。不靠過期。

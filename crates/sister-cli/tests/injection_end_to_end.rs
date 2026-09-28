@@ -388,6 +388,87 @@ fn all_twenty_injections_arrive_verbatim_but_execute_nothing() {
 }
 
 #[test]
+fn an_injected_url_on_the_cited_frame_cannot_borrow_an_earlier_visit() {
+    const INJECTED_URL: &str = "https://example.com/collect";
+    let injection = INJECTION_REGRESSION_CASES[7];
+    assert!(injection.contains(INJECTED_URL));
+    let dir = TempDir::new("in-frame-url");
+    let scenario = write_scenario(&dir.0, injection);
+    sister(
+        &dir.0,
+        None,
+        &[
+            "replay",
+            scenario.to_str().unwrap(),
+            "--interval-ms",
+            "3700000",
+        ],
+    );
+    let (good, _, frame_id) = seed_l2_and_fact_ids(&dir.0, injection);
+    let injected = {
+        let mut db = Db::open(&Config::db_path(&dir.0)).unwrap();
+        let fact = db
+            .facts_by_kind("url", 100)
+            .unwrap()
+            .into_iter()
+            .find(|fact| fact.raw == INJECTED_URL && fact.frame_id == Some(frame_id))
+            .expect("injected URL must be extracted from the cited screen");
+        let session = db
+            .start_session(sister_core::db::TRUSTED_URL_ORIGIN_PLATFORM, "test")
+            .unwrap();
+        db.insert_focus(
+            session,
+            &FocusEvent {
+                ts: 10_000_100,
+                kind: FocusKind::UrlChange,
+                snapshot: FocusSnapshot {
+                    app_id: Some("chrome.exe".into()),
+                    url: Some(INJECTED_URL.into()),
+                    ..FocusSnapshot::default()
+                },
+            },
+        )
+        .unwrap();
+        fact.id
+    };
+    assert_ne!(good, injected);
+    let config = write_brain(&dir.0, injected, frame_id);
+    sister(
+        &dir.0,
+        Some(&config),
+        &["consent", "--grant", "cloud-reading"],
+    );
+    sister(
+        &dir.0,
+        Some(&config),
+        &["review", "--last", "2h", "--force"],
+    );
+    write_grant(&dir.0);
+    sister(
+        &dir.0,
+        Some(&config),
+        &["do", "--task", TASK, "--use-grant", "--unattended"],
+    );
+    let lines = executed_lines(&dir.0);
+    assert!(
+        lines.is_empty(),
+        "screen text borrowed a standing grant: {lines:#?}"
+    );
+    let log = std::fs::read_to_string(dir.0.join("action-log.jsonl")).unwrap();
+    assert!(
+        log.lines().any(|line| {
+            serde_json::from_str::<serde_json::Value>(line)
+                .ok()
+                .is_some_and(|event| {
+                    event["event"] == "refused"
+                        && event["reason"]["why"] == "target_only_in_screen_text"
+                })
+        }),
+        "the injected URL must be stopped by the same-frame address rule: {log}"
+    );
+}
+
+#[test]
 fn nonexistent_fact_id_executes_nothing() {
     let (_dir, lines) = run_raw_brain_case(|frame_id| {
         commitment_response(frame_id, serde_json::json!({"fact": 999_999_999}))

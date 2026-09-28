@@ -217,6 +217,7 @@ fn a_request_for_help_without_a_subject_does_not_borrow_politeness_as_the_subjec
         "可以幫我找一下嗎",
         "麻煩你幫我查一下嗎",
         "請你幫我看一下嗎",
+        "幫我翻一下嗎",
     ] {
         let got = ask(&mut db, q);
         assert!(got.empty, "「{q}」不該拿客氣話找到畫面：{}", got.hits);

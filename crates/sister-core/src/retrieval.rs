@@ -301,8 +301,17 @@ pub fn help_request_without_subject(query: &str) -> bool {
     let text = query.trim_end_matches(|c: char| {
         c.is_whitespace() || matches!(c, '嗎' | '吗' | '呢' | '吧' | '?' | '？')
     });
-    let text = text.strip_suffix("一下").unwrap_or(text);
-    let Some(help_len) = longest_suffix(text, HELP_ASKS).max(help_look_suffix(text)) else {
+    // 「翻一下」在 HELP_LOOKS 裡是一個完整找法；先認原句，再把「找一下」
+    // 這種語尾的「一下」拿掉。順序反過來會把「幫我翻一下」剝成不認得的「幫我翻」。
+    let help_len = longest_suffix(text, HELP_ASKS)
+        .max(help_look_suffix(text))
+        .or_else(|| {
+            let shorter = text.strip_suffix("一下")?;
+            longest_suffix(shorter, HELP_ASKS)
+                .max(help_look_suffix(shorter))
+                .map(|len| len + "一下".len())
+        });
+    let Some(help_len) = help_len else {
         return false;
     };
     let mut before = text[..text.len() - help_len].trim_start();

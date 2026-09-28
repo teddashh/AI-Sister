@@ -3011,6 +3011,14 @@ pub mod act {
         fn site_in_her_record(&self, _url: &str) -> Result<sister_hands::url_policy::UrlOrigin> {
             Ok(sister_hands::url_policy::UrlOrigin::NoTrustedRecordedUrls)
         }
+        /// 新 source 若沒接目標畫面的位址列查詢，無人值守必須停在「沒量到」。
+        fn target_address_on_source_frame(
+            &self,
+            _id: i64,
+            _expected_raw: &str,
+        ) -> Result<sister_hands::url_policy::TargetAddressOrigin> {
+            Ok(sister_hands::url_policy::TargetAddressOrigin::AddressUnmeasured)
+        }
         fn input_window_covering(
             &self,
             _ts: i64,
@@ -3040,6 +3048,13 @@ pub mod act {
         /// 一次都不會成立，而畫面會把非空集合講成空集合。
         fn site_in_her_record(&self, url: &str) -> Result<sister_hands::url_policy::UrlOrigin> {
             Db::site_in_her_record(self, url)
+        }
+        fn target_address_on_source_frame(
+            &self,
+            id: i64,
+            expected_raw: &str,
+        ) -> Result<sister_hands::url_policy::TargetAddressOrigin> {
+            Db::target_address_on_source_frame(self, id, expected_raw)
         }
         fn app_for_evidence(&self, r: &sister_core::brain::EvidenceRef) -> Result<Option<String>> {
             Db::app_for_evidence(self, r)
@@ -3831,31 +3846,48 @@ pub mod act {
                 at_ms: clock(),
                 action: action.clone(),
             })?;
-            let authorized =
-                if opts.unattended {
-                    if let Some((message, why)) = unattended_target_frame_refusal(
-                        source,
-                        commitment.agreed_evidence_json.as_deref(),
-                        &commitment.evidence_json,
-                        commitment
-                            .allowed_next_step_fact
-                            .zip(expected_target.as_deref()),
-                    )? {
-                        let reason = RefusalReason::UnattendedTargetHasNoCitedFrame { why };
-                        tally.count_refusal(&reason);
-                        writeln!(out, "沒有做，也沒有交給作業系統：{message}")?;
-                        log.append(&ActionEvent::Refused {
-                            at_ms: clock(),
-                            action: action.clone(),
-                            reason,
-                        })?;
-                        None
-                    } else {
-                        match run.grant().authorize_unattended(
+            let authorized = if opts.unattended {
+                if let Some((message, why)) = unattended_target_frame_refusal(
+                    source,
+                    commitment.agreed_evidence_json.as_deref(),
+                    &commitment.evidence_json,
+                    commitment
+                        .allowed_next_step_fact
+                        .zip(expected_target.as_deref()),
+                )? {
+                    let reason = RefusalReason::UnattendedTargetHasNoCitedFrame { why };
+                    tally.count_refusal(&reason);
+                    writeln!(out, "沒有做，也沒有交給作業系統：{message}")?;
+                    log.append(&ActionEvent::Refused {
+                        at_ms: clock(),
+                        action: action.clone(),
+                        reason,
+                    })?;
+                    None
+                } else {
+                    match run.grant().authorize_unattended(
                         &step,
                         clock(),
                         sister_hands::url_policy::UrlOpenPolicy::from_answer(opts.url_open),
-                        |url| source.site_in_her_record(url),
+                        |url| {
+                            use sister_hands::url_policy::{TargetAddressOrigin, UrlOrigin};
+                            let visited = source.site_in_her_record(url)?;
+                            if visited != UrlOrigin::InHerRecord {
+                                return Ok(visited);
+                            }
+                            let Some(fact_id) = commitment.allowed_next_step_fact else {
+                                return Ok(UrlOrigin::TargetAddressUnmeasured);
+                            };
+                            Ok(match source.target_address_on_source_frame(fact_id, url)? {
+                                TargetAddressOrigin::SameFrameAddress => UrlOrigin::InHerRecord,
+                                TargetAddressOrigin::OtherScreenText => {
+                                    UrlOrigin::TargetOnlyInScreenText
+                                }
+                                TargetAddressOrigin::AddressUnmeasured => {
+                                    UrlOrigin::TargetAddressUnmeasured
+                                }
+                            })
+                        },
                     ) {
                         // **這道網址閘門擺在授權書通過之後，不是之前。** 兩邊都
                         // 是拒絕、都不會執行，所以順序只影響他讀到哪一句——而
@@ -3893,9 +3925,11 @@ pub mod act {
                             })?;
                             None
                         }
-                        Err(sister_hands::semi_action::UnattendedAuthorizationFailure::UrlPolicy(
-                            why,
-                        )) => {
+                        Err(
+                            sister_hands::semi_action::UnattendedAuthorizationFailure::UrlPolicy(
+                                why,
+                            ),
+                        ) => {
                             let host = match &action {
                                 sister_hands::ActionSnapshot::OpenUrl { url } => {
                                     sister_hands::target_policy::host_of(url)
@@ -3925,47 +3959,47 @@ pub mod act {
                             ),
                         ) => return Err(error),
                     }
+                }
+            } else {
+                let presented = PresentedStep::new(step.clone());
+                match ask(input, out, &_watcher.pulled)? {
+                    Answer::Decline => {
+                        tally.declined += 1;
+                        log.append(&ActionEvent::Refused {
+                            at_ms: clock(),
+                            action: action.clone(),
+                            reason: RefusalReason::UserDeclinedThisStep,
+                        })?;
+                        None
                     }
-                } else {
-                    let presented = PresentedStep::new(step.clone());
-                    match ask(input, out, &_watcher.pulled)? {
-                        Answer::Decline => {
-                            tally.declined += 1;
-                            log.append(&ActionEvent::Refused {
-                                at_ms: clock(),
-                                action: action.clone(),
-                                reason: RefusalReason::UserDeclinedThisStep,
-                            })?;
-                            None
-                        }
-                        Answer::Abort(by) => {
-                            let event = run.abort(clock(), by);
-                            log.append(&event)?;
-                            terminal = Some(match event {
-                                ActionEvent::Aborted {
-                                    after_completed_steps,
-                                    by,
-                                    ..
-                                } => RunConclusion::Aborted {
-                                    after_completed_steps,
-                                    by,
-                                },
-                                _ => unreachable!("abort always returns Aborted"),
-                            });
-                            break;
-                        }
-                        Answer::Approve => {
-                            let approval = presented.approve();
-                            let suggestion = button.press();
-                            log.append(&ActionEvent::Approved {
-                                at_ms: clock(),
-                                action: action.clone(),
-                                by: Some(sister_hands::ApprovedBy::Press),
-                            })?;
-                            Some((approval, suggestion))
-                        }
+                    Answer::Abort(by) => {
+                        let event = run.abort(clock(), by);
+                        log.append(&event)?;
+                        terminal = Some(match event {
+                            ActionEvent::Aborted {
+                                after_completed_steps,
+                                by,
+                                ..
+                            } => RunConclusion::Aborted {
+                                after_completed_steps,
+                                by,
+                            },
+                            _ => unreachable!("abort always returns Aborted"),
+                        });
+                        break;
                     }
-                };
+                    Answer::Approve => {
+                        let approval = presented.approve();
+                        let suggestion = button.press();
+                        log.append(&ActionEvent::Approved {
+                            at_ms: clock(),
+                            action: action.clone(),
+                            by: Some(sister_hands::ApprovedBy::Press),
+                        })?;
+                        Some((approval, suggestion))
+                    }
+                }
+            };
             if let Some((approval, suggestion)) = authorized {
                 // **不是 `step_now`。** `--minutes` 那一維說的是「這張授權書
                 // 多久後失效」，而失效要管得住的是**她真的動手的那一刻**，
@@ -4382,6 +4416,13 @@ pub mod act {
                 _url: &str,
             ) -> Result<sister_hands::url_policy::UrlOrigin> {
                 Ok(sister_hands::url_policy::UrlOrigin::InHerRecord)
+            }
+            fn target_address_on_source_frame(
+                &self,
+                _id: i64,
+                _expected_raw: &str,
+            ) -> Result<sister_hands::url_policy::TargetAddressOrigin> {
+                Ok(sister_hands::url_policy::TargetAddressOrigin::SameFrameAddress)
             }
             fn live_commitments(&self) -> Result<Vec<CommitmentRow>> {
                 Ok(self.rows.clone())
@@ -8136,6 +8177,13 @@ pub mod act {
                 _url: &str,
             ) -> Result<sister_hands::url_policy::UrlOrigin> {
                 self.says.map_err(|e| anyhow::anyhow!(e))
+            }
+            fn target_address_on_source_frame(
+                &self,
+                id: i64,
+                expected_raw: &str,
+            ) -> Result<sister_hands::url_policy::TargetAddressOrigin> {
+                self.inner.target_address_on_source_frame(id, expected_raw)
             }
             fn live_commitments(&self) -> Result<Vec<CommitmentRow>> {
                 self.inner.live_commitments()
