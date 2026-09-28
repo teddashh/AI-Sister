@@ -274,6 +274,12 @@ fn relax_plan(db: &Db, query: &str) -> Result<Option<RelaxPlan>> {
 /// 兩步放寬共用的前提：剝完的字，和類型詞保護。`None` 就是這一題不放寬，
 /// [`retry_candidate`] 和 [`joint_retry`] 都不跑。
 fn relax_base<'q>(db: &Db, query: &'q str) -> Result<Option<Peeled<'q>>> {
+    // 「可以幫我嗎」沒有說要找什麼。第一次照原字查；若整句空手，不能只拿
+    // 「可以」或「麻煩」去撈一張不相干的畫面。這裡只擋沒有找法、沒有主題的
+    // 請求；「可以幫我找月報連結嗎」仍交給 strip_looking。
+    if help_request_without_subject(query) {
+        return Ok(None);
+    }
     // 傳原句，不傳 `question::terms(query)`。「到」「那」是虛字，先跑 terms 會把
     // 「到底」「那麼」吃成「底」「麼」，口語開頭整段對不到。剝完再和它比。
     let peeled = peel_retry(query);
@@ -287,6 +293,22 @@ fn relax_base<'q>(db: &Db, query: &'q str) -> Result<Option<Peeled<'q>>> {
         return Ok(None);
     }
     Ok(Some(peeled))
+}
+
+/// 請她幫忙、卻沒有說要找什麼。供 CLI、desktop 在進大腦之前判斷；
+/// 完整原句仍可先在本機比對，真的記過就照常給出處。
+pub fn help_request_without_subject(query: &str) -> bool {
+    let text = query.trim_end_matches(|c: char| {
+        c.is_whitespace() || matches!(c, '嗎' | '吗' | '呢' | '吧' | '?' | '？')
+    });
+    let Some(help) = HELP_ASKS.iter().find(|help| text.ends_with(**help)) else {
+        return false;
+    };
+    let mut before = text[..text.len() - help.len()].trim_start();
+    while let Some(len) = longest_prefix(before, LOOK_HEAD_BEFORES) {
+        before = &before[len..];
+    }
+    question::only_filler(before)
 }
 
 /// [`joint_retry`] 切段的字。空白和中文標點另外也切。
@@ -1345,6 +1367,14 @@ impl RetrievalProfile {
         ensure!(!question.trim().is_empty(), "retrieval question 不可為空");
         ensure!(!query.trim().is_empty(), "retrieval query 不可為空");
 
+        // CLI 可以換查詢字，但不能替一個沒說主題的請求補出「可以」之類的主題。
+        // 仍先用原句完整比對；真的看過那句話就會回原文。空手後同一條
+        // help_request_without_subject 防線會阻止拿客氣話放寬。
+        let query = if help_request_without_subject(question) {
+            question
+        } else {
+            query
+        };
         let shape = question::shape(query);
         let range =
             question::time_range(question, now).or_else(|| question::time_range(query, now));
@@ -1435,12 +1465,18 @@ impl RetrievalProfile {
         let hits_truncated = hits.len() > limits.text;
         hits.truncate(limits.text);
 
+        let needs_subject = help_request_without_subject(question)
+            && answer_set.items.is_empty()
+            && hits.is_empty()
+            && activities.is_empty();
+
         Ok(Retrieval {
             profile: self,
             shape,
             time_range: range,
             terms,
             searched,
+            needs_subject,
             answers: answer_set.items,
             hits,
             activities,
@@ -1477,6 +1513,9 @@ pub struct Retrieval {
     pub terms: Option<String>,
     /// 退格或空結果後的索引放寬，實際比對的字。呼叫端不可從原問句重算。
     pub searched: Option<SearchAdjustment>,
+    /// 原句只是在請她幫忙、沒有查找主題，而且完整原句也沒有命中。
+    /// `false` 不代表她已看過主題；一般空結果仍由 blind spots 解釋。
+    pub needs_subject: bool,
     pub answers: Vec<Answer>,
     pub hits: Vec<SearchHit>,
     /// 活動級章節。只有 [`RetrievalProfile::TextFactsAndSession`] 會填。

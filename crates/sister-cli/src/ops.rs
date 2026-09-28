@@ -15119,6 +15119,7 @@ pub mod query {
             shape,
             terms,
             searched,
+            needs_subject,
             answers,
             hits,
             answers_truncated,
@@ -15167,6 +15168,7 @@ pub mod query {
                 // 沒有那個機會。而題庫正是 Phase 2 評測語料的來源，一份寫著
                 // 「這題 0 筆」卻說不出她找了什麼的紀錄，事後沒有人查得動。
                 "terms": terms,
+                "needs_subject": needs_subject,
                 "elapsed_ms": elapsed.as_secs_f64() * 1000.0,
                 // 撈滿上限＝被切掉了。機器讀的那一份更要講：寫腳本的人
                 // 看不到終端機上的那個「+」，會直接把長度當成總數。
@@ -15326,6 +15328,10 @@ pub mod query {
                 .as_ref()
                 .is_some_and(|(_, ch)| !ch.is_empty());
             if answers.is_empty() && !has_chapters {
+                if needs_subject {
+                    println!("\n要找什麼？請把人名、文件名或關鍵字打出來。");
+                    return Ok(());
+                }
                 println!("\n沒有找到。");
                 // 這句話以前是「她可能當時沒在看，或那段被排除規則擋掉了」——
                 // 兩個猜測、零個證據，而兩件事她其實都查得到。
