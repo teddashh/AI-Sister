@@ -139,9 +139,15 @@ pub fn validate_window_title(title: &str) -> Result<(), String> {
 /// 只用正式 URL parser 解析 authority。錄製位址列可省略 scheme；在這一種
 /// Chromium 顯示形式下才補 HTTPS。userinfo 不可從錄製縮寫猜出來。
 fn explicit_http_scheme_len(value: &str) -> Option<usize> {
-    if value.get(..8)?.eq_ignore_ascii_case("https://") {
+    if value
+        .get(..8)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("https://"))
+    {
         Some(8)
-    } else if value.get(..7)?.eq_ignore_ascii_case("http://") {
+    } else if value
+        .get(..7)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("http://"))
+    {
         Some(7)
     } else {
         None
@@ -641,6 +647,16 @@ mod tests {
             "https://www.example.com/help?next=https://other.example/x"
         ));
         assert_eq!(host_of("ftp://example.com/help"), None);
+    }
+
+    #[test]
+    fn http_scheme_is_recognized_before_multibyte_host_character() {
+        let unicode = "http://é.example/a";
+        let punycode = "http://xn--9ca.example/a";
+        assert!(validate_url(unicode).is_ok());
+        assert_eq!(host_of(unicode).as_deref(), Some("é.example"));
+        assert!(same_destination(unicode, punycode));
+        assert!(!same_destination(unicode, "https://xn--9ca.example/a"));
     }
 
     #[test]

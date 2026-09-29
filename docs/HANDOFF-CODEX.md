@@ -4,7 +4,9 @@
 parser 正規化 scheme／host／有效 port；userinfo 一律拒絕，path、query、fragment
 保留原始位元組與空分隔符。保存的 grant 新增 exact `url_targets[]`，舊票預設空集合。
 獨立審查找到 Chromium 縮寫位址列的 query 內含 `https://` 會被誤判成 scheme；已修
-並加上 `target_address_on_source_frame` 真路徑回歸測試。20 條注入語料目前走 6 種
+並加上 `target_address_on_source_frame` 真路徑回歸測試。審查續查發現 `http://` 後
+緊接多位元組 Unicode host 時，八位元組探測會提前返回；現已改成獨立判斷並以
+Unicode／punycode 同址的比較與 DB 來源路徑測試鎖定。20 條注入語料目前走 6 種
 來源／授權組合，不能充作 100% injection 退場；staging 即時核准仍只在隔離的記憶體
 fixture，10 個 CLI 演練仍用 fake executor，兩者均未達正式驗收。最新 workspace
 fmt／Clippy／test、Windows 交叉編譯／Clippy、no-network 與 staging feature 測試通過。

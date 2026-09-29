@@ -10252,6 +10252,36 @@ mod tests {
     }
 
     #[test]
+    fn unattended_url_compares_unicode_http_host_as_http_origin() {
+        use sister_hands::url_policy::TargetAddressOrigin as Origin;
+        let mut db = test_db();
+        let target = "http://xn--9ca.example/a";
+        let trusted = db
+            .start_session(TRUSTED_URL_ORIGIN_PLATFORM, "test")
+            .unwrap();
+        db.conn
+            .execute(
+                "INSERT INTO frames(ts, session_id, monitor, width, height, dhash, url)
+                 VALUES(1, ?1, 0, 1, 1, 0, ?2)",
+                params![trusted, "http://é.example/a"],
+            )
+            .unwrap();
+        let frame_id = db.conn.last_insert_rowid();
+        db.conn
+            .execute(
+                "INSERT INTO facts(ts, kind, raw, normalized, source_kind, frame_id)
+                 VALUES(1, 'url', ?1, ?1, 'ocr', ?2)",
+                params![target, frame_id],
+            )
+            .unwrap();
+        let fact_id = db.conn.last_insert_rowid();
+        assert_eq!(
+            db.target_address_on_source_frame(fact_id, target).unwrap(),
+            Origin::SameFrameAddress
+        );
+    }
+
+    #[test]
     fn target_fact_origin_requires_a_real_frame_before_calling_it_screen() {
         let db = test_db();
         db.conn
