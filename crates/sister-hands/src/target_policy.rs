@@ -325,9 +325,9 @@ fn tail_after_authority(url: &str) -> Option<&str> {
 
 /// 從一個網址解析出 **path**。講不出 host 的字串這裡也講不出 path。
 ///
-/// 空路徑和 `/` 都回 `"/"`。結尾的 `/` 會去掉（根路徑除外），因為位址列
-/// 有時省、有時留。percent-decode 一次之後若出現 `.` / `..` 段，回 `None`：
-/// 解了會讓 `/help/../collect` 變成已記錄的 `/collect`。
+/// 空路徑和 `/` 都回 `"/"`。其餘保留原始 path，包含 percent escape 與結尾的
+/// `/`：伺服器可以把 `%2F` 和 `/`、`%62` 和 `b` 當成不同路徑。
+/// 仍解碼一份**只供驗證**；壞 escape 或解碼後的 `.` / `..` 段都拒絕。
 pub fn path_of(url: &str) -> Option<String> {
     let tail = tail_after_authority(url)?;
     let raw = tail.split(['?', '#']).next().unwrap_or("");
@@ -341,7 +341,7 @@ pub fn path_of(url: &str) -> Option<String> {
     if decoded.is_empty() || decoded == "/" {
         Some("/".into())
     } else {
-        Some(decoded.trim_end_matches('/').to_string())
+        Some(raw.to_string())
     }
 }
 
@@ -368,46 +368,17 @@ fn query_and_fragment(url: &str) -> Option<(&str, &str)> {
     Some((query, fragment))
 }
 
-fn percent_decode_query_component(value: &str) -> Option<String> {
-    percent_decode(&value.replace('+', " "))
-}
-
-fn canonical_query(query: &str) -> Option<Vec<(String, String)>> {
-    let mut pairs = Vec::new();
-    if query.is_empty() {
-        return Some(pairs);
-    }
-    for part in query.split('&') {
-        if part.is_empty() {
-            continue;
-        }
-        let (key, value) = part.split_once('=').unwrap_or((part, ""));
-        pairs.push((
-            percent_decode_query_component(key)?,
-            percent_decode_query_component(value)?,
-        ));
-    }
-    pairs.sort();
-    Some(pairs)
-}
-
-/// query（排序後的鍵值）與 fragment 是否相同。解不開的編碼是 `false`。
+/// query 與 fragment 的原文字節是否相同。重複 key 的先後、空欄與 escape
+/// 都可能改變伺服器或頁面收到的去處；壞掉的 percent escape 仍拒絕。
 pub fn same_query_and_fragment(recorded: &str, target: &str) -> bool {
     match (query_and_fragment(recorded), query_and_fragment(target)) {
         (Some((q1, f1)), Some((q2, f2))) => {
-            let Some(a) = canonical_query(q1) else {
-                return false;
-            };
-            let Some(b) = canonical_query(q2) else {
-                return false;
-            };
-            let Some(fa) = percent_decode(f1) else {
-                return false;
-            };
-            let Some(fb) = percent_decode(f2) else {
-                return false;
-            };
-            a == b && fa == fb
+            percent_decode(q1).is_some()
+                && percent_decode(q2).is_some()
+                && percent_decode(f1).is_some()
+                && percent_decode(f2).is_some()
+                && q1 == q2
+                && f1 == f2
         }
         _ => false,
     }
@@ -574,13 +545,13 @@ mod tests {
             "https://www.example.com/bill?id=7"
         ));
         assert!(same_path("example.com", "https://example.com/"));
-        assert!(same_path("example.com/a/", "https://example.com/a"));
+        assert!(!same_path("example.com/a/", "https://example.com/a"));
         assert_eq!(path_of("http://[::1]:8080/x").as_deref(), Some("/x"));
         assert!(same_path(
             "example.com/bill",
             "https://example.com:443/bill"
         ));
-        assert!(same_path(
+        assert!(!same_path(
             "example.com/bill",
             "https://example.com/%62%69%6C%6C"
         ));
@@ -603,6 +574,26 @@ mod tests {
         assert!(!same_path("/", "https://example.com/collect"));
         assert_eq!(path_of("javascript:alert(1)"), None);
         assert!(!same_path("example.com/a", "javascript:alert(1)"));
+    }
+
+    #[test]
+    fn encoded_path_bytes_cannot_borrow_a_literal_path_ticket() {
+        for (recorded, target) in [
+            ("example.com/a%2Fb", "https://example.com/a/b"),
+            ("example.com/%62ill", "https://example.com/bill"),
+            ("example.com/a%2fb", "https://example.com/a%2Fb"),
+            ("example.com/a/", "https://example.com/a"),
+        ] {
+            assert!(
+                !same_destination(recorded, target),
+                "{recorded} vs {target}"
+            );
+        }
+        assert!(same_destination(
+            "example.com/a%2Fb",
+            "https://example.com/a%2Fb"
+        ));
+        assert_eq!(path_of("https://example.com/%2e%2e/collect"), None);
     }
 
     /// path 裡的 `@` 不是 userinfo。整串 `rsplit('@')` 會把 `/user@inbox` 切錯。
@@ -634,14 +625,14 @@ mod tests {
         assert_eq!(percent_decode("%2"), None);
     }
 
-    /// 記過的去處包含 query／fragment。同 path 換參數不是同一張票。
+    /// 記過的去處包含 query／fragment，參數的順序也是來源票的一部分。
     #[test]
     fn standing_grant_destination_includes_query_and_fragment() {
         assert!(same_destination(
             "example.com/bill?id=7",
             "https://www.example.com/bill?id=7"
         ));
-        assert!(same_destination(
+        assert!(!same_destination(
             "example.com/a?b=c&id=7",
             "https://example.com/a?id=7&b=c"
         ));
@@ -668,6 +659,30 @@ mod tests {
         assert!(same_path(
             "example.com/help",
             "https://example.com/help?next=https://evil.example/collect"
+        ));
+    }
+
+    #[test]
+    fn query_order_cannot_reverse_duplicate_authorization_values() {
+        for (recorded, target) in [
+            (
+                "example.com/pay?next=trusted&next=evil",
+                "https://example.com/pay?next=evil&next=trusted",
+            ),
+            (
+                "example.com/pay?role=user&mode=read&role=admin",
+                "https://example.com/pay?role=admin&mode=read&role=user",
+            ),
+            ("example.com/pay?a=1&b=2", "https://example.com/pay?b=2&a=1"),
+        ] {
+            assert!(
+                !same_destination(recorded, target),
+                "{recorded} vs {target}"
+            );
+        }
+        assert!(same_destination(
+            "example.com/pay?next=trusted&next=evil",
+            "https://example.com/pay?next=trusted&next=evil"
         ));
     }
 

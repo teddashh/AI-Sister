@@ -9683,6 +9683,42 @@ mod tests {
         );
     }
 
+    #[test]
+    fn recorded_destination_keeps_encoded_path_and_query_order() {
+        let mut db = test_db();
+        let session = db
+            .start_session(TRUSTED_URL_ORIGIN_PLATFORM, "test")
+            .unwrap();
+        db.insert_focus(
+            session,
+            &FocusEvent {
+                ts: 1_100,
+                kind: FocusKind::UrlChange,
+                snapshot: FocusSnapshot {
+                    app_id: Some("chrome.exe".into()),
+                    url: Some("example.com/a%2Fb?next=trusted&next=evil".into()),
+                    ..FocusSnapshot::default()
+                },
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            db.site_in_her_record("https://example.com/a%2Fb?next=trusted&next=evil")
+                .unwrap(),
+            UrlOrigin::InHerRecord
+        );
+        assert_eq!(
+            db.site_in_her_record("https://example.com/a/b?next=trusted&next=evil")
+                .unwrap(),
+            UrlOrigin::SameSiteDifferentPath
+        );
+        assert_eq!(
+            db.site_in_her_record("https://example.com/a%2Fb?next=evil&next=trusted")
+                .unwrap(),
+            UrlOrigin::SamePathDifferentDestination
+        );
+    }
+
     /// Replay 是測搜尋／抽取的輸入，不是「這台機器上被她看見過」的憑據。
     /// 兩條 replay 接線留下的 platform 長得不同，兩條都不能替日後的網址種票。
     #[test]
@@ -10004,6 +10040,11 @@ mod tests {
             (
                 Some(trusted),
                 Some("example.com/collect?id=8#receipt"),
+                Origin::OtherScreenText,
+            ),
+            (
+                Some(trusted),
+                Some("example.com/%63ollect?id=7#receipt"),
                 Origin::OtherScreenText,
             ),
             (

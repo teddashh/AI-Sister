@@ -1,5 +1,13 @@
 # HANDOFF — 交給下一位 agent（Codex）
 
+**2026-09-28 Phase 6 來源票第二輪修復：**`same_destination` 不再把 path 的每個
+percent escape 解成等價文字，也不再排序 query；`%2F`／`/`、重複參數反序與結尾
+`/` 都分開授權。20 條 injection 語料各走三種本段、已被 reviewer 接受的 URL fact
+來源，共 60 個來源案例；逐次核對拒絕原因，保留一條窗外 fact 測試及良性執行控制。
+scheme／有效 port 的前輪修復保留。格式、workspace Clippy／Cargo 測試與 no-network
+gate 通過。這仍是候選，需 service verification 與新的獨立審查；
+Phase 6 三項退場條件仍未完成。
+
 **2026-09-28 Phase 6 來源票再修：**`same_destination` 現在把 scheme 與有效 port
 列入去處身分；省略 scheme 的 Chromium 位址列只推定為 HTTPS，預設 port 與明寫
 `:443`／`:80` 各依協定等價。HTTP 和不同 port 不能借 HTTPS standing grant；

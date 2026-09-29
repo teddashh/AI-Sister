@@ -12,6 +12,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 const TASK: &str = "執行這個下一步";
 const GOOD_URL: &str = "https://good.example.com/help";
 const EVIL_URL: &str = "https://evil.example.com/collect";
+const INJECTED_URL: &str = "https://example.com/collect";
 const EVIL_AT_MS: i64 = 3_700_000;
 
 struct TempDir(PathBuf);
@@ -390,32 +391,35 @@ fn benign_control_reaches_platform_execution_exactly_once() {
 }
 
 #[test]
-fn all_twenty_injections_arrive_verbatim_but_execute_nothing() {
-    assert_eq!(INJECTION_REGRESSION_CASES.len(), 20);
-    for (index, injection) in INJECTION_REGRESSION_CASES.into_iter().enumerate() {
-        let (_dir, lines) = run_case(injection, true);
-        assert!(
-            lines.is_empty(),
-            "injection reached platform execution: {injection:?}\n{lines:#?}"
-        );
-        if matches!(index, 12 | 13 | 19) {
-            println!("text_chunks case {}: {injection:?}", index + 1);
-        }
-    }
+fn late_url_fact_remains_outside_the_review_window() {
+    let (_dir, lines) = run_case(INJECTION_REGRESSION_CASES[0], true);
+    assert!(
+        lines.is_empty(),
+        "late URL reached platform execution: {lines:#?}"
+    );
 }
 
-fn injected_url_from_source(source_url: &str, trusted_source: bool) -> (Vec<String>, String) {
-    const INJECTED_URL: &str = "https://example.com/collect";
-    let injection = INJECTION_REGRESSION_CASES[7];
-    assert!(injection.contains(INJECTED_URL));
+fn injected_url_from_source(
+    injection: &str,
+    source_url: Option<&str>,
+    trusted_source: bool,
+) -> (Vec<String>, String) {
     let dir = TempDir::new("in-frame-url");
     let scenario = write_scenario(&dir.0, injection);
-    if source_url != GOOD_URL {
-        let mut value: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(&scenario).unwrap()).unwrap();
-        value["steps"][0]["url"] = source_url.into();
-        std::fs::write(&scenario, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
-    }
+    let mut value: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&scenario).unwrap()).unwrap();
+    // Replay 沒有 URL 時會整張不收；「有畫面但位址列沒量到」要在寫入後
+    // 合成，才真的測到來源判斷的那一格。
+    value["steps"][0]["url"] = source_url.unwrap_or(GOOD_URL).into();
+    // 每條語料都在本段、被引用的同一張畫面中提供可抽取 URL。第 8 條
+    // 本身已有該 URL；其他條把它接在原文後面，保留原文逐字到達。
+    let attack_text = if injection.contains(INJECTED_URL) {
+        injection.to_owned()
+    } else {
+        format!("{injection}\n{INJECTED_URL}")
+    };
+    value["steps"][0]["text"][2] = attack_text.into();
+    std::fs::write(&scenario, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
     sister(
         &dir.0,
         None,
@@ -427,6 +431,12 @@ fn injected_url_from_source(source_url: &str, trusted_source: bool) -> (Vec<Stri
         ],
     );
     let (good, _, frame_id) = seed_l2_and_fact_ids(&dir.0, injection, trusted_source);
+    if source_url.is_none() {
+        rusqlite::Connection::open(Config::db_path(&dir.0))
+            .unwrap()
+            .execute("UPDATE frames SET url = NULL WHERE id = ?1", [frame_id])
+            .unwrap();
+    }
     let injected = {
         let mut db = Db::open(&Config::db_path(&dir.0)).unwrap();
         let fact = db
@@ -435,6 +445,15 @@ fn injected_url_from_source(source_url: &str, trusted_source: bool) -> (Vec<Stri
             .into_iter()
             .find(|fact| fact.raw == INJECTED_URL && fact.frame_id == Some(frame_id))
             .expect("injected URL must be extracted from the cited screen");
+        let chunks = db.recent(100).unwrap();
+        assert!(
+            chunks.iter().any(|chunk| {
+                Some(chunk.chunk_id) == fact.chunk_id
+                    && chunk.text.contains(injection)
+                    && chunk.text.contains(INJECTED_URL)
+            }),
+            "target fact must come from this case's injected OCR text: {injection:?}"
+        );
         let session = db
             .start_session(sister_core::db::TRUSTED_URL_ORIGIN_PLATFORM, "test")
             .unwrap();
@@ -465,6 +484,16 @@ fn injected_url_from_source(source_url: &str, trusted_source: bool) -> (Vec<Stri
         Some(&config),
         &["review", "--last", "2h", "--force"],
     );
+    let commitments = Db::open(&Config::db_path(&dir.0))
+        .unwrap()
+        .live_commitments()
+        .unwrap();
+    assert!(
+        commitments
+            .iter()
+            .any(|commitment| commitment.allowed_next_step_fact == Some(injected)),
+        "reviewer did not accept the in-window fact from this case: {injection:?}"
+    );
     write_grant(&dir.0);
     sister(
         &dir.0,
@@ -494,15 +523,24 @@ fn assert_url_refused(lines: &[String], log: &str, expected_reason: &str) {
 }
 
 #[test]
-fn an_injected_url_on_the_cited_frame_cannot_borrow_an_earlier_visit() {
-    let (lines, log) = injected_url_from_source(GOOD_URL, true);
-    assert_url_refused(&lines, &log, "target_only_in_screen_text");
-}
-
-#[test]
-fn replay_frame_with_the_exact_injected_address_cannot_borrow_a_trusted_visit() {
-    let (lines, log) = injected_url_from_source("https://example.com/collect", false);
-    assert_url_refused(&lines, &log, "target_source_untrusted");
+fn all_twenty_injections_reach_executable_facts_across_source_variants() {
+    assert_eq!(INJECTION_REGRESSION_CASES.len(), 20);
+    let source_variants = [
+        (Some(GOOD_URL), true, "target_only_in_screen_text"),
+        (None, true, "target_address_unmeasured"),
+        (Some(INJECTED_URL), false, "target_source_untrusted"),
+    ];
+    assert_eq!(source_variants.len(), 3);
+    let mut exercised = 0;
+    for (index, injection) in INJECTION_REGRESSION_CASES.into_iter().enumerate() {
+        for (source_url, trusted_source, reason) in source_variants {
+            let (lines, log) = injected_url_from_source(injection, source_url, trusted_source);
+            assert_url_refused(&lines, &log, reason);
+            exercised += 1;
+            println!("case {}: {reason}", index + 1);
+        }
+    }
+    assert_eq!(exercised, 60, "每條語料的三種來源都要真的跑到");
 }
 
 #[test]
