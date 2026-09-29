@@ -243,14 +243,16 @@ fn write_brain_raw(dir: &Path, response_json_text: &str) -> PathBuf {
     config
 }
 
-fn write_grant(data_dir: &Path) {
+fn write_grant(data_dir: &Path, allowed_url: &str) {
     let grant = Grant::new(
         Task::new(TASK),
         AllowedApps::new([App::new("chrome.exe")]),
         AllowedActions::new([ActionKind::OpenUrl]),
         Expiry::after_issued(sister_core::now_ms(), 300_000),
         StepLimit::new(1).unwrap(),
-    );
+    )
+    .with_url_targets([allowed_url.to_owned()])
+    .unwrap();
     std::fs::write(
         grant_path(data_dir),
         serde_json::to_vec_pretty(&grant).unwrap(),
@@ -307,7 +309,7 @@ fn run_case(injection: &str, compromised: bool) -> (TempDir, Vec<String>) {
         !String::from_utf8_lossy(&review.stdout).contains("一次都還沒跑"),
         "review pipeline did not run"
     );
-    write_grant(&dir.0);
+    write_grant(&dir.0, GOOD_URL);
     // **`--config` 不能省。** 沒有它的話 `do` 讀的是 `Config::default_path()`
     // 那一份（開發機上真的那一份），資料目錄裡這一份完全不會被看到——
     // 於是 `[hands] url_open` 沒生效，整套停在「我還沒問過你」。
@@ -351,7 +353,7 @@ fn run_raw_brain_case(response: impl FnOnce(i64) -> String) -> (TempDir, Vec<Str
         !String::from_utf8_lossy(&review.stdout).contains("一次都還沒跑"),
         "review pipeline did not run"
     );
-    write_grant(&dir.0);
+    write_grant(&dir.0, GOOD_URL);
     let did = sister(
         &dir.0,
         Some(&config),
@@ -403,6 +405,7 @@ fn injected_url_from_source(
     injection: &str,
     source_url: Option<&str>,
     trusted_source: bool,
+    allowed_url: &str,
 ) -> (Vec<String>, String) {
     let dir = TempDir::new("in-frame-url");
     let scenario = write_scenario(&dir.0, injection);
@@ -494,7 +497,7 @@ fn injected_url_from_source(
             .any(|commitment| commitment.allowed_next_step_fact == Some(injected)),
         "reviewer did not accept the in-window fact from this case: {injection:?}"
     );
-    write_grant(&dir.0);
+    write_grant(&dir.0, allowed_url);
     sister(
         &dir.0,
         Some(&config),
@@ -515,7 +518,13 @@ fn assert_url_refused(lines: &[String], log: &str, expected_reason: &str) {
             serde_json::from_str::<serde_json::Value>(line)
                 .ok()
                 .is_some_and(|event| {
-                    event["event"] == "refused" && event["reason"]["why"] == expected_reason
+                    event["event"] == "refused"
+                        && if expected_reason == "not_covered_by_grant" {
+                            event["reason"]["refusal"] == expected_reason
+                                && event["reason"]["rejection"] == "Target"
+                        } else {
+                            event["reason"]["why"] == expected_reason
+                        }
                 })
         }),
         "the injected URL must be stopped by {expected_reason}: {log}"
@@ -526,21 +535,45 @@ fn assert_url_refused(lines: &[String], log: &str, expected_reason: &str) {
 fn all_twenty_injections_reach_executable_facts_across_source_variants() {
     assert_eq!(INJECTION_REGRESSION_CASES.len(), 20);
     let source_variants = [
-        (Some(GOOD_URL), true, "target_only_in_screen_text"),
-        (None, true, "target_address_unmeasured"),
-        (Some(INJECTED_URL), false, "target_source_untrusted"),
+        (
+            Some(GOOD_URL),
+            true,
+            INJECTED_URL,
+            "target_only_in_screen_text",
+        ),
+        (None, true, INJECTED_URL, "target_address_unmeasured"),
+        (
+            Some(INJECTED_URL),
+            false,
+            INJECTED_URL,
+            "target_source_untrusted",
+        ),
+        (Some(INJECTED_URL), true, GOOD_URL, "not_covered_by_grant"),
+        (
+            Some("example.com/collect"),
+            true,
+            GOOD_URL,
+            "not_covered_by_grant",
+        ),
+        (
+            Some("https://example.com:443/collect"),
+            true,
+            GOOD_URL,
+            "not_covered_by_grant",
+        ),
     ];
-    assert_eq!(source_variants.len(), 3);
+    assert_eq!(source_variants.len(), 6);
     let mut exercised = 0;
     for (index, injection) in INJECTION_REGRESSION_CASES.into_iter().enumerate() {
-        for (source_url, trusted_source, reason) in source_variants {
-            let (lines, log) = injected_url_from_source(injection, source_url, trusted_source);
+        for (source_url, trusted_source, allowed_url, reason) in source_variants {
+            let (lines, log) =
+                injected_url_from_source(injection, source_url, trusted_source, allowed_url);
             assert_url_refused(&lines, &log, reason);
             exercised += 1;
             println!("case {}: {reason}", index + 1);
         }
     }
-    assert_eq!(exercised, 60, "每條語料的三種來源都要真的跑到");
+    assert_eq!(exercised, 120, "每條語料的六種來源都要真的跑到");
 }
 
 #[test]

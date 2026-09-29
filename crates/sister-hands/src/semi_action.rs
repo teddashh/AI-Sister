@@ -160,6 +160,8 @@ pub struct Grant {
     actions: AllowedActions,
     expiry: Expiry,
     step_limit: StepLimit,
+    #[serde(default)]
+    url_targets: Vec<String>,
 }
 impl Grant {
     pub fn new(
@@ -175,7 +177,24 @@ impl Grant {
             actions,
             expiry,
             step_limit,
+            url_targets: Vec::new(),
         }
+    }
+    /// 無人值守 URL 的 exact 去處清單。舊授權書沒有此欄，預設空集合並拒絕
+    /// 所有 URL；畫面文字不能替保存的授權書增加目標。
+    pub fn with_url_targets(
+        mut self,
+        targets: impl IntoIterator<Item = String>,
+    ) -> Result<Self, String> {
+        let targets: Vec<String> = targets.into_iter().collect();
+        for target in &targets {
+            crate::target_policy::validate_url(target)?;
+            if !crate::target_policy::same_destination(target, target) {
+                return Err(format!("網址目標無法用於來源授權：{target}"));
+            }
+        }
+        self.url_targets = targets;
+        Ok(self)
     }
     pub const fn step_limit(&self) -> StepLimit {
         self.step_limit
@@ -225,8 +244,13 @@ impl Grant {
             })
             .collect::<Vec<_>>()
             .join("、");
+        let url_targets = if self.url_targets.is_empty() {
+            "（沒有，無人值守 URL 一律拒絕）".to_owned()
+        } else {
+            self.url_targets.join("、")
+        };
         format!(
-            "任務「{}」；app：{apps}；動作：{actions}；整張票在發出後 {} 毫秒內有效；每一輪各自最多 {} 步",
+            "任務「{}」；app：{apps}；動作：{actions}；網址目標：{url_targets}；整張票在發出後 {} 毫秒內有效；每一輪各自最多 {} 步",
             self.task.0, self.expiry.valid_for_ms, self.step_limit.0
         )
     }
@@ -258,6 +282,16 @@ impl Grant {
     ) -> Result<(StepApproval, GrantPermit), UnattendedAuthorizationFailure<E>> {
         self.covers(step, now_ms)
             .map_err(UnattendedAuthorizationFailure::Grant)?;
+        if let ActionSnapshot::OpenUrl { url } = step.action()
+            && !self
+                .url_targets
+                .iter()
+                .any(|target| crate::target_policy::same_explicit_destination(target, url))
+        {
+            return Err(UnattendedAuthorizationFailure::Grant(
+                GrantRejection::Target,
+            ));
+        }
         if let Some(why) =
             try_url_origin_gap(step.action(), ApprovedBy::StandingGrant, policy, origin)
                 .map_err(UnattendedAuthorizationFailure::OriginLookup)?
@@ -288,6 +322,7 @@ pub enum GrantRejection {
     Task,
     Apps,
     Actions,
+    Target,
     ExpiryElapsed,
     ExpiryClockWentBack,
 }
@@ -297,6 +332,7 @@ impl GrantRejection {
             Self::Task => "task 維度拒絕：這不是授權的任務。",
             Self::Apps => "apps 維度拒絕：這個 app 不在授權內。",
             Self::Actions => "actions 維度拒絕：這類動作不在授權內。",
+            Self::Target => "網址目標維度拒絕：這條網址不在保存的授權書裡。",
             Self::ExpiryElapsed => "expiry 維度拒絕：授權已過期。",
             Self::ExpiryClockWentBack => "expiry 維度拒絕：時鐘倒退，期限無法驗證。",
         }

@@ -9788,6 +9788,59 @@ mod tests {
         }
     }
 
+    #[test]
+    fn userinfo_cannot_seed_or_use_a_standing_url_grant() {
+        use sister_hands::url_policy::TargetAddressOrigin as FrameOrigin;
+
+        for recorded in [
+            "https://user:password@example.com/a",
+            "https://@example.com/a",
+        ] {
+            let mut db = test_db();
+            let session = db
+                .start_session(TRUSTED_URL_ORIGIN_PLATFORM, "test")
+                .unwrap();
+            db.insert_focus(
+                session,
+                &FocusEvent {
+                    ts: 1_100,
+                    kind: FocusKind::UrlChange,
+                    snapshot: FocusSnapshot {
+                        app_id: Some("chrome.exe".into()),
+                        url: Some(recorded.into()),
+                        ..FocusSnapshot::default()
+                    },
+                },
+            )
+            .unwrap();
+            db.conn
+                .execute(
+                    "INSERT INTO frames(ts, session_id, monitor, width, height, dhash, url)
+                     VALUES(1, ?1, 0, 1, 1, 0, ?2)",
+                    params![session, recorded],
+                )
+                .unwrap();
+            let frame_id = db.conn.last_insert_rowid();
+            db.conn
+                .execute(
+                    "INSERT INTO facts(ts, kind, raw, normalized, source_kind, frame_id)
+                     VALUES(1, 'url', ?1, ?1, 'ocr', ?2)",
+                    params![recorded, frame_id],
+                )
+                .unwrap();
+            let fact_id = db.conn.last_insert_rowid();
+            assert_ne!(
+                db.site_in_her_record(recorded).unwrap(),
+                UrlOrigin::InHerRecord
+            );
+            assert_eq!(
+                db.target_address_on_source_frame(fact_id, recorded)
+                    .unwrap(),
+                FrameOrigin::OtherScreenText
+            );
+        }
+    }
+
     /// Replay 是測搜尋／抽取的輸入，不是「這台機器上被她看見過」的憑據。
     /// 兩條 replay 接線留下的 platform 長得不同，兩條都不能替日後的網址種票。
     #[test]
@@ -10093,8 +10146,14 @@ mod tests {
             ),
             (
                 Some(trusted),
-                Some("https://example.com:443/collect?id=7#receipt"),
+                Some("https://www.example.com:443/collect?id=7#receipt"),
                 Origin::SameFrameAddress,
+            ),
+            (
+                Some(trusted),
+                // 明寫 scheme 的位址列保留完整 host；不能把 www. 當作省略。
+                Some("https://example.com:443/collect?id=7#receipt"),
+                Origin::OtherScreenText,
             ),
             (
                 Some(trusted),
@@ -10152,6 +10211,44 @@ mod tests {
                 "an old fact id cannot authorize a different target"
             );
         }
+    }
+
+    #[test]
+    fn unattended_url_accepts_chromium_address_with_nested_query_url() {
+        use sister_hands::url_policy::TargetAddressOrigin as Origin;
+        let mut db = test_db();
+        let target = "https://www.example.com/help?next=https://dest.example/x";
+        let trusted = db
+            .start_session(TRUSTED_URL_ORIGIN_PLATFORM, "test")
+            .unwrap();
+        db.conn
+            .execute(
+                "INSERT INTO frames(ts, session_id, monitor, width, height, dhash, url)
+                 VALUES(1, ?1, 0, 1, 1, 0, ?2)",
+                params![trusted, "example.com/help?next=https://dest.example/x"],
+            )
+            .unwrap();
+        let frame_id = db.conn.last_insert_rowid();
+        db.conn
+            .execute(
+                "INSERT INTO facts(ts, kind, raw, normalized, source_kind, frame_id)
+                 VALUES(1, 'url', ?1, ?1, 'ocr', ?2)",
+                params![target, frame_id],
+            )
+            .unwrap();
+        let fact_id = db.conn.last_insert_rowid();
+        assert_eq!(
+            db.target_address_on_source_frame(fact_id, target).unwrap(),
+            Origin::SameFrameAddress
+        );
+        assert_eq!(
+            db.target_address_on_source_frame(
+                fact_id,
+                "https://www.example.com/help?next=https://other.example/x"
+            )
+            .unwrap(),
+            Origin::AddressUnmeasured
+        );
     }
 
     #[test]

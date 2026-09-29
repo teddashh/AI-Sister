@@ -1,5 +1,18 @@
 # HANDOFF — 交給下一位 agent（Codex）
 
+**2026-09-28 Phase 6 擴大工作候選（Ted 已核准完整範圍）：**URL 授權改用 `url`
+parser 正規化 scheme／host／有效 port；userinfo 一律拒絕，path、query、fragment
+保留原始位元組與空分隔符。保存的 grant 新增 exact `url_targets[]`，舊票預設空集合。
+獨立審查找到 Chromium 縮寫位址列的 query 內含 `https://` 會被誤判成 scheme；已修
+並加上 `target_address_on_source_frame` 真路徑回歸測試。20 條注入語料目前走 6 種
+來源／授權組合，不能充作 100% injection 退場；staging 即時核准仍只在隔離的記憶體
+fixture，10 個 CLI 演練仍用 fake executor，兩者均未達正式驗收。最新 workspace
+fmt／Clippy／test、Windows 交叉編譯／Clippy、no-network 與 staging feature 測試通過。
+正式 Phase 6 仍是 0/3；下一步要把即時核准接到可執行路徑、補足 injection 在可執行
+可信來源的證據，並由 Ted 在 Windows 完成 10 個真實可逆任務及保留可回放日誌。不得
+以測試夾具執行第三方帳號、金流或公開發文的不可逆動作。此候選仍待 service
+verification 與修正後的新一輪獨立審查。
+
 **2026-09-28 Phase 6 來源票空分隔符修復：**`same_destination` 現在保留空 `?`／`#`
 分隔符的有無；四種組合不能互借 standing grant。比較器及真實授權查詢
 `site_in_her_record`／`target_address_on_source_frame` 均有 4×4 回歸測試，Chromium

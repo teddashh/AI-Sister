@@ -8,6 +8,10 @@ repository.workspace = true
 authors.workspace = true
 description = "AI-Sister platform-independent suggest-level hands boundary"
 
+[features]
+# 只供測試／受控 staging 驗證不可逆動作的即時核准；正式執行檔不啟用。
+staging-approval = []
+
 [dependencies]
 anyhow.workspace = true
 # 只給 `replay_copy` 把 epoch 毫秒讀成人看得懂的時刻用。
@@ -16,6 +20,8 @@ fs4.workspace = true
 global-hotkey = "0.8"
 serde.workspace = true
 serde_json.workspace = true
+url.workspace = true
+idna.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

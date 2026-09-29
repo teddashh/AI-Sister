@@ -22,6 +22,8 @@ pub mod master_stop;
 pub mod platform;
 pub mod replay_copy;
 pub mod semi_action;
+#[cfg(feature = "staging-approval")]
+pub mod staging_approval;
 pub mod target_policy;
 pub mod url_policy;
 

@@ -2584,6 +2584,7 @@ pub mod act {
         pub task: String,
         pub apps: Vec<String>,
         pub allow: Vec<String>,
+        pub target_urls: Vec<String>,
         pub minutes: u64,
         pub steps: u32,
         pub dry_run: bool,
@@ -2664,6 +2665,10 @@ pub mod act {
             rest.push_str(" --allow ");
             rest.push_str(&quote_for(shell, allow));
         }
+        for target in &opts.target_urls {
+            rest.push_str(" --target-url ");
+            rest.push_str(&quote_for(shell, target));
+        }
         rest.push_str(&format!(
             " --minutes {} --steps {} --save-grant",
             opts.minutes, opts.steps
@@ -2688,7 +2693,7 @@ pub mod act {
         let use_grant = use_grant_command_for_shell(data_dir, opts, shell);
         if grant_path(data_dir).is_file() {
             format!(
-                "沒有做任何事，一步都沒有交出去：stdin 不是終端機，那個「好」可能是別的程式餵的，卻會被記成你當場按了。這裡已經有存過的授權書；拿掉 `--app`、`--allow`、`--minutes`、`--steps`，改用 `{use_grant}`，紀錄會寫「憑票決定」。`--dry-run` 不受影響。"
+                "沒有做任何事，一步都沒有交出去：stdin 不是終端機，那個「好」可能是別的程式餵的，卻會被記成你當場按了。這裡已經有存過的授權書；拿掉 `--app`、`--allow`、`--target-url`、`--minutes`、`--steps`，改用 `{use_grant}`，紀錄會寫「憑票決定」。`--dry-run` 不受影響。"
             )
         } else {
             let save_grant = scoped_grant_command_for_shell(
@@ -2698,7 +2703,7 @@ pub mod act {
                 shell,
             );
             format!(
-                "沒有做任何事，一步都沒有交出去：stdin 不是終端機，那個「好」可能是別的程式餵的，卻會被記成你當場按了。先在終端機裡跑 `{save_grant}`，當場看過範圍並存下授權書；之後在管子裡拿掉 `--app`、`--allow`、`--minutes`、`--steps`，改跑 `{use_grant}`，紀錄會寫「憑票決定」。`--dry-run` 不受影響。"
+                "沒有做任何事，一步都沒有交出去：stdin 不是終端機，那個「好」可能是別的程式餵的，卻會被記成你當場按了。先在終端機裡跑 `{save_grant}`，當場看過範圍並存下授權書；之後在管子裡拿掉 `--app`、`--allow`、`--target-url`、`--minutes`、`--steps`，改跑 `{use_grant}`，紀錄會寫「憑票決定」。`--dry-run` 不受影響。"
             )
         }
     }
@@ -3698,7 +3703,9 @@ pub mod act {
                 AllowedActions::new(kinds),
                 Expiry::after_issued(clock(), valid_for_ms),
                 step_limit,
-            );
+            )
+            .with_url_targets(opts.target_urls.iter().cloned())
+            .map_err(anyhow::Error::msg)?;
             // **預演不存。** 底下那一行不寫 `Granted` 進紀錄的理由（「等於在
             // 紀錄上留下一輪從來沒有跑過的授權」）在這裡更重：一張存下來的
             // 授權書不只是一列紀錄，它**還能被下一個行程拿去用**——
@@ -5547,6 +5554,7 @@ pub mod act {
                 task: task.into(),
                 apps: apps.iter().map(|a| (*a).to_owned()).collect(),
                 allow: vec!["open-url".into()],
+                target_urls: Vec::new(),
                 minutes,
                 steps,
                 dry_run,
@@ -5582,6 +5590,7 @@ pub mod act {
                 task,
                 apps,
                 allow,
+                target_urls,
                 minutes,
                 steps,
                 save_grant,
@@ -5593,6 +5602,7 @@ pub mod act {
             assert_eq!(task.as_deref(), Some(expected.task.as_str()));
             assert_eq!(apps, expected.apps);
             assert_eq!(allow, expected.allow);
+            assert_eq!(target_urls, expected.target_urls);
             assert_eq!(minutes, expected.minutes);
             assert_eq!(steps, expected.steps);
             assert!(save_grant);
@@ -5639,6 +5649,7 @@ pub mod act {
                 ),
             ] {
                 expected.allow = vec!["open-file".into(), "focus-window".into()];
+                expected.target_urls = vec!["https://staging.example/task/1".into()];
                 let dir = missing_data_dir(&format!("act-piped-{name}"));
                 let err = run_with_stdin_kind_for_shell(&dir.0, &expected, false, Shell::Posix)
                     .expect_err("piped answers must be rejected");
@@ -5649,7 +5660,12 @@ pub mod act {
                     message.contains(&quote_for(Shell::Posix, &dir.0.to_string_lossy())),
                     "{message}"
                 );
-                for value in expected.apps.iter().chain(&expected.allow) {
+                for value in expected
+                    .apps
+                    .iter()
+                    .chain(&expected.allow)
+                    .chain(&expected.target_urls)
+                {
                     assert!(message.contains(value), "{value} 沒有印出來：{message}");
                 }
                 assert!(
@@ -7178,6 +7194,85 @@ pub mod act {
         }
 
         #[test]
+        fn ten_controlled_semi_action_rehearsals_have_replayable_logs() {
+            let tasks = [
+                "打開受控說明頁",
+                "查看本機測試帳單",
+                "查看測試專案狀態",
+                "打開測試日曆",
+                "查看測試報表",
+                "查看測試工單",
+                "開啟測試檢查清單",
+                "查看測試檔案索引",
+                "打開測試里程碑",
+                "查看測試完成頁",
+            ];
+            assert_eq!(tasks.len(), 10);
+            for (index, task) in tasks.into_iter().enumerate() {
+                let target = format!("https://staging.example/task/{}", index + 1);
+                let source = Source {
+                    rows: vec![card(7, Some(&open_url(&target)), &[1], Some(1))],
+                    apps: [(1, "chrome.exe".to_owned())].into_iter().collect(),
+                    target_frames: [(1, TargetFrame::Known(1))].into_iter().collect(),
+                    nearest_frame: None,
+                };
+                let run = go(
+                    &format!("phase6-controlled-task-{}", index + 1),
+                    &source,
+                    &opts(task, &["chrome.exe"], 1, 5, false),
+                    "好\n",
+                    None,
+                );
+                assert_eq!(
+                    run.executor.calls,
+                    [ActionSnapshot::OpenUrl {
+                        url: target.clone()
+                    }]
+                );
+                let events = run.events();
+                assert!(
+                    events
+                        .iter()
+                        .any(|event| matches!(event, ActionEvent::Approved { .. }))
+                );
+                assert!(
+                    events
+                        .iter()
+                        .any(|event| matches!(event, ActionEvent::Executed { .. }))
+                );
+                assert!(matches!(events.last(), Some(ActionEvent::Concluded { .. })));
+                assert_eq!(
+                    run.replay().events,
+                    events,
+                    "task {task} action log did not replay"
+                );
+            }
+        }
+
+        #[test]
+        fn saved_grant_keeps_the_explicit_url_target_after_reload() {
+            let target = "https://staging.example/task/7?next=first&next=second";
+            let mut options = opts("查看受控頁", &["chrome.exe"], 1, 5, false);
+            options.target_urls = vec![target.into()];
+            options.save_grant = true;
+            let run = go(
+                "phase6-saved-target",
+                &Source::default(),
+                &options,
+                "",
+                None,
+            );
+            let saved = load_grant(&run.dir.0).unwrap();
+            assert!(saved.describe().contains(target));
+            let events = run.events();
+            assert!(matches!(events.first(), Some(ActionEvent::Granted { .. })));
+            assert!(run.replay().events.iter().any(|event| match event {
+                ActionEvent::Granted { grant, .. } => grant.describe().contains(target),
+                _ => false,
+            }));
+        }
+
+        #[test]
         fn saying_yes_to_an_unsafe_file_target_is_logged_as_refused_before_os() {
             let unsafe_step =
                 serde_json::json!({"action": "open_file", "path": "C:\\work\\payload.exe"})
@@ -8133,6 +8228,13 @@ pub mod act {
                 Expiry::after_issued(1_700_000_000_000, valid_for_ms),
                 StepLimit::new(steps).expect("positive step limit"),
             )
+            .with_url_targets([
+                "https://example.com/a".to_owned(),
+                "https://example.com/b".to_owned(),
+                "https://a".to_owned(),
+                "https://b".to_owned(),
+            ])
+            .unwrap()
         }
 
         /// 一趟「正常的」無人值守：他**答過**那個網址問題了。

@@ -405,7 +405,9 @@ a 類（顯式時間承諾）**——這兩類是「使用者自己能立刻驗�
    無人值守不是把一句舊的「好」重播，而是每一步重新檢查授權範圍、期限、步數與
    目標來源，再鑄出只對該具體動作有效的 permit〔定案：CLI 證明的是互動可行，
    不是授權夠精確〕。授權是結構化物件，不是一句話。目前 saved grant 落地的是
-   `grant = {task, apps[], allowed_actions[], expiry, step_limit}`。現在的三種 action
+   `grant = {task, apps[], allowed_actions[], expiry, step_limit, url_targets[]}`。
+   `url_targets[]` 只授權列出的完整 URL 去處；舊授權書缺欄時是空集合，無人值守 URL
+   一律拒絕。現在的三種 action
    沒有資料 payload，先加 `data_scope`／`denied_actions[]` 只會造出沒人讀的假授權；
    新增資料型或不可逆 action 時，才必須在同一版把對應 scope／deny 語意與 enforcement
    原子加入。
@@ -431,8 +433,9 @@ a 類（顯式時間承諾）**——這兩類是「使用者自己能立刻驗�
    保留中的真 Windows 錄製裡見過同去處的網址：scheme、有效 port、host、path、
    query、fragment 都須相符；path 的 percent escape 與結尾 `/` 保留原形，query
    依原始順序比較，空 `?`／`#` 分隔符的有無也不同，不能讓伺服器可區分的寫法借票
-   （容許一層 `www.` 差異；Chromium 省略 scheme 時只推定 HTTPS）。目標 fact 自己那張
-   可信畫面的位址列也須是同一去處。alpha.103
+   （只有錄製位址列省略 scheme 時容許一層 `www.` 差異，並只推定 HTTPS）。目標 fact 自己那張
+   可信畫面的位址列也須是同一去處。URL 結構由正式 parser 解析，userinfo 不得進入
+   standing grant；path、query 與 fragment 的原始寫法仍須相符。alpha.103
    起來源紀錄只信 exact
    `sessions.platform = windows/windows-gdi-uia-focused-url-v2`。歷史 v1 可讀、可顯示，
    但因全域 focused element／stale URL cache 沒有證明 exact HWND 與當拍 live value，

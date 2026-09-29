@@ -285,7 +285,9 @@ fn run_case_ex(
         AllowedActions::new([ActionKind::OpenUrl]),
         Expiry::after_issued(sister_core::now_ms(), 300_000),
         StepLimit::new(1).unwrap(),
-    );
+    )
+    .with_url_targets([OTHER_APP_URL.to_owned(), WORK_URL.to_owned()])
+    .unwrap();
     std::fs::write(grant_path(&dir), serde_json::to_vec_pretty(&grant).unwrap()).unwrap();
 
     // 這個整合 helper 只能驗 unattended：attended 在 stdin 不是 TTY 時會先被
@@ -410,7 +412,9 @@ fn schema_13_commitment_is_refused_with_missing_target_provenance() {
         AllowedActions::new([ActionKind::OpenUrl]),
         Expiry::after_issued(sister_core::now_ms(), 300_000),
         StepLimit::new(1).unwrap(),
-    );
+    )
+    .with_url_targets([OTHER_APP_URL.to_owned(), WORK_URL.to_owned()])
+    .unwrap();
     std::fs::write(grant_path(&dir), serde_json::to_vec_pretty(&grant).unwrap()).unwrap();
     std::fs::remove_file(dir.join("action-log.jsonl")).unwrap();
     let action = sister(
@@ -762,7 +766,9 @@ fn run_agreed_unattended(label: &str, pass_b_cites_target: bool) -> (PathBuf, St
         AllowedActions::new([ActionKind::OpenUrl]),
         Expiry::after_issued(sister_core::now_ms(), 300_000),
         StepLimit::new(1).unwrap(),
-    );
+    )
+    .with_url_targets([OTHER_APP_URL.to_owned(), WORK_URL.to_owned()])
+    .unwrap();
     std::fs::write(grant_path(&dir), serde_json::to_vec_pretty(&grant).unwrap()).unwrap();
     let action = sister(
         &dir,
@@ -847,7 +853,9 @@ fn unattended_refuses_old_commitment_recorded_before_agreed_evidence() {
         AllowedActions::new([ActionKind::OpenUrl]),
         Expiry::after_issued(sister_core::now_ms(), 300_000),
         StepLimit::new(1).unwrap(),
-    );
+    )
+    .with_url_targets([OTHER_APP_URL.to_owned(), WORK_URL.to_owned()])
+    .unwrap();
     std::fs::write(grant_path(&dir), serde_json::to_vec_pretty(&grant).unwrap()).unwrap();
     let _ = std::fs::remove_file(dir.join("action-log.jsonl"));
     let action = sister(
@@ -898,7 +906,9 @@ fn unattended_empty_agreed_evidence_is_not_the_null_sentence() {
         AllowedActions::new([ActionKind::OpenUrl]),
         Expiry::after_issued(sister_core::now_ms(), 300_000),
         StepLimit::new(1).unwrap(),
-    );
+    )
+    .with_url_targets([OTHER_APP_URL.to_owned(), WORK_URL.to_owned()])
+    .unwrap();
     std::fs::write(grant_path(&dir), serde_json::to_vec_pretty(&grant).unwrap()).unwrap();
     let _ = std::fs::remove_file(dir.join("action-log.jsonl"));
     let action = sister(
