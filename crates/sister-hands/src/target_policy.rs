@@ -355,28 +355,25 @@ pub fn same_path(recorded: &str, target: &str) -> bool {
     }
 }
 
-fn query_and_fragment(url: &str) -> Option<(&str, &str)> {
+fn query_and_fragment(url: &str) -> Option<(Option<&str>, Option<&str>)> {
     let tail = tail_after_authority(url)?;
     let (path_and_query, fragment) = match tail.split_once('#') {
-        Some((before, frag)) => (before, frag),
-        None => (tail, ""),
+        Some((before, frag)) => (before, Some(frag)),
+        None => (tail, None),
     };
-    let query = match path_and_query.split_once('?') {
-        Some((_, q)) => q,
-        None => "",
-    };
+    let query = path_and_query.split_once('?').map(|(_, q)| q);
     Some((query, fragment))
 }
 
-/// query 與 fragment 的原文字節是否相同。重複 key 的先後、空欄與 escape
+/// query 與 fragment 的原文字節及分隔符是否相同。重複 key 的先後、空欄與 escape
 /// 都可能改變伺服器或頁面收到的去處；壞掉的 percent escape 仍拒絕。
 pub fn same_query_and_fragment(recorded: &str, target: &str) -> bool {
     match (query_and_fragment(recorded), query_and_fragment(target)) {
         (Some((q1, f1)), Some((q2, f2))) => {
-            percent_decode(q1).is_some()
-                && percent_decode(q2).is_some()
-                && percent_decode(f1).is_some()
-                && percent_decode(f2).is_some()
+            percent_decode(q1.unwrap_or("")).is_some()
+                && percent_decode(q2.unwrap_or("")).is_some()
+                && percent_decode(f1.unwrap_or("")).is_some()
+                && percent_decode(f2.unwrap_or("")).is_some()
                 && q1 == q2
                 && f1 == f2
         }
@@ -683,6 +680,29 @@ mod tests {
         assert!(same_destination(
             "example.com/pay?next=trusted&next=evil",
             "https://example.com/pay?next=trusted&next=evil"
+        ));
+    }
+
+    #[test]
+    fn empty_query_and_fragment_delimiters_are_distinct_destinations() {
+        let forms = [
+            "https://example.com/a",
+            "https://example.com/a?",
+            "https://example.com/a#",
+            "https://example.com/a?#",
+        ];
+        for (recorded_index, recorded) in forms.into_iter().enumerate() {
+            for (target_index, target) in forms.into_iter().enumerate() {
+                assert_eq!(
+                    same_destination(recorded, target),
+                    recorded_index == target_index,
+                    "recorded={recorded:?}, target={target:?}"
+                );
+            }
+        }
+        assert!(same_destination(
+            "example.com/a?#",
+            "https://www.example.com/a?#"
         ));
     }
 

@@ -430,8 +430,9 @@ a 類（顯式時間承諾）**——這兩類是「使用者自己能立刻驗�
    「沒問過」寫成「使用者說不要」。使用者可選「網址一律當場按」，或只讓她開在
    保留中的真 Windows 錄製裡見過同去處的網址：scheme、有效 port、host、path、
    query、fragment 都須相符；path 的 percent escape 與結尾 `/` 保留原形，query
-   依原始順序比較，不能讓伺服器可區分的寫法借票（容許一層 `www.` 差異；Chromium
-   省略 scheme 時只推定 HTTPS）。目標 fact 自己那張可信畫面的位址列也須是同一去處。alpha.103
+   依原始順序比較，空 `?`／`#` 分隔符的有無也不同，不能讓伺服器可區分的寫法借票
+   （容許一層 `www.` 差異；Chromium 省略 scheme 時只推定 HTTPS）。目標 fact 自己那張
+   可信畫面的位址列也須是同一去處。alpha.103
    起來源紀錄只信 exact
    `sessions.platform = windows/windows-gdi-uia-focused-url-v2`。歷史 v1 可讀、可顯示，
    但因全域 focused element／stale URL cache 沒有證明 exact HWND 與當拍 live value，

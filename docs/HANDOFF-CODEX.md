@@ -1,5 +1,15 @@
 # HANDOFF — 交給下一位 agent（Codex）
 
+**2026-09-28 Phase 6 來源票空分隔符修復：**`same_destination` 現在保留空 `?`／`#`
+分隔符的有無；四種組合不能互借 standing grant。比較器及真實授權查詢
+`site_in_her_record`／`target_address_on_source_frame` 均有 4×4 回歸測試，Chromium
+省略 scheme／www. 的正例保留；既有 scheme／有效 port、path percent escape、尾端
+`/`、重複 query 順序測試仍通過。20 條 injection 語料 × 3 種來源的 CLI 端到端測試、
+workspace Cargo fmt／Clippy／test、no-network gate 通過。Phase 6 三項正式退場條件
+仍未勾：60 個來源案例只證明本段 URL 閘門；不可逆動作全路徑核准與 10 個真實任務
+不屬這輪 URL 修復。下一步須 Ted 決定是否擴大至完整 Phase 6 範圍並提供真實任務
+紀錄；候選仍待 service verification 與新一輪獨立審查。
+
 **2026-09-28 Phase 6 來源票第二輪修復：**`same_destination` 不再把 path 的每個
 percent escape 解成等價文字，也不再排序 query；`%2F`／`/`、重複參數反序與結尾
 `/` 都分開授權。20 條 injection 語料各走三種本段、已被 reviewer 接受的 URL fact

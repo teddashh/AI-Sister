@@ -9719,6 +9719,75 @@ mod tests {
         );
     }
 
+    #[test]
+    fn empty_url_delimiters_cannot_borrow_recorded_or_source_frame_authorization() {
+        use sister_hands::url_policy::TargetAddressOrigin as FrameOrigin;
+
+        let forms = [
+            "https://example.com/a",
+            "https://example.com/a?",
+            "https://example.com/a#",
+            "https://example.com/a?#",
+        ];
+        for (recorded_index, recorded) in forms.into_iter().enumerate() {
+            let mut db = test_db();
+            let session = db
+                .start_session(TRUSTED_URL_ORIGIN_PLATFORM, "test")
+                .unwrap();
+            db.insert_focus(
+                session,
+                &FocusEvent {
+                    ts: 1_100,
+                    kind: FocusKind::UrlChange,
+                    snapshot: FocusSnapshot {
+                        app_id: Some("chrome.exe".into()),
+                        url: Some(recorded.into()),
+                        ..FocusSnapshot::default()
+                    },
+                },
+            )
+            .unwrap();
+            db.conn
+                .execute(
+                    "INSERT INTO frames(ts, session_id, monitor, width, height, dhash, url)
+                     VALUES(1, ?1, 0, 1, 1, 0, ?2)",
+                    params![session, recorded],
+                )
+                .unwrap();
+            let frame_id = db.conn.last_insert_rowid();
+
+            for (target_index, target) in forms.into_iter().enumerate() {
+                db.conn
+                    .execute(
+                        "INSERT INTO facts(ts, kind, raw, normalized, source_kind, frame_id)
+                         VALUES(1, 'url', ?1, ?1, 'ocr', ?2)",
+                        params![target, frame_id],
+                    )
+                    .unwrap();
+                let fact_id = db.conn.last_insert_rowid();
+                let matching = recorded_index == target_index;
+                assert_eq!(
+                    db.site_in_her_record(target).unwrap(),
+                    if matching {
+                        UrlOrigin::InHerRecord
+                    } else {
+                        UrlOrigin::SamePathDifferentDestination
+                    },
+                    "recorded={recorded:?}, target={target:?}"
+                );
+                assert_eq!(
+                    db.target_address_on_source_frame(fact_id, target).unwrap(),
+                    if matching {
+                        FrameOrigin::SameFrameAddress
+                    } else {
+                        FrameOrigin::OtherScreenText
+                    },
+                    "frame={recorded:?}, target={target:?}"
+                );
+            }
+        }
+    }
+
     /// Replay 是測搜尋／抽取的輸入，不是「這台機器上被她看見過」的憑據。
     /// 兩條 replay 接線留下的 platform 長得不同，兩條都不能替日後的網址種票。
     #[test]
