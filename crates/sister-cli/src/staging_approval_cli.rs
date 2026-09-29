@@ -4,17 +4,18 @@
 use anyhow::{Context, Result, bail};
 use sister_hands::NeverInherited;
 use sister_hands::staging_approval::{
-    IrreversibleIntent, LiveApprover, LiveDecision, StagingFixture,
+    ApprovalInputOrigin, IrreversibleIntent, LiveApprover, LiveDecision, StagingFixture,
 };
 use std::{
     cell::Cell,
     ffi::OsString,
-    io::Write,
+    io::{IsTerminal, Write},
     path::{Path, PathBuf},
+    time::Instant,
 };
 
 struct TerminalApprover<'a> {
-    clock: &'a Cell<i64>,
+    clock_offset_ms: &'a Cell<i64>,
     advance_ms: i64,
 }
 
@@ -36,8 +37,8 @@ impl LiveApprover for TerminalApprover<'_> {
         }
         match answer.trim() {
             "好" => {
-                self.clock
-                    .set(self.clock.get().saturating_add(self.advance_ms));
+                self.clock_offset_ms
+                    .set(self.clock_offset_ms.get().saturating_add(self.advance_ms));
                 LiveDecision::Approve
             }
             "不要" => LiveDecision::Decline,
@@ -80,9 +81,18 @@ pub fn run_early(args: &[OsString]) -> Option<Result<()>> {
         return None;
     }
     Some((|| {
-        if args.len() != 6 {
+        if !(args.len() == 6 || args.len() == 7) {
             bail!(
-                "usage: --staging-irreversible <data-dir> <class> <staging://target> <details> <approval-clock-advance-ms>"
+                "usage: --staging-irreversible <data-dir> <class> <staging://target> <details> <test-clock-advance-ms> [--scripted-test-approval]"
+            );
+        }
+        let scripted = args.len() == 7 && args[6] == "--scripted-test-approval";
+        if args.len() == 7 && !scripted {
+            bail!("unknown staging argument");
+        }
+        if !scripted && !std::io::stdin().is_terminal() {
+            bail!(
+                "live staging approval requires a terminal; scripted fixtures must use --scripted-test-approval"
             );
         }
         let dir = PathBuf::from(&args[1]);
@@ -97,28 +107,48 @@ pub fn run_early(args: &[OsString]) -> Option<Result<()>> {
         if advance_ms < 0 {
             bail!("clock advance must be nonnegative");
         }
+        if !scripted && advance_ms != 0 {
+            bail!("a real terminal approval cannot use a test clock advance");
+        }
         let intent = IrreversibleIntent {
             class: class(args[2].to_str().context("class must be text")?)?,
             target: target.to_owned(),
             details: args[4].to_str().context("details must be text")?.to_owned(),
         };
-        let clock = Cell::new(sister_core::now_ms());
+        let clock_offset_ms = Cell::new(0_i64);
+        let started = Instant::now();
         let mut approver = TerminalApprover {
-            clock: &clock,
+            clock_offset_ms: &clock_offset_ms,
             advance_ms,
         };
-        let mut fixture = StagingFixture::default();
+        let mut fixture = StagingFixture::with_input_origin(if scripted {
+            ApprovalInputOrigin::ScriptedFixture
+        } else {
+            ApprovalInputOrigin::HumanTerminal
+        });
         let outcome = fixture.dispatch(
             intent,
             &mut approver,
-            || clock.get(),
+            || {
+                i64::try_from(started.elapsed().as_millis())
+                    .unwrap_or(i64::MAX)
+                    .saturating_add(clock_offset_ms.get())
+            },
             || {
                 sister_hands::kill_switch::is_pulled(&dir)
                     || sister_hands::master_stop::is_stopped(&dir)
             },
         );
         std::fs::create_dir_all(&dir)?;
-        fixture.write_jsonl(&receipt_path(&dir))?;
+        fixture.append_jsonl(&receipt_path(&dir))?;
+        println!(
+            "staging input: {}",
+            if scripted {
+                "scripted_fixture"
+            } else {
+                "human_terminal"
+            }
+        );
         println!("staging outcome: {outcome:?}");
         Ok(())
     })())

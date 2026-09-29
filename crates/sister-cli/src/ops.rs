@@ -3724,86 +3724,108 @@ pub mod act {
                          要存起來的話，拿掉 --dry-run 再跑一次。"
                     )?;
                 } else {
-                    if !opts.target_urls.is_empty() {
-                        // A URL in a grant is a destination, not an instruction to act.
-                        // Bind it to the exact reviewed card and action selected here by
-                        // the person at the terminal. A later model-produced card cannot
-                        // borrow the grant merely by selecting the same address fact.
-                        let candidates: Vec<_> = commitments
-                            .iter()
-                            .filter_map(|card| {
-                                let AllowedNextStep::Suggestion(button) =
-                                    sister_hands::commitment_action::parse_allowed_next_step(
-                                        card.allowed_next_step.as_deref(),
-                                    )
-                                else {
-                                    return None;
-                                };
-                                let action = button.snapshot();
-                                let sister_hands::ActionSnapshot::OpenUrl { url } = &action else {
-                                    return None;
-                                };
-                                opts.target_urls
-                                    .iter()
-                                    .any(|target| {
-                                        sister_hands::target_policy::same_explicit_destination(
-                                            target, url,
-                                        )
-                                    })
-                                    .then_some((card, action))
-                            })
-                            .collect();
-                        if candidates.is_empty() {
-                            writeln!(out, "沒有可授權的承諾與網址動作；這一趟沒有存授權書。")?;
-                        } else {
-                            for (card, action) in &candidates {
-                                writeln!(
-                                    out,
-                                    "承諾 #{}：{}；步驟：{}",
-                                    card.id,
-                                    card.text,
-                                    action.describe()
-                                )?;
-                            }
-                            write!(out, "要授權哪一張承諾？輸入編號：")?;
-                            out.flush()?;
-                            let mut selected = String::new();
-                            if input.read_line(&mut selected)? == 0 {
-                                writeln!(out, "沒有收到編號；這一趟沒有存授權書。")?;
-                            } else if let Some((card, action)) =
-                                candidates.iter().find(|(card, _)| {
-                                    selected.trim().parse::<i64>().ok() == Some(card.id)
-                                })
-                            {
-                                writeln!(
-                                    out,
-                                    "授權承諾 #{}：{}；步驟：{}",
-                                    card.id,
-                                    card.text,
-                                    action.describe()
-                                )?;
-                                if matches!(ask(input, out, &_watcher.pulled)?, Answer::Approve) {
-                                    grant = grant.with_approved_commitment(
-                                        sister_hands::semi_action::ApprovedCommitment {
-                                            id: card.id,
-                                            text: card.text.clone(),
-                                            action: action.clone(),
-                                            target_fact_id: card.allowed_next_step_fact,
-                                            agreed_evidence_json: card.agreed_evidence_json.clone(),
-                                        },
-                                    );
-                                    save_grant(data_dir, &grant)?;
-                                    writeln!(out, "已存授權書：{}", grant.describe())?;
-                                } else {
-                                    writeln!(out, "這一趟沒有存授權書。")?;
-                                }
-                            } else {
-                                writeln!(out, "編號不在清單裡；這一趟沒有存授權書。")?;
-                            }
+                    // Bind every unattended action to the exact reviewed card selected
+                    // here. A later model-produced card cannot borrow a broad grant.
+                    let mut candidates = Vec::new();
+                    for card in &commitments {
+                        let AllowedNextStep::Suggestion(button) =
+                            sister_hands::commitment_action::parse_allowed_next_step(
+                                card.allowed_next_step.as_deref(),
+                            )
+                        else {
+                            continue;
+                        };
+                        let action = button.snapshot();
+                        if let sister_hands::ActionSnapshot::OpenUrl { url } = &action {
+                            if !matches!(
+                                        opts.url_open,
+                                        Some(sister_hands::url_policy::UrlOpenAnswer::WhenYouCanNameTheOrigin)
+                                    ) || !opts.target_urls.iter().any(|target| {
+                                        sister_hands::target_policy::same_explicit_destination(target, url)
+                                    }) {
+                                        continue;
+                                    }
+                            let Some(fact_id) = card.allowed_next_step_fact else {
+                                continue;
+                            };
+                            if unattended_target_frame_refusal(
+                                        source,
+                                        card.agreed_evidence_json.as_deref(),
+                                        &card.evidence_json,
+                                        Some((fact_id, url)),
+                                    )?.is_some()
+                                        || source.target_address_on_source_frame(fact_id, url)?
+                                            != sister_hands::url_policy::TargetAddressOrigin::SameFrameAddress
+                                        || source.site_in_her_record(url)?
+                                            != sister_hands::url_policy::UrlOrigin::InHerRecord
+                                    {
+                                        continue;
+                                    }
                         }
+                        let target = action.expected_target();
+                        let app = step_app(
+                            source,
+                            &card.evidence_json,
+                            card.allowed_next_step_fact.zip(target.as_deref()),
+                        )?;
+                        let step = StepRequest::new(
+                            Task::new(&opts.task),
+                            app.request_app(),
+                            action.clone(),
+                        );
+                        if grant.covers(&step, clock()).is_ok() {
+                            candidates.push((card, action));
+                        }
+                    }
+                    if candidates.is_empty() {
+                        writeln!(
+                            out,
+                            "沒有符合授權範圍與來源條件的承諾；這一趟沒有存授權書。"
+                        )?;
                     } else {
-                        save_grant(data_dir, &grant)?;
-                        writeln!(out, "已存授權書：{}", grant.describe())?;
+                        for (card, action) in &candidates {
+                            writeln!(
+                                out,
+                                "承諾 #{}：{}；步驟：{}",
+                                card.id,
+                                card.text,
+                                action.describe()
+                            )?;
+                        }
+                        write!(out, "要授權哪一張承諾？輸入編號：")?;
+                        out.flush()?;
+                        let mut selected = String::new();
+                        if input.read_line(&mut selected)? == 0 {
+                            writeln!(out, "沒有收到編號；這一趟沒有存授權書。")?;
+                        } else if let Some((card, action)) = candidates
+                            .iter()
+                            .find(|(card, _)| selected.trim().parse::<i64>().ok() == Some(card.id))
+                        {
+                            writeln!(
+                                out,
+                                "授權承諾 #{}：{}；步驟：{}",
+                                card.id,
+                                card.text,
+                                action.describe()
+                            )?;
+                            if matches!(ask(input, out, &_watcher.pulled)?, Answer::Approve) {
+                                grant = grant.with_approved_commitment(
+                                    sister_hands::semi_action::ApprovedCommitment {
+                                        id: card.id,
+                                        text: card.text.clone(),
+                                        action: action.clone(),
+                                        target_fact_id: card.allowed_next_step_fact,
+                                        agreed_evidence_json: card.agreed_evidence_json.clone(),
+                                    },
+                                );
+                                save_grant(data_dir, &grant)?;
+                                writeln!(out, "已存授權書：{}", grant.describe())?;
+                            } else {
+                                writeln!(out, "這一趟沒有存授權書。")?;
+                            }
+                        } else {
+                            writeln!(out, "編號不在清單裡；這一趟沒有存授權書。")?;
+                        }
                     }
                 }
             }
@@ -6373,22 +6395,25 @@ pub mod act {
             // 而預演存得下來這件事本身就是個洞（見
             // `a_dry_run_does_not_arm_a_grant_for_the_next_process`）：一趟
             // 「不問、不做」的預演可以替之後的 `--use-grant` 上好膛。
-            // 這裡沒有承諾卡，所以不是預演也不會問到任何人。
+            // 存票時選定具體承諾，後一輪仍須遵守原任務。
             let mut save = opts("原來的任務", &["chrome.exe"], 3, 5, false);
             save.save_grant = true;
-            let mut input = std::io::Cursor::new(Vec::<u8>::new());
+            save.target_urls = vec!["https://example.com/a".into()];
+            save.url_open = Some(sister_hands::url_policy::UrlOpenAnswer::WhenYouCanNameTheOrigin);
+            let mut input = std::io::Cursor::new("7\n好\n不要\n".as_bytes());
             let mut executor = Fake::default();
             let mut out = Vec::new();
             run_with_output(
                 &dir.0,
                 &save,
-                &Source::default(),
+                &one_card(),
                 &mut input,
                 &mut executor,
                 &mut ticking(1_700_000_000_000),
                 &mut out,
             )
             .expect("save grant");
+            assert!(grant_path(&dir.0).exists());
 
             let mut reuse = opts("不同的任務", &[], 99, 99, false);
             reuse.use_grant = true;
@@ -7340,6 +7365,8 @@ pub mod act {
             let mut options = opts("查看受控頁", &["chrome.exe"], 1, 5, false);
             options.target_urls = vec![target.into()];
             options.save_grant = true;
+            options.url_open =
+                Some(sister_hands::url_policy::UrlOpenAnswer::WhenYouCanNameTheOrigin);
             let source = Source {
                 rows: vec![card(7, Some(&open_url(target)), &[1], Some(1))],
                 apps: [(1, "chrome.exe".to_owned())].into_iter().collect(),
@@ -7364,11 +7391,67 @@ pub mod act {
         }
 
         #[test]
+        fn a_file_grant_is_saved_only_after_selecting_the_reviewed_action() {
+            let action =
+                serde_json::json!({"action":"open_file","path":"C:/work/report.txt"}).to_string();
+            let source = Source {
+                rows: vec![card(7, Some(&action), &[1], Some(1))],
+                apps: [(1, "chrome.exe".to_owned())].into_iter().collect(),
+                ..Source::default()
+            };
+            let mut options = opts("整理報告", &["chrome.exe"], 1, 5, false);
+            options.allow = vec!["open-file".into()];
+            options.save_grant = true;
+
+            let declined = go(
+                "file-grant-declined",
+                &source,
+                &options,
+                "7\n不要\n不要\n",
+                None,
+            );
+            assert!(!grant_path(&declined.dir.0).exists());
+            let selected = go(
+                "file-grant-selected",
+                &source,
+                &options,
+                "7\n好\n不要\n",
+                None,
+            );
+            assert!(grant_path(&selected.dir.0).exists(), "{}", selected.out);
+            let saved = load_grant(&selected.dir.0).unwrap();
+            let requested = StepRequest::new(
+                Task::new("整理報告"),
+                App::new("chrome.exe"),
+                sister_hands::ActionSnapshot::OpenFile {
+                    path: "C:/work/report.txt".into(),
+                },
+            )
+            .from_reviewed_commitment(
+                7,
+                "承諾 7",
+                Some(1),
+                source.rows[0].agreed_evidence_json.clone(),
+            );
+            let authorized = saved.authorize_unattended(
+                &requested,
+                saved.expiry().issued_at_ms() + 100,
+                sister_hands::url_policy::UrlOpenPolicy::NotAskedYet,
+                |_| -> Result<_, std::convert::Infallible> {
+                    panic!("file grant must not look up URL")
+                },
+            );
+            assert!(authorized.is_ok(), "{:?}", authorized.err());
+        }
+
+        #[test]
         fn url_grant_is_not_saved_when_the_selected_commitment_is_declined() {
             let target = "https://staging.example/task/7";
             let mut options = opts("查看受控頁", &["chrome.exe"], 1, 5, false);
             options.target_urls = vec![target.into()];
             options.save_grant = true;
+            options.url_open =
+                Some(sister_hands::url_policy::UrlOpenAnswer::WhenYouCanNameTheOrigin);
             let source = Source {
                 rows: vec![card(7, Some(&open_url(target)), &[1], Some(1))],
                 apps: [(1, "chrome.exe".to_owned())].into_iter().collect(),
@@ -7385,6 +7468,34 @@ pub mod act {
             assert!(!grant_path(&run.dir.0).exists());
             assert!(run.out.contains("這一趟沒有存授權書"), "{}", run.out);
             assert!(run.executor.calls.is_empty());
+        }
+
+        #[test]
+        fn url_grant_does_not_offer_cards_without_a_cited_target_fact() {
+            let target = "https://staging.example/task/7";
+            for (label, fact, agreed) in [
+                ("missing-fact", None, Some("[\"frame:1\"]".to_owned())),
+                ("missing-agreed-frame", Some(1), None),
+            ] {
+                let mut options = opts("查看受控頁", &["chrome.exe"], 1, 5, false);
+                options.target_urls = vec![target.into()];
+                options.save_grant = true;
+                options.url_open =
+                    Some(sister_hands::url_policy::UrlOpenAnswer::WhenYouCanNameTheOrigin);
+                let mut row = card(7, Some(&open_url(target)), &[1], fact);
+                row.agreed_evidence_json = agreed;
+                let source = Source {
+                    rows: vec![row],
+                    apps: [(1, "chrome.exe".to_owned())].into_iter().collect(),
+                    target_frames: [(1, TargetFrame::Known(1))].into_iter().collect(),
+                    nearest_frame: None,
+                };
+                let run = go(label, &source, &options, "不要\n", None);
+                assert!(!grant_path(&run.dir.0).exists(), "{}", run.out);
+                assert!(run.out.contains("這一趟沒有存授權書"), "{}", run.out);
+                assert!(!run.out.contains("要授權哪一張承諾"), "{}", run.out);
+                assert!(run.executor.calls.is_empty());
+            }
         }
 
         #[test]

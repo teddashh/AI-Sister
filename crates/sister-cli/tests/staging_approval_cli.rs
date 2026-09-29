@@ -1,7 +1,7 @@
 #![cfg(feature = "staging-approval")]
 
 use std::{
-    io::Write,
+    io::{Read, Write},
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::atomic::{AtomicU32, Ordering},
@@ -43,6 +43,7 @@ fn invoke(
             "staging://controlled-fixture/one",
             "synthetic local action",
             &advance_ms.to_string(),
+            "--scripted-test-approval",
         ])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -66,6 +67,10 @@ fn invoke(
         .lines()
         .map(|line| serde_json::from_str(line).unwrap())
         .collect();
+    assert!(
+        stdout.contains("staging input: scripted_fixture"),
+        "{stdout}"
+    );
     (stdout, events)
 }
 
@@ -92,6 +97,12 @@ fn one_outcome(class: &str, answer: &str, advance_ms: i64, expected: &str, execu
     );
     let printed = String::from_utf8(replay.stdout).unwrap();
     assert_eq!(printed.lines().count(), events.len());
+    assert!(
+        events
+            .iter()
+            .filter(|event: &&serde_json::Value| event["event"] == "approved")
+            .all(|event| event["input_origin"] == "scripted_fixture")
+    );
 }
 
 #[test]
@@ -123,8 +134,90 @@ fn executable_staging_dispatch_obeys_stop_and_rejects_nonfixture_target() {
             "https://real.example/pay",
             "should refuse",
             "0",
+            "--scripted-test-approval",
         ])
         .output()
         .unwrap();
     assert!(!bad.status.success());
+}
+
+#[test]
+fn staging_replay_keeps_two_approval_runs_in_one_directory() {
+    let dir = TempDir::new();
+    let (_, first) = invoke(dir.path(), "submit", "不要\n", 0);
+    assert_eq!(first.len(), 2);
+    let (_, both) = invoke(dir.path(), "pay", "好\n", 0);
+    assert_eq!(both.len(), 5);
+    assert_eq!(both[0]["event"], "proposed");
+    assert_eq!(both[1]["event"], "refused");
+    assert_eq!(both[2]["event"], "proposed");
+    assert_eq!(both[3]["event"], "approved");
+    assert_eq!(both[4]["event"], "executed");
+    let replay = Command::new(env!("CARGO_BIN_EXE_sister"))
+        .args(["--staging-replay", dir.path().to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(replay.status.success());
+    assert_eq!(String::from_utf8(replay.stdout).unwrap().lines().count(), 5);
+}
+
+#[test]
+fn scripted_input_without_explicit_fixture_flag_is_rejected() {
+    let dir = TempDir::new();
+    let output = Command::new(env!("CARGO_BIN_EXE_sister"))
+        .args([
+            "--staging-irreversible",
+            dir.path().to_str().unwrap(),
+            "pay",
+            "staging://local",
+            "synthetic",
+            "0",
+        ])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(!dir.path().join("staging-approval.jsonl").exists());
+}
+
+#[test]
+fn real_time_spent_at_the_staging_prompt_expires_approval() {
+    let dir = TempDir::new();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_sister"))
+        .args([
+            "--staging-irreversible",
+            dir.path().to_str().unwrap(),
+            "pay",
+            "staging://controlled-fixture/slow",
+            "synthetic local action",
+            "0",
+            "--scripted-test-approval",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdout = child.stdout.take().unwrap();
+    let mut before = Vec::new();
+    let prompt = "當場核准？好／不要／停：".as_bytes();
+    while !before.ends_with(prompt) {
+        let mut byte = [0_u8; 1];
+        stdout
+            .read_exact(&mut byte)
+            .expect("staging prompt must arrive");
+        before.push(byte[0]);
+    }
+    std::thread::sleep(std::time::Duration::from_secs(31));
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all("好\n".as_bytes())
+        .unwrap();
+    assert!(child.wait().unwrap().success());
+    let mut after = String::new();
+    stdout.read_to_string(&mut after).unwrap();
+    assert!(after.contains("Expired"), "{after}");
+    let log = std::fs::read_to_string(dir.path().join("staging-approval.jsonl")).unwrap();
+    assert!(log.contains("\"expired\""), "{log}");
+    assert!(!log.contains("\"executed\""), "{log}");
 }

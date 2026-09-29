@@ -1658,9 +1658,11 @@ Phase 6 的整體退場條件仍未打勾。
 來源畫面、目標地址 fact 與保存的 grant 都指向同一去處（完整 URL、Chromium 縮寫、
 明寫預設 port）。獨立審查發現：原夾具替 19 條語料附加了注入網址，拒絕原因
 其實是正文裡的重複網址；只有指令而沒有網址時，模型挑到位址列 fact 仍可借票。
-修正後，URL grant 另綁人當場選定的承諾 ID、原文、具體動作、目標 fact ID 與
-兩個 pass 同意的畫面清單；舊票沒有綁定就
-拒絕。`--save-grant` 有 URL 目標時列出可選承諾，當場選編號並答「好」才保存。
+修正後，每張無人值守 grant 都綁人當場選定的承諾 ID、原文、具體動作、目標 fact ID 與
+兩個 pass 同意的畫面清單；舊票沒有綁定就拒絕。`--save-grant` 對每種動作都
+要求先選承諾並當場核准；URL 候選另
+先驗網址政策、授權範圍、雙 pass 引用目標畫面、可信 Windows 位址列畫面與
+完整可信網址紀錄；缺目標 fact 或同意畫面的舊卡不列為候選。
 末三種案例保留原注入文字，不再附加網址，來源仍是可信同址位址列；grant 指向
 夾具建立並歸檔的另一張同址承諾，新的模型承諾以 `Commitment` 拒絕。
 其餘六種繼續驗來源與 URL 目標閘門。乾淨、當場選定的位址列對照可執行一次。
@@ -1677,7 +1679,9 @@ Phase 6 的整體退場條件仍未打勾。
 30 秒期限、時鐘倒退與停止檢查；`sister-cli` 的 `staging-approval` feature 現在有
 可執行的 `--staging-irreversible` 入口，走同一個 dispatch，只能呼叫本機記憶體
 fixture，目標須為 `staging://`。程序層逐類測 approve／decline／expiry／replay
-及停止，且拒絕非 fixture 目標。正式產品尚無送出／付款／刪除等 executor，這一格的
+及停止，且拒絕非 fixture 目標。期限計入提示期間真正流逝的單調時間，另有
+等待 31 秒的程序測試；腳本核准須明示測試旗標，收據標明輸入來源，同一資料夾
+連跑兩次仍可完整回放。正式產品尚無送出／付款／刪除等 executor，這一格的
 完整產品驗收仍待獨立審查判定，不得把 fixture 執行冒充第三方實際動作。
 可重跑收據：`cargo test -p sister-hands --features staging-approval --quiet` 的
 `all_five_classes_use_live_dispatch_and_replay_is_read_only` 和

@@ -269,7 +269,7 @@ impl Grant {
             self.url_targets.join("、")
         };
         let commitment = self.approved_commitment.as_ref().map_or_else(
-            || "（沒有，無人值守 URL 一律拒絕）".to_owned(),
+            || "（沒有，無人值守動作一律拒絕）".to_owned(),
             |approved| {
                 format!(
                     "#{}「{}」；{}",
@@ -312,29 +312,30 @@ impl Grant {
     ) -> Result<(StepApproval, GrantPermit), UnattendedAuthorizationFailure<E>> {
         self.covers(step, now_ms)
             .map_err(UnattendedAuthorizationFailure::Grant)?;
-        if let ActionSnapshot::OpenUrl { url } = step.action() {
-            if !self
+        if let ActionSnapshot::OpenUrl { url } = step.action()
+            && !self
                 .url_targets
                 .iter()
                 .any(|target| crate::target_policy::same_explicit_destination(target, url))
-            {
-                return Err(UnattendedAuthorizationFailure::Grant(
-                    GrantRejection::Target,
-                ));
-            }
-            if !self.approved_commitment.as_ref().is_some_and(|approved| {
-                step.commitment.as_ref().is_some_and(|source| {
-                    approved.id == source.id
-                        && approved.text == source.text
-                        && approved.action == step.action
-                        && approved.target_fact_id == source.target_fact_id
-                        && approved.agreed_evidence_json == source.agreed_evidence_json
-                })
-            }) {
-                return Err(UnattendedAuthorizationFailure::Grant(
-                    GrantRejection::Commitment,
-                ));
-            }
+        {
+            return Err(UnattendedAuthorizationFailure::Grant(
+                GrantRejection::Target,
+            ));
+        }
+        // No unattended action may inherit a broad task grant solely from
+        // model-produced screen text, regardless of its action kind.
+        if !self.approved_commitment.as_ref().is_some_and(|approved| {
+            step.commitment.as_ref().is_some_and(|source| {
+                approved.id == source.id
+                    && approved.text == source.text
+                    && approved.action == step.action
+                    && approved.target_fact_id == source.target_fact_id
+                    && approved.agreed_evidence_json == source.agreed_evidence_json
+            })
+        }) {
+            return Err(UnattendedAuthorizationFailure::Grant(
+                GrantRejection::Commitment,
+            ));
         }
         if let Some(why) =
             try_url_origin_gap(step.action(), ApprovedBy::StandingGrant, policy, origin)

@@ -74,10 +74,18 @@ fn grant() -> Grant {
         Expiry::after_issued(1_000, 300_000),
         StepLimit::new(2).unwrap(),
     )
+    .with_approved_commitment(ApprovedCommitment {
+        id: 7,
+        text: "整理報告".into(),
+        action: action(),
+        target_fact_id: None,
+        agreed_evidence_json: None,
+    })
 }
 
 fn covered_step() -> StepRequest {
     StepRequest::new(Task::new("整理報告"), App::new("Editor"), action())
+        .from_commitment(7, "整理報告")
 }
 
 fn url_grant() -> Grant {
@@ -120,6 +128,52 @@ fn authorize(
     grant.authorize_unattended(step, now_ms, UrlOpenPolicy::NotAskedYet, |_| {
         panic!("非 URL 或 grant 先拒絕的測試不該查網址來源")
     })
+}
+
+#[test]
+fn every_unattended_action_requires_the_selected_commitment() {
+    let step = covered_step();
+    let unbound = Grant::new(
+        Task::new("整理報告"),
+        AllowedApps::new([App::new("Editor")]),
+        AllowedActions::new([ActionKind::OpenFile]),
+        Expiry::after_issued(1_000, 300_000),
+        StepLimit::new(2).unwrap(),
+    );
+    assert_eq!(
+        authorize(&unbound, &step, 1_001)
+            .err()
+            .expect("unbound grant must refuse"),
+        UnattendedAuthorizationFailure::Grant(GrantRejection::Commitment)
+    );
+    assert!(authorize(&grant(), &step, 1_001).is_ok());
+
+    let focus = ActionSnapshot::FocusWindow {
+        title: "Report".into(),
+    };
+    let focus_step = StepRequest::new(Task::new("整理報告"), App::new("Editor"), focus.clone())
+        .from_commitment(8, "回到報告");
+    let unbound_focus = Grant::new(
+        Task::new("整理報告"),
+        AllowedApps::new([App::new("Editor")]),
+        AllowedActions::new([ActionKind::FocusWindow]),
+        Expiry::after_issued(1_000, 300_000),
+        StepLimit::new(2).unwrap(),
+    );
+    assert_eq!(
+        authorize(&unbound_focus, &focus_step, 1_001)
+            .err()
+            .expect("unbound focus grant must refuse"),
+        UnattendedAuthorizationFailure::Grant(GrantRejection::Commitment)
+    );
+    let selected_focus = unbound_focus.with_approved_commitment(ApprovedCommitment {
+        id: 8,
+        text: "回到報告".into(),
+        action: focus,
+        target_fact_id: None,
+        agreed_evidence_json: None,
+    });
+    assert!(authorize(&selected_focus, &focus_step, 1_001).is_ok());
 }
 
 #[test]
@@ -454,8 +508,16 @@ fn unsafe_targets_are_refused_before_both_public_execution_gateways_touch_the_ex
         ActionSnapshot::OpenFile {
             path: PathBuf::from("C:/work/evil.exe"),
         },
-    );
-    let (approval, permit) = authorize(&grant(), &unsafe_step, 1_001).unwrap();
+    )
+    .from_commitment(7, "整理報告");
+    let unsafe_grant = grant().with_approved_commitment(ApprovedCommitment {
+        id: 7,
+        text: "整理報告".into(),
+        action: unsafe_step.action().clone(),
+        target_fact_id: None,
+        agreed_evidence_json: None,
+    });
+    let (approval, permit) = authorize(&unsafe_grant, &unsafe_step, 1_001).unwrap();
     let unsafe_unattended =
         SuggestionButton::parse_json(r#"{"action":"open_file","path":"C:/work/evil.exe"}"#)
             .unwrap()
@@ -463,7 +525,7 @@ fn unsafe_targets_are_refused_before_both_public_execution_gateways_touch_the_ex
             .unwrap();
     let mut unattended_executor = CountingExecutor::default();
     let unattended = execute_approved_step(
-        &grant(),
+        &unsafe_grant,
         1_001,
         approval,
         &unsafe_step,

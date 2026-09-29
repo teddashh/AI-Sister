@@ -6,8 +6,21 @@ pub use crate::irreversible::{
     IrreversibleIntent, IrreversibleOutcome as StagingOutcome,
     IrreversibleRefusal as StagingRefusal, LIVE_APPROVAL_TTL_MS, LiveApprover, LiveDecision,
 };
+use fs4::FileExt;
 use serde::{Deserialize, Serialize};
-use std::{fs, io, path::Path};
+use std::{
+    fs,
+    io::{self, Read, Write},
+    path::Path,
+};
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalInputOrigin {
+    #[default]
+    ScriptedFixture,
+    HumanTerminal,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
@@ -21,19 +34,38 @@ pub enum StagingEvent {
     },
     Approved {
         intent: IrreversibleIntent,
+        #[serde(default)]
+        input_origin: ApprovalInputOrigin,
     },
     Executed {
         intent: IrreversibleIntent,
     },
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct StagingFixture {
     pub events: Vec<StagingEvent>,
     pub completed: Vec<IrreversibleIntent>,
+    input_origin: ApprovalInputOrigin,
+}
+
+impl Default for StagingFixture {
+    fn default() -> Self {
+        Self {
+            events: Vec::new(),
+            completed: Vec::new(),
+            input_origin: ApprovalInputOrigin::ScriptedFixture,
+        }
+    }
 }
 
 impl StagingFixture {
+    pub fn with_input_origin(input_origin: ApprovalInputOrigin) -> Self {
+        Self {
+            input_origin,
+            ..Self::default()
+        }
+    }
     /// 每次都走正式編譯的共用 dispatch；staging sink 只記錄本機結果。
     pub fn dispatch(
         &mut self,
@@ -46,20 +78,45 @@ impl StagingFixture {
     }
 
     pub fn write_jsonl(&self, path: &Path) -> io::Result<()> {
+        fs::write(path, self.jsonl()?)
+    }
+
+    /// The executable staging route keeps every run in the same replayable log.
+    /// A file lock prevents concurrent staging processes from interleaving rows.
+    pub fn append_jsonl(&self, path: &Path) -> io::Result<()> {
+        let mut file = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .read(true)
+            .open(path)?;
+        FileExt::lock(&file)?;
+        let result = file
+            .write_all(self.jsonl()?.as_bytes())
+            .and_then(|_| file.sync_data());
+        FileExt::unlock(&file)?;
+        result
+    }
+
+    /// 回放只是讀證據；它不含核准票，也不呼叫 dispatch 或 executor。
+    pub fn replay_jsonl(path: &Path) -> io::Result<Vec<StagingEvent>> {
+        let mut file = fs::File::open(path)?;
+        FileExt::lock_shared(&file)?;
+        let mut raw = String::new();
+        let result = file.read_to_string(&mut raw);
+        FileExt::unlock(&file)?;
+        result?;
+        raw.lines()
+            .map(|line| serde_json::from_str(line).map_err(io::Error::other))
+            .collect()
+    }
+
+    fn jsonl(&self) -> io::Result<String> {
         let mut out = String::new();
         for event in &self.events {
             out.push_str(&serde_json::to_string(event).map_err(io::Error::other)?);
             out.push('\n');
         }
-        fs::write(path, out)
-    }
-
-    /// 回放只是讀證據；它不含核准票，也不呼叫 dispatch 或 executor。
-    pub fn replay_jsonl(path: &Path) -> io::Result<Vec<StagingEvent>> {
-        fs::read_to_string(path)?
-            .lines()
-            .map(|line| serde_json::from_str(line).map_err(io::Error::other))
-            .collect()
+        Ok(out)
     }
 }
 
@@ -75,6 +132,7 @@ impl IrreversibleSink for StagingFixture {
     fn approved(&mut self, intent: &IrreversibleIntent) {
         self.events.push(StagingEvent::Approved {
             intent: intent.clone(),
+            input_origin: self.input_origin,
         });
     }
     fn execute(&mut self, intent: IrreversibleIntent) {

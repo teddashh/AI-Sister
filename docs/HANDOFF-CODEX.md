@@ -1,5 +1,22 @@
 # HANDOFF — 交給下一位 agent（Codex）
 
+**2026-09-29 `cc0a889` 獨立審查後續修正：**該提交的重型 repo 收據 53/53，
+但審查發現 staging CLI 沒計入提示期間真實時間、腳本核准未標來源、同資料夾第二輪
+覆蓋第一輪收據；URL grant 的儲存清單也曾列出缺目標 fact／雙 pass 畫面的卡。
+修正後 staging CLI 以單調時間計期，真等 31 秒的程序測試證明過期；腳本輸入必須
+明示測試旗標，收據記 `scripted_fixture`／`human_terminal`，多輪以鎖定附加方式
+留下完整回放。保存 URL grant 前先檢查政策、grant 範圍、fact、雙 pass 畫面、
+可信位址列與完整網址紀錄，缺任一項就不說已保存。這份增量仍待完整 gate 和
+新的獨立審查，不能把前一顆提交的 53/53 搬到增量上。Ted 的 10 項真任務日誌
+仍未提供；第三方不可逆動作沒有執行。
+
+**同輪擴及全部無人值守動作：**`open-url`、`open-file`、`focus-window` 都在共同
+`authorize_unattended` 入口核對當場選定的承諾與具體動作。`--save-grant` 對三種
+動作都列出符合授權範圍的承諾，須選編號並答「好」才存；沒有候選不存。
+定點測試驗無綁定的檔案／視窗 grant 拒絕、有綁定的放行，並驗 CLI 的檔案 grant
+拒絕保存／選定保存與讀回核對。正式 Phase 6 三條退場條件仍待重型 gate、新獨立
+審查、service verification 與 Ted 的 10 筆真任務收據；不可提前打勾。
+
 **2026-09-29 Phase 6 審查退件後修正候選：**獨立審查指出上輪 20×9 夾具替 19 條
 注入文字附加網址，測到的是同張 OCR 重複網址拒絕；純指令仍能選可信位址列並借同址
 grant。現在無人值守 URL grant 必須另綁人當場選定的承諾 ID、原文、具體動作、
@@ -10,8 +27,8 @@ grant。現在無人值守 URL grant 必須另綁人當場選定的承諾 ID、�
 乾淨且綁定的控制組仍執行一次。staging-only `sister` 入口現在呼叫共用不可逆
 dispatch，五類權限從程序層測 approve／decline／expiry／replay，僅記本機 fixture。
 本輪 `cargo test --workspace`、workspace Clippy、staging feature 的 CLI 與 hands
-測試／Clippy、Windows 交叉編譯／Clippy、no-network 與 fmt 均通過。這些仍是候選，
-待重型 CI 腳本、service verification 與新的獨立審查；
+測試／Clippy、Windows 交叉編譯／Clippy、no-network 與 fmt 均通過。該候選後續
+取得重型 CI 腳本 53/53，獨立審查另指出上段三項缺口；service verification 仍待完成。
 正式產品沒有第三方不可逆 executor，Ted 的 10 項真 Windows／staging 任務日誌仍
 須由 Ted 提供。Phase 6 三格暫不勾。
 
