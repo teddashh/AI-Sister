@@ -162,6 +162,20 @@ pub struct Grant {
     step_limit: StepLimit,
     #[serde(default)]
     url_targets: Vec<String>,
+    #[serde(default)]
+    approved_commitment: Option<ApprovedCommitment>,
+}
+
+/// 由人選定並看過的承諾與具體動作。畫面與模型不能只靠相同網址借用這份意圖。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApprovedCommitment {
+    pub id: i64,
+    pub text: String,
+    pub action: ActionSnapshot,
+    #[serde(default)]
+    pub target_fact_id: Option<i64>,
+    #[serde(default)]
+    pub agreed_evidence_json: Option<String>,
 }
 impl Grant {
     pub fn new(
@@ -178,6 +192,7 @@ impl Grant {
             expiry,
             step_limit,
             url_targets: Vec::new(),
+            approved_commitment: None,
         }
     }
     /// 無人值守 URL 的 exact 去處清單。舊授權書沒有此欄，預設空集合並拒絕
@@ -195,6 +210,10 @@ impl Grant {
         }
         self.url_targets = targets;
         Ok(self)
+    }
+    pub fn with_approved_commitment(mut self, approved: ApprovedCommitment) -> Self {
+        self.approved_commitment = Some(approved);
+        self
     }
     pub const fn step_limit(&self) -> StepLimit {
         self.step_limit
@@ -249,8 +268,19 @@ impl Grant {
         } else {
             self.url_targets.join("、")
         };
+        let commitment = self.approved_commitment.as_ref().map_or_else(
+            || "（沒有，無人值守 URL 一律拒絕）".to_owned(),
+            |approved| {
+                format!(
+                    "#{}「{}」；{}",
+                    approved.id,
+                    approved.text,
+                    approved.action.describe()
+                )
+            },
+        );
         format!(
-            "任務「{}」；app：{apps}；動作：{actions}；網址目標：{url_targets}；整張票在發出後 {} 毫秒內有效；每一輪各自最多 {} 步",
+            "任務「{}」；app：{apps}；動作：{actions}；網址目標：{url_targets}；親手核准的承諾：{commitment}；整張票在發出後 {} 毫秒內有效；每一輪各自最多 {} 步",
             self.task.0, self.expiry.valid_for_ms, self.step_limit.0
         )
     }
@@ -282,15 +312,29 @@ impl Grant {
     ) -> Result<(StepApproval, GrantPermit), UnattendedAuthorizationFailure<E>> {
         self.covers(step, now_ms)
             .map_err(UnattendedAuthorizationFailure::Grant)?;
-        if let ActionSnapshot::OpenUrl { url } = step.action()
-            && !self
+        if let ActionSnapshot::OpenUrl { url } = step.action() {
+            if !self
                 .url_targets
                 .iter()
                 .any(|target| crate::target_policy::same_explicit_destination(target, url))
-        {
-            return Err(UnattendedAuthorizationFailure::Grant(
-                GrantRejection::Target,
-            ));
+            {
+                return Err(UnattendedAuthorizationFailure::Grant(
+                    GrantRejection::Target,
+                ));
+            }
+            if !self.approved_commitment.as_ref().is_some_and(|approved| {
+                step.commitment.as_ref().is_some_and(|source| {
+                    approved.id == source.id
+                        && approved.text == source.text
+                        && approved.action == step.action
+                        && approved.target_fact_id == source.target_fact_id
+                        && approved.agreed_evidence_json == source.agreed_evidence_json
+                })
+            }) {
+                return Err(UnattendedAuthorizationFailure::Grant(
+                    GrantRejection::Commitment,
+                ));
+            }
         }
         if let Some(why) =
             try_url_origin_gap(step.action(), ApprovedBy::StandingGrant, policy, origin)
@@ -323,6 +367,7 @@ pub enum GrantRejection {
     Apps,
     Actions,
     Target,
+    Commitment,
     ExpiryElapsed,
     ExpiryClockWentBack,
 }
@@ -333,6 +378,7 @@ impl GrantRejection {
             Self::Apps => "apps 維度拒絕：這個 app 不在授權內。",
             Self::Actions => "actions 維度拒絕：這類動作不在授權內。",
             Self::Target => "網址目標維度拒絕：這條網址不在保存的授權書裡。",
+            Self::Commitment => "承諾維度拒絕：這一步不是當時親手核准的承諾與動作。",
             Self::ExpiryElapsed => "expiry 維度拒絕：授權已過期。",
             Self::ExpiryClockWentBack => "expiry 維度拒絕：時鐘倒退，期限無法驗證。",
         }
@@ -344,10 +390,51 @@ pub struct StepRequest {
     task: Task,
     app: App,
     action: ActionSnapshot,
+    #[serde(default)]
+    commitment: Option<CommitmentIdentity>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct CommitmentIdentity {
+    id: i64,
+    text: String,
+    #[serde(default)]
+    target_fact_id: Option<i64>,
+    #[serde(default)]
+    agreed_evidence_json: Option<String>,
 }
 impl StepRequest {
     pub fn new(task: Task, app: App, action: ActionSnapshot) -> Self {
-        Self { task, app, action }
+        Self {
+            task,
+            app,
+            action,
+            commitment: None,
+        }
+    }
+    pub fn from_commitment(mut self, id: i64, text: impl Into<String>) -> Self {
+        self.commitment = Some(CommitmentIdentity {
+            id,
+            text: text.into(),
+            target_fact_id: None,
+            agreed_evidence_json: None,
+        });
+        self
+    }
+    pub fn from_reviewed_commitment(
+        mut self,
+        id: i64,
+        text: impl Into<String>,
+        target_fact_id: Option<i64>,
+        agreed_evidence_json: Option<String>,
+    ) -> Self {
+        self.commitment = Some(CommitmentIdentity {
+            id,
+            text: text.into(),
+            target_fact_id,
+            agreed_evidence_json,
+        });
+        self
     }
     pub fn action(&self) -> &ActionSnapshot {
         &self.action

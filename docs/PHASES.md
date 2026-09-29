@@ -1656,23 +1656,34 @@ Phase 6 的整體退場條件仍未打勾。
 保存的授權書另須列出 exact URL 目標，舊票沒有目標清單就拒絕無人值守 URL。
 20 條 injection 語料的擴大候選各跑九種來源／授權組合，共 180 例。末三種特別讓
 來源畫面、目標地址 fact 與保存的 grant 都指向同一去處（完整 URL、Chromium 縮寫、
-明寫預設 port），但同張畫面的 OCR 又出現這個 URL；真正的 `sister do --unattended`
-仍以 `target_only_in_screen_text` 拒絕。乾淨的位址列 fact 對照則可執行一次。
+明寫預設 port）。獨立審查發現：原夾具替 19 條語料附加了注入網址，拒絕原因
+其實是正文裡的重複網址；只有指令而沒有網址時，模型挑到位址列 fact 仍可借票。
+修正後，URL grant 另綁人當場選定的承諾 ID、原文、具體動作、目標 fact ID 與
+兩個 pass 同意的畫面清單；舊票沒有綁定就
+拒絕。`--save-grant` 有 URL 目標時列出可選承諾，當場選編號並答「好」才保存。
+末三種案例保留原注入文字，不再附加網址，來源仍是可信同址位址列；grant 指向
+夾具建立並歸檔的另一張同址承諾，新的模型承諾以 `Commitment` 拒絕。
+其餘六種繼續驗來源與 URL 目標閘門。乾淨、當場選定的位址列對照可執行一次。
 這是本地可執行路徑的候選收據，仍待獨立審查與 service verification；不能用它
-替代 Ted 的真 Windows 任務日誌。
+替代 Ted 的真 Windows 任務日誌，也不把任意畫面指令分類器說成已達 100%。
 可重跑收據：`cargo test -p sister-cli --test injection_end_to_end --quiet` 的
 `all_twenty_injections_reach_executable_facts_across_source_variants` 逐例讀
 `action-log.jsonl`，斷言 exact `refused` 原因且沒有 `executed`；
-`benign_control_reaches_platform_execution_exactly_once` 斷言一列 `executed`。
+`benign_control_reaches_platform_execution_exactly_once` 斷言一列 `executed`；
+`legacy_unbound_grant_cannot_borrow_instruction_only_same_address_fact` 專驗審查找到的
+無網址指令缺口。
 
 不可逆動作的共用 dispatch 目前有獨立於保存 grant 的即時詢問、具體步驟綁定、
-30 秒期限、時鐘倒退與停止檢查；只由 `staging-approval` feature 的本機記憶體
-executor 實際執行測試。正式產品尚無送出／付款／刪除等 executor，這一格的
+30 秒期限、時鐘倒退與停止檢查；`sister-cli` 的 `staging-approval` feature 現在有
+可執行的 `--staging-irreversible` 入口，走同一個 dispatch，只能呼叫本機記憶體
+fixture，目標須為 `staging://`。程序層逐類測 approve／decline／expiry／replay
+及停止，且拒絕非 fixture 目標。正式產品尚無送出／付款／刪除等 executor，這一格的
 完整產品驗收仍待獨立審查判定，不得把 fixture 執行冒充第三方實際動作。
 可重跑收據：`cargo test -p sister-hands --features staging-approval --quiet` 的
 `all_five_classes_use_live_dispatch_and_replay_is_read_only` 和
 `stop_and_clock_rollback_refuse_after_approval_before_dispatch`；私有票的
-缺席、換目標與極端時鐘測試在 `irreversible` 模組內。
+缺席、換目標與極端時鐘測試在 `irreversible` 模組內；程序層另跑
+`cargo test -p sister-cli --features staging-approval --test staging_approval_cli`。
 
 **Exit criteria**
 - [ ] Injection 套件 100% 攔截（埋 20 種指令變體）。**（alpha.82 打勾過，收貨

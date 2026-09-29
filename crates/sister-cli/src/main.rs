@@ -11,6 +11,8 @@ mod fmt;
 mod macos_ci;
 mod ops;
 mod provider_bridge;
+#[cfg(feature = "staging-approval")]
+mod staging_approval_cli;
 
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
@@ -668,6 +670,10 @@ fn main() -> Result<()> {
     // config／data dir、不建立產品 log。Windows 上面的 lifecycle guard 仍然
     // 活過 provider 完整呼叫，installer 不能和 bridge 同時換掉 executable。
     let early_args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+    #[cfg(feature = "staging-approval")]
+    if let Some(result) = staging_approval_cli::run_early(&early_args) {
+        return result;
+    }
     if let Some(request) = provider_bridge_request(&early_args) {
         let (provider, executable) = request.map_err(anyhow::Error::msg)?;
         return provider_bridge::run(provider, &executable);

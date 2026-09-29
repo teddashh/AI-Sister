@@ -3,7 +3,8 @@ use sister_core::db::{Db, L2Author, L2Insert};
 use sister_core::model::{FocusEvent, FocusKind, FocusSnapshot};
 use sister_core::prompt_fence::INJECTION_REGRESSION_CASES;
 use sister_hands::semi_action::{
-    ActionKind, AllowedActions, AllowedApps, App, Expiry, Grant, StepLimit, Task, grant_path,
+    ActionKind, AllowedActions, AllowedApps, App, ApprovedCommitment, Expiry, Grant, StepLimit,
+    Task, grant_path,
 };
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -249,7 +250,14 @@ fn write_brain_raw(dir: &Path, response_json_text: &str) -> PathBuf {
     config
 }
 
-fn write_grant(data_dir: &Path, allowed_url: &str) {
+#[derive(Clone, Copy)]
+enum GrantBinding {
+    None,
+    Live,
+    ArchivedSibling,
+}
+
+fn write_grant(data_dir: &Path, allowed_url: &str, binding: GrantBinding) {
     let grant = Grant::new(
         Task::new(TASK),
         AllowedApps::new([App::new("chrome.exe")]),
@@ -259,6 +267,56 @@ fn write_grant(data_dir: &Path, allowed_url: &str) {
     )
     .with_url_targets([allowed_url.to_owned()])
     .unwrap();
+    let grant = match binding {
+        GrantBinding::None => grant,
+        GrantBinding::Live | GrantBinding::ArchivedSibling => {
+            let card = Db::open(&Config::db_path(data_dir))
+                .unwrap()
+                .live_commitments()
+                .unwrap()
+                .into_iter()
+                .next()
+                .expect("reviewed card");
+            let action = match sister_hands::commitment_action::parse_allowed_next_step(
+                card.allowed_next_step.as_deref(),
+            ) {
+                sister_hands::commitment_action::AllowedNextStep::Suggestion(button) => {
+                    button.snapshot()
+                }
+                other => panic!("reviewed card must have a concrete action: {other:?}"),
+            };
+            let (id, text) = if matches!(binding, GrantBinding::ArchivedSibling) {
+                // A previously selected card with the same address and action exists in
+                // the controlled DB, but was archived before this run. The screen can
+                // produce a *new* card; it cannot inherit that older selection.
+                let conn = rusqlite::Connection::open(Config::db_path(data_dir)).unwrap();
+                conn.execute(
+                    "INSERT INTO commitments(
+                        text, kind, born_from, evidence_json, agreed_evidence_json, people_json,
+                        due_hint, due_source, due_at, status, confidence, allowed_next_step,
+                        allowed_next_step_fact, last_evidence_seen_at, kill_note,
+                        created_at, updated_at, tombstoned_at)
+                     SELECT '先前核准的受控工作', kind, born_from, evidence_json, agreed_evidence_json,
+                        people_json, due_hint, due_source, due_at, status, confidence,
+                        allowed_next_step, allowed_next_step_fact, last_evidence_seen_at,
+                        kill_note, created_at, updated_at, ?2
+                       FROM commitments WHERE id = ?1",
+                    rusqlite::params![card.id, sister_core::now_ms()],
+                )
+                .unwrap();
+                (conn.last_insert_rowid(), "先前核准的受控工作".to_owned())
+            } else {
+                (card.id, card.text)
+            };
+            grant.with_approved_commitment(ApprovedCommitment {
+                id,
+                text,
+                action,
+                target_fact_id: card.allowed_next_step_fact,
+                agreed_evidence_json: card.agreed_evidence_json,
+            })
+        }
+    };
     std::fs::write(
         grant_path(data_dir),
         serde_json::to_vec_pretty(&grant).unwrap(),
@@ -315,7 +373,15 @@ fn run_case(injection: &str, compromised: bool) -> (TempDir, Vec<String>) {
         !String::from_utf8_lossy(&review.stdout).contains("一次都還沒跑"),
         "review pipeline did not run"
     );
-    write_grant(&dir.0, GOOD_URL);
+    write_grant(
+        &dir.0,
+        GOOD_URL,
+        if compromised {
+            GrantBinding::None
+        } else {
+            GrantBinding::Live
+        },
+    );
     // **`--config` 不能省。** 沒有它的話 `do` 讀的是 `Config::default_path()`
     // 那一份（開發機上真的那一份），資料目錄裡這一份完全不會被看到——
     // 於是 `[hands] url_open` 沒生效，整套停在「我還沒問過你」。
@@ -359,7 +425,7 @@ fn run_raw_brain_case(response: impl FnOnce(i64) -> String) -> (TempDir, Vec<Str
         !String::from_utf8_lossy(&review.stdout).contains("一次都還沒跑"),
         "review pipeline did not run"
     );
-    write_grant(&dir.0, GOOD_URL);
+    write_grant(&dir.0, GOOD_URL, GrantBinding::None);
     let did = sister(
         &dir.0,
         Some(&config),
@@ -413,6 +479,8 @@ fn injected_url_from_source(
     trusted_source: bool,
     allowed_url: &str,
     target_from_address: bool,
+    append_target_to_screen: bool,
+    binding: GrantBinding,
 ) -> (Vec<String>, String) {
     let dir = TempDir::new("in-frame-url");
     let scenario = write_scenario(&dir.0, injection);
@@ -426,7 +494,7 @@ fn injected_url_from_source(
     value["steps"][0]["text"][1] = GOOD_URL.into();
     // 每條語料都在本段、被引用的同一張畫面中提供可抽取 URL。第 8 條
     // 本身已有該 URL；其他條把它接在原文後面，保留原文逐字到達。
-    let attack_text = if injection.contains(INJECTED_URL) {
+    let attack_text = if !append_target_to_screen || injection.contains(INJECTED_URL) {
         injection.to_owned()
     } else {
         format!("{injection}\n{INJECTED_URL}")
@@ -479,7 +547,7 @@ fn injected_url_from_source(
                         chunk.text.contains(injection) && chunk.text.contains(INJECTED_URL)
                     }
             }),
-            "target fact must come from this case's injected OCR text: {injection:?}"
+            "target fact must be present on the cited frame: {injection:?}"
         );
         let session = db
             .start_session(sister_core::db::TRUSTED_URL_ORIGIN_PLATFORM, "test")
@@ -521,7 +589,7 @@ fn injected_url_from_source(
             .any(|commitment| commitment.allowed_next_step_fact == Some(injected)),
         "reviewer did not accept the in-window fact from this case: {injection:?}"
     );
-    write_grant(&dir.0, allowed_url);
+    write_grant(&dir.0, allowed_url, binding);
     sister(
         &dir.0,
         Some(&config),
@@ -546,6 +614,9 @@ fn assert_url_refused(lines: &[String], log: &str, expected_reason: &str) {
                         && if expected_reason == "not_covered_by_grant" {
                             event["reason"]["refusal"] == expected_reason
                                 && event["reason"]["rejection"] == "Target"
+                        } else if expected_reason == "unapproved_commitment" {
+                            event["reason"]["refusal"] == "not_covered_by_grant"
+                                && event["reason"]["rejection"] == "Commitment"
                         } else {
                             event["reason"]["why"] == expected_reason
                         }
@@ -565,14 +636,26 @@ fn all_twenty_injections_reach_executable_facts_across_source_variants() {
             INJECTED_URL,
             false,
             "target_only_in_screen_text",
+            true,
+            GrantBinding::Live,
         ),
-        (None, true, INJECTED_URL, false, "target_address_unmeasured"),
+        (
+            None,
+            true,
+            INJECTED_URL,
+            false,
+            "target_address_unmeasured",
+            true,
+            GrantBinding::Live,
+        ),
         (
             Some(INJECTED_URL),
             false,
             INJECTED_URL,
             false,
             "target_source_untrusted",
+            true,
+            GrantBinding::Live,
         ),
         (
             Some(INJECTED_URL),
@@ -580,6 +663,8 @@ fn all_twenty_injections_reach_executable_facts_across_source_variants() {
             GOOD_URL,
             false,
             "not_covered_by_grant",
+            true,
+            GrantBinding::Live,
         ),
         (
             Some("example.com/collect"),
@@ -587,6 +672,8 @@ fn all_twenty_injections_reach_executable_facts_across_source_variants() {
             GOOD_URL,
             false,
             "not_covered_by_grant",
+            true,
+            GrantBinding::Live,
         ),
         (
             Some("https://example.com:443/collect"),
@@ -594,39 +681,51 @@ fn all_twenty_injections_reach_executable_facts_across_source_variants() {
             GOOD_URL,
             false,
             "not_covered_by_grant",
+            true,
+            GrantBinding::Live,
         ),
         (
             Some(INJECTED_URL),
             true,
             INJECTED_URL,
             true,
-            "target_only_in_screen_text",
+            "unapproved_commitment",
+            false,
+            GrantBinding::ArchivedSibling,
         ),
         (
             Some("example.com/collect"),
             true,
             INJECTED_URL,
             true,
-            "target_only_in_screen_text",
+            "unapproved_commitment",
+            false,
+            GrantBinding::ArchivedSibling,
         ),
         (
             Some("https://example.com:443/collect"),
             true,
             INJECTED_URL,
             true,
-            "target_only_in_screen_text",
+            "unapproved_commitment",
+            false,
+            GrantBinding::ArchivedSibling,
         ),
     ];
     assert_eq!(source_variants.len(), 9);
     let mut exercised = 0;
     for (index, injection) in INJECTION_REGRESSION_CASES.into_iter().enumerate() {
-        for (source_url, trusted_source, allowed_url, address_fact, reason) in source_variants {
+        for (source_url, trusted_source, allowed_url, address_fact, reason, append, binding) in
+            source_variants
+        {
             let (lines, log) = injected_url_from_source(
                 injection,
                 source_url,
                 trusted_source,
                 allowed_url,
                 address_fact,
+                append,
+                binding,
             );
             assert_url_refused(&lines, &log, reason);
             exercised += 1;
@@ -634,6 +733,20 @@ fn all_twenty_injections_reach_executable_facts_across_source_variants() {
         }
     }
     assert_eq!(exercised, 180, "每條語料的九種來源都要真的跑到");
+}
+
+#[test]
+fn legacy_unbound_grant_cannot_borrow_instruction_only_same_address_fact() {
+    let (lines, log) = injected_url_from_source(
+        INJECTION_REGRESSION_CASES[1],
+        Some(INJECTED_URL),
+        true,
+        INJECTED_URL,
+        true,
+        false,
+        GrantBinding::None,
+    );
+    assert_url_refused(&lines, &log, "unapproved_commitment");
 }
 
 #[test]

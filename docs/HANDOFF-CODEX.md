@@ -1,6 +1,21 @@
 # HANDOFF — 交給下一位 agent（Codex）
 
-**2026-09-29 Phase 6 自足部分候選：**`insert_frame` 現在另存同張位址列衍生的 URL
+**2026-09-29 Phase 6 審查退件後修正候選：**獨立審查指出上輪 20×9 夾具替 19 條
+注入文字附加網址，測到的是同張 OCR 重複網址拒絕；純指令仍能選可信位址列並借同址
+grant。現在無人值守 URL grant 必須另綁人當場選定的承諾 ID、原文、具體動作、
+目標 fact ID 與兩個 pass 同意的畫面清單；
+`--save-grant` 有 URL 目標時會列出候選、讀編號及當場「好」，舊的無綁定 grant
+不能開 URL。20×9 端到端後三種保留原注入文字、可信同址來源與涵蓋網址的 grant，
+但 grant 綁夾具建立的另一張已歸檔承諾；真正 `sister do --unattended` 因承諾不符拒絕。
+乾淨且綁定的控制組仍執行一次。staging-only `sister` 入口現在呼叫共用不可逆
+dispatch，五類權限從程序層測 approve／decline／expiry／replay，僅記本機 fixture。
+本輪 `cargo test --workspace`、workspace Clippy、staging feature 的 CLI 與 hands
+測試／Clippy、Windows 交叉編譯／Clippy、no-network 與 fmt 均通過。這些仍是候選，
+待重型 CI 腳本、service verification 與新的獨立審查；
+正式產品沒有第三方不可逆 executor，Ted 的 10 項真 Windows／staging 任務日誌仍
+須由 Ted 提供。Phase 6 三格暫不勾。
+
+**2026-09-29 已被獨立審查退件的前一候選：**`insert_frame` 現在另存同張位址列衍生的 URL
 fact；無人值守不再接受 OCR 網址 fact 借同址票，位址列 fact 若被同張畫面的
 OCR／輔助文字重複提供同 URL 也拒絕。20 條 injection 語料 × 九種來源／授權
 組合（180 例）走 `sister do --unattended` 與 action log；其中三種同址、可信
@@ -10,7 +25,8 @@ OCR／輔助文字重複提供同 URL 也拒絕。20 條 injection 語料 × 九
 本機 staging fixture，五類權限均測 approve／decline／expiry／JSONL replay。
 正式產品仍沒有第三方不可逆 executor。workspace fmt／Clippy／test、staging feature
 test／Clippy、Windows 交叉編譯／Clippy、no-network gate 均通過；仍待 service
-verification 與獨立審查。Ted 的 10 項真實 Windows／staging 任務日誌仍未提供，
+verification 與獨立審查；後續審查指出純指令變體會繞過重複網址條件，見上段修正。
+Ted 的 10 項真實 Windows／staging 任務日誌仍未提供，
 絕不可用 fake executor 演練冒充。Phase 6 checkbox 目前保持未勾。
 
 **2026-09-28 Phase 6 擴大工作候選（Ted 已核准完整範圍）：**URL 授權改用 `url`

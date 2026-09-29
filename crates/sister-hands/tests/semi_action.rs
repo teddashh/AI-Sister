@@ -90,6 +90,15 @@ fn url_grant() -> Grant {
     )
     .with_url_targets(["https://example.com/help".to_owned()])
     .unwrap()
+    .with_approved_commitment(ApprovedCommitment {
+        id: 7,
+        text: "開說明".into(),
+        action: ActionSnapshot::OpenUrl {
+            url: "https://example.com/help".into(),
+        },
+        target_fact_id: None,
+        agreed_evidence_json: None,
+    })
 }
 
 fn covered_url_step() -> StepRequest {
@@ -100,6 +109,7 @@ fn covered_url_step() -> StepRequest {
             url: "https://example.com/help".into(),
         },
     )
+    .from_commitment(7, "開說明")
 }
 
 fn authorize(
@@ -239,6 +249,54 @@ fn only_a_covered_url_with_origin_evidence_can_mint_and_execute() {
     let outcome = execute_approved_step(&grant, 1_001, approval, &step, &mut executor, &suggestion);
     assert!(matches!(outcome, Outcome::Done { .. }), "{outcome:?}");
     assert_eq!(executor.calls, 1);
+}
+
+#[test]
+fn a_changed_reviewed_fact_or_frame_cannot_borrow_the_same_action() {
+    let grant = url_grant().with_approved_commitment(ApprovedCommitment {
+        id: 7,
+        text: "開說明".into(),
+        action: ActionSnapshot::OpenUrl {
+            url: "https://example.com/help".into(),
+        },
+        target_fact_id: Some(10),
+        agreed_evidence_json: Some("[\"frame:10\"]".into()),
+    });
+    for (fact, evidence) in [
+        (Some(11), Some("[\"frame:10\"]".into())),
+        (Some(10), Some("[\"frame:11\"]".into())),
+    ] {
+        let step = covered_url_step().from_reviewed_commitment(7, "開說明", fact, evidence);
+        assert!(matches!(
+            grant.authorize_unattended(
+                &step,
+                1_001,
+                UrlOpenPolicy::Answered(UrlOpenAnswer::WhenYouCanNameTheOrigin),
+                |_| -> Result<UrlOrigin, Infallible> {
+                    panic!("changed review must be refused before origin lookup")
+                },
+            ),
+            Err(UnattendedAuthorizationFailure::Grant(
+                GrantRejection::Commitment
+            ))
+        ));
+    }
+    let exact = covered_url_step().from_reviewed_commitment(
+        7,
+        "開說明",
+        Some(10),
+        Some("[\"frame:10\"]".into()),
+    );
+    assert!(
+        grant
+            .authorize_unattended(
+                &exact,
+                1_001,
+                UrlOpenPolicy::Answered(UrlOpenAnswer::WhenYouCanNameTheOrigin),
+                |_| Ok::<_, Infallible>(UrlOrigin::InHerRecord),
+            )
+            .is_ok()
+    );
 }
 
 #[test]
@@ -512,14 +570,24 @@ fn a_standing_grant_can_take_up_and_finish_a_covered_step() {
 fn a_same_site_buried_path_cannot_mint_a_permit_on_an_unexpired_grant() {
     let grant = url_grant()
         .with_url_targets(["https://example.com/collect".to_owned()])
-        .unwrap();
+        .unwrap()
+        .with_approved_commitment(ApprovedCommitment {
+            id: 7,
+            text: "開說明".into(),
+            action: ActionSnapshot::OpenUrl {
+                url: "https://example.com/collect".into(),
+            },
+            target_fact_id: None,
+            agreed_evidence_json: None,
+        });
     let buried = StepRequest::new(
         Task::new("開說明"),
         App::new("Browser"),
         ActionSnapshot::OpenUrl {
             url: "https://example.com/collect".into(),
         },
-    );
+    )
+    .from_commitment(7, "開說明");
     let failure = grant
         .authorize_unattended(
             &buried,
@@ -550,14 +618,24 @@ fn a_same_site_buried_path_cannot_mint_a_permit_on_an_unexpired_grant() {
 fn a_different_query_on_the_recorded_path_cannot_mint_or_execute_on_a_standing_grant() {
     let grant = url_grant()
         .with_url_targets(["https://example.com/help?next=https://evil.example/collect".to_owned()])
-        .unwrap();
+        .unwrap()
+        .with_approved_commitment(ApprovedCommitment {
+            id: 7,
+            text: "開說明".into(),
+            action: ActionSnapshot::OpenUrl {
+                url: "https://example.com/help?next=https://evil.example/collect".into(),
+            },
+            target_fact_id: None,
+            agreed_evidence_json: None,
+        });
     let redirect = StepRequest::new(
         Task::new("開說明"),
         App::new("Browser"),
         ActionSnapshot::OpenUrl {
             url: "https://example.com/help?next=https://evil.example/collect".into(),
         },
-    );
+    )
+    .from_commitment(7, "開說明");
     let failure = grant
         .authorize_unattended(
             &redirect,
