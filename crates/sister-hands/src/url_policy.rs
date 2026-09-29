@@ -158,13 +158,13 @@ impl UrlOpenPolicy {
 /// `example.com/help` 過關。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UrlOrigin {
-    /// 這個站的這一頁、這一組 query／fragment 在她自己的紀錄裡出現過。
+    /// 這個站的 scheme、有效 port、頁面與 query／fragment 在她自己的紀錄裡出現過。
     InHerRecord,
     /// 查過可採信的錄製來源，其中沒有這個站。
     NotInHerRecord,
     /// 這個站出現過，但紀錄裡沒有這一條路徑。
     SameSiteDifferentPath,
-    /// 路徑對得上，但 query／fragment 不是紀錄裡那一條去處。
+    /// 路徑對得上，但 scheme、有效 port 或 query／fragment 不是紀錄裡那一條去處。
     SamePathDifferentDestination,
     /// 目標從同一張畫面的 OCR 文字抽出，但當時位址列是另一個網址。
     TargetOnlyInScreenText,
@@ -465,8 +465,10 @@ mod tests {
             said[1]
         );
         assert!(
-            said[2].contains("query") || said[2].contains("fragment"),
-            "同 path 不同參數那一句要說得出不是換頁：{}",
+            ["協定", "連接埠", "查詢", "錨點"]
+                .iter()
+                .all(|word| said[2].contains(word)),
+            "同 path 不同去處那一句要說得出可能差在哪：{}",
             said[2]
         );
         assert!(said[5].contains("另一個網址"), "位址列不同：{}", said[5]);

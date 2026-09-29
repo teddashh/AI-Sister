@@ -413,13 +413,56 @@ pub fn same_query_and_fragment(recorded: &str, target: &str) -> bool {
     }
 }
 
-/// 無人值守 standing grant 的去處：同一站、同一條 path、同一組 query／fragment。
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum WebScheme {
+    Http,
+    Https,
+}
+
+impl WebScheme {
+    fn default_port(self) -> u16 {
+        match self {
+            Self::Http => 80,
+            Self::Https => 443,
+        }
+    }
+}
+
+/// 位址列省略 scheme 是 Chromium 的 HTTPS 顯示形式，只在來源比對時補成 HTTPS。
+/// port 則以有效值比：省略值與該 scheme 的預設 port 等價。
+fn scheme_and_effective_port(url: &str) -> Option<(WebScheme, u16)> {
+    host_of(url)?;
+    let value = url.trim();
+    let (scheme, rest) = match value.split_once("://") {
+        Some((scheme, rest)) if scheme.eq_ignore_ascii_case("http") => (WebScheme::Http, rest),
+        Some((scheme, rest)) if scheme.eq_ignore_ascii_case("https") => (WebScheme::Https, rest),
+        Some(_) => return None,
+        None => (WebScheme::Https, value),
+    };
+    let authority = rest.split(['/', '?', '#']).next()?;
+    let host_and_port = authority.rsplit('@').next()?;
+    let explicit_port = if host_and_port.starts_with('[') {
+        host_and_port.split_once(']')?.1.strip_prefix(':')
+    } else {
+        host_and_port.rsplit_once(':').map(|(_, port)| port)
+    };
+    let port = match explicit_port {
+        Some(port) => port.parse::<u16>().ok()?,
+        None => scheme.default_port(),
+    };
+    Some((scheme, port))
+}
+
+/// 無人值守 standing grant 的去處：同一 scheme、有效 port、站、path、query／fragment。
 ///
 /// 只比 host 會讓 `/collect` 借 `example.com/help` 過關；只比 path 會讓
-/// `?id=7` 的紀錄去開 `?id=8` 或 `?next=https://evil.example`。參數解讀不出來
-/// 時是 `false`，不是「當作沒有參數」。當場按不走這支。
+/// `?id=7` 的紀錄去開 `?id=8` 或 `?next=https://evil.example`。漏掉 scheme／port
+/// 會讓 HTTP 或另一個服務借 HTTPS 的來源票。任何一欄讀不出來都拒絕；當場按不走這支。
 pub fn same_destination(recorded: &str, target: &str) -> bool {
-    same_site(recorded, target)
+    scheme_and_effective_port(recorded)
+        .zip(scheme_and_effective_port(target))
+        .is_some_and(|(recorded, target)| recorded == target)
+        && same_site(recorded, target)
         && same_path(recorded, target)
         && same_query_and_fragment(recorded, target)
 }
@@ -626,6 +669,44 @@ mod tests {
             "example.com/help",
             "https://example.com/help?next=https://evil.example/collect"
         ));
+    }
+
+    /// 縮寫位址列只代表 HTTPS；scheme 與有效 port 都是授權去處的一部分。
+    #[test]
+    fn standing_grant_destination_includes_scheme_and_effective_port() {
+        for (recorded, target, expected) in [
+            ("example.com/pay", "https://www.example.com/pay", true),
+            ("example.com/pay", "https://example.com:443/pay", true),
+            ("example.com:8443/pay", "https://example.com:8443/pay", true),
+            (
+                "https://example.com:443/pay",
+                "https://example.com/pay",
+                true,
+            ),
+            ("http://example.com:80/pay", "http://example.com/pay", true),
+            ("example.com/pay", "http://example.com/pay", false),
+            ("https://example.com/pay", "http://example.com/pay", false),
+            ("http://example.com/pay", "https://example.com/pay", false),
+            (
+                "https://example.com/pay",
+                "https://example.com:8443/pay",
+                false,
+            ),
+            ("example.com:8443/pay", "https://example.com/pay", false),
+            (
+                "https://example.com:80/pay",
+                "http://example.com:80/pay",
+                false,
+            ),
+            ("[::1]/pay", "https://[::1]:443/pay", true),
+            ("https://[::1]:8443/pay", "https://[::1]/pay", false),
+        ] {
+            assert_eq!(
+                same_destination(recorded, target),
+                expected,
+                "recorded={recorded:?}, target={target:?}"
+            );
+        }
     }
 
     /// IPv6 字面值不可以被冒號切成兩半。開發時整天看的 `localhost:3000` 也一樣。

@@ -3408,15 +3408,15 @@ impl Db {
     ///
     /// 這支只服務授權票那一條路，不是一般瀏覽紀錄查詢。做完後畫面核對仍走
     /// [`sister_hands::target_policy::same_site`]（只比 host）。這裡比
-    /// [`sister_hands::target_policy::same_destination`]（host + path + query +
-    /// fragment），因為只比 host 會讓 `/collect` 或換掉的 query 借位址列裡的
-    /// `example.com/help` 過關。
+    /// [`sister_hands::target_policy::same_destination`]（scheme + 有效 port +
+    /// host + path + query + fragment），因為只比 host 會讓 `/collect` 或換掉的
+    /// query 借位址列裡的 `example.com/help` 過關。
     ///
     /// 「沒有」有四種，而它們要他做的事完全相反，所以這裡不回 `bool`：
     ///
     /// - [`UrlOrigin::NotInHerRecord`]：可採信的錄製來源裡有 URL，只是沒有這個站。
     /// - [`UrlOrigin::SameSiteDifferentPath`]：這個站去過，但紀錄裡沒有這一條路徑。
-    /// - [`UrlOrigin::SamePathDifferentDestination`]：路徑對得上，query／fragment 不是紀錄裡那一條。
+    /// - [`UrlOrigin::SamePathDifferentDestination`]：路徑對得上，但 scheme、port 或 query／fragment 不同。
     /// - [`UrlOrigin::NoTrustedRecordedUrls`]：沒有可排除「還在輸入」的錄製
     ///   URL。舊版 session 可能仍有 URL，但無法安全地拿來背書。
     ///
@@ -9635,6 +9635,22 @@ mod tests {
                 .expect("查"),
             UrlOrigin::InHerRecord
         );
+        assert_eq!(
+            db.site_in_her_record("https://example.com:443/bill?id=7")
+                .expect("查"),
+            UrlOrigin::InHerRecord,
+            "Chromium 的省略 scheme 應視為 HTTPS 預設 port"
+        );
+        for target in [
+            "http://example.com/bill?id=7",
+            "https://example.com:8443/bill?id=7",
+        ] {
+            assert_eq!(
+                db.site_in_her_record(target).expect("查"),
+                UrlOrigin::SamePathDifferentDestination,
+                "不同 scheme 或 port 不能借完整來源票：{target}"
+            );
+        }
         // 同一個站的別條路徑不算——那是螢幕上埋 URL 借 host 過關的那一招。
         assert_eq!(
             db.site_in_her_record("https://example.com/other")
@@ -9969,6 +9985,21 @@ mod tests {
                 Some(trusted),
                 Some("example.com/collect?id=7#receipt"),
                 Origin::SameFrameAddress,
+            ),
+            (
+                Some(trusted),
+                Some("https://example.com:443/collect?id=7#receipt"),
+                Origin::SameFrameAddress,
+            ),
+            (
+                Some(trusted),
+                Some("http://example.com/collect?id=7#receipt"),
+                Origin::OtherScreenText,
+            ),
+            (
+                Some(trusted),
+                Some("https://example.com:8443/collect?id=7#receipt"),
+                Origin::OtherScreenText,
             ),
             (
                 Some(trusted),

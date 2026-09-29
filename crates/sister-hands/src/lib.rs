@@ -461,7 +461,7 @@ define_gaps! { UrlOriginGap {
     NotAReadableSite,
     /// 這個站去過，但紀錄裡沒有這一條路徑。同站不同頁不能借 host 當授權。
     PathNotInHerRecord,
-    /// 路徑對得上，但 query／fragment 不是紀錄裡那一條去處。
+    /// 路徑對得上，但 scheme、有效 port 或 query／fragment 不是紀錄裡那一條去處。
     DestinationNotTheRecordedOne,
     /// 目標是畫面裡的字；那張畫面的位址列是另一個網址。
     TargetOnlyInScreenText,
@@ -527,7 +527,7 @@ impl UrlOriginGap {
             },
             Self::DestinationNotTheRecordedOne => {
                 "你說過我可以自己按網址，條件是我要說得出它從哪來。這一頁的路徑我記過，\
-                 但 query 或 fragment 不是紀錄裡那一條去處，所以票跑不動它。要開請你當場看過再按。"
+                 但協定、連接埠或網址後面的查詢／錨點不是紀錄裡同一條去處，所以票跑不動它。要開請你當場看過再按。"
                     .to_string()
             }
             Self::TargetOnlyInScreenText => {
@@ -1470,8 +1470,10 @@ mod tests {
         );
         let redirect = &msgs[UrlOriginGap::DestinationNotTheRecordedOne.index()];
         assert!(
-            redirect.contains("query") && redirect.contains("當場"),
-            "參數不是紀錄裡那一條去處時，要說得出票跑不動、當場按可以：{redirect}"
+            ["協定", "連接埠", "查詢", "錨點", "當場"]
+                .iter()
+                .all(|word| redirect.contains(word)),
+            "同路徑但去處不同時，要說得出可能差在哪、當場按可以：{redirect}"
         );
     }
 

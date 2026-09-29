@@ -1639,8 +1639,9 @@ Release 1.0 必做、使用者 opt-in 的產品面。主動性繼續用預算和
 
 2026-09-28 新增一條無人值守網址來源閘門：目標 URL 除了要在可採信的完整網址紀錄裡，
 還必須是**目標 fact 自己那張可信 Windows 錄製畫面的位址列**；只在畫面文字裡、
-位址列不同、沒量到，或來源是 replay／import 時，授權票不能替它按。比較 host、path、
-query、fragment，接受 Chromium 省略 scheme／www. 的位址列形式。端到端測試把注入網址
+位址列不同、沒量到，或來源是 replay／import 時，授權票不能替它按。比較 scheme、
+有效 port、host、path、query、fragment；Chromium 省略 scheme 的位址列只視為 HTTPS，
+也接受省略 www.。HTTP 或非預設 port 不能借 HTTPS 的來源票。端到端測試把注入網址
 放在被兩個 pass 引用的同張畫面，並另種可信完整網址紀錄；修前真的寫出 `executed`，
 修後由新閘門拒絕，良性網址仍執行一次；同網址 replay 畫面另有反向測試。
 這只收掉該條同畫面旁路；20 種 injection 的整體退場條件仍未打勾。

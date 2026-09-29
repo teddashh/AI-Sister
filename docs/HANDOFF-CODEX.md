@@ -1,5 +1,12 @@
 # HANDOFF — 交給下一位 agent（Codex）
 
+**2026-09-28 Phase 6 來源票再修：**`same_destination` 現在把 scheme 與有效 port
+列入去處身分；省略 scheme 的 Chromium 位址列只推定為 HTTPS，預設 port 與明寫
+`:443`／`:80` 各依協定等價。HTTP 和不同 port 不能借 HTTPS standing grant；
+`site_in_her_record` 與同張來源 frame 都有反向測試。workspace Cargo 測試、Clippy、
+格式與 no-network gate 通過。這是候選修復，尚待 service
+verification 與新一輪獨立審查；Phase 6 退場條件仍未打勾。
+
 **2026-09-28 Phase 6 候選修復：**無人值守開 URL 的來源畫面現在必須屬於
 `TRUSTED_URL_ORIGIN_PLATFORM` session；replay／無 session 的同網址畫面會以
 `target_source_untrusted` 拒絕。位址列改用既有 `same_destination` 比較，接受 Chromium

@@ -428,12 +428,14 @@ a 類（顯式時間承諾）**——這兩類是「使用者自己能立刻驗�
    使用者選定的 URL 政策。任何缺資料或查詢錯誤都 fail-closed。URL 政策只管
    standing grant：當場按下在兩種答案下都放行；沒答過時無人值守拒絕，但不能把
    「沒問過」寫成「使用者說不要」。使用者可選「網址一律當場按」，或只讓她開在
-   保留中的真 Windows 錄製裡見過同 host 的網址（容許一層 `www.` 差異）。alpha.103
-   起後者只信 exact
+   保留中的真 Windows 錄製裡見過同去處的網址：scheme、有效 port、host、path、
+   query、fragment 都須相符（容許一層 `www.` 差異；Chromium 省略 scheme 時只推定
+   HTTPS），且目標 fact 自己那張可信畫面的位址列也須是同一去處。alpha.103
+   起來源紀錄只信 exact
    `sessions.platform = windows/windows-gdi-uia-focused-url-v2`。歷史 v1 可讀、可顯示，
    但因全域 focused element／stale URL cache 沒有證明 exact HWND 與當拍 live value，
-   不再授權；更舊錄製、import 與 replay 也不能背書。v2 的 host provenance 仍不證明
-   網站安全、使用者意圖、path、redirect 或站內內容。
+   不再授權；更舊錄製、import 與 replay 也不能背書。v2 的來源紀錄仍不證明
+   網站安全、使用者意圖、redirect 或站內內容。
 5. **預檢**：接手模式啟動前做 fresh-evidence check（重新看畫面），
    不信任可能過期的 L3 記憶〔定案：記憶可能記歪的東西不能直接點滑鼠〕。
 6. **代理身份方向**（遠期）：關注 OS 級 agent identity/session 隔離的發展，
