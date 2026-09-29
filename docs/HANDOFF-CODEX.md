@@ -6,16 +6,19 @@
 修正後 staging CLI 以單調時間計期，真等 31 秒的程序測試證明過期；腳本輸入必須
 明示測試旗標，收據記 `scripted_fixture`／`human_terminal`，多輪以鎖定附加方式
 留下完整回放。保存 URL grant 前先檢查政策、grant 範圍、fact、雙 pass 畫面、
-可信位址列與完整網址紀錄，缺任一項就不說已保存。這份增量仍待完整 gate 和
-新的獨立審查，不能把前一顆提交的 53/53 搬到增量上。Ted 的 10 項真任務日誌
+可信位址列與完整網址紀錄，缺任一項就不說已保存。`0fd196f6` 對固定樹
+`e932d92695602111` 的重型 gate 53/53 通過；staging feature hands 171+31、
+CLI 程序 5 與 feature Clippy 全綠；新獨立審查對本段程式變更 PASS。
+Ted 的 10 項真任務日誌
 仍未提供；第三方不可逆動作沒有執行。
 
 **同輪擴及全部無人值守動作：**`open-url`、`open-file`、`focus-window` 都在共同
 `authorize_unattended` 入口核對當場選定的承諾與具體動作。`--save-grant` 對三種
 動作都列出符合授權範圍的承諾，須選編號並答「好」才存；沒有候選不存。
 定點測試驗無綁定的檔案／視窗 grant 拒絕、有綁定的放行，並驗 CLI 的檔案 grant
-拒絕保存／選定保存與讀回核對。正式 Phase 6 三條退場條件仍待重型 gate、新獨立
-審查、service verification 與 Ted 的 10 筆真任務收據；不可提前打勾。
+拒絕保存／選定保存與讀回核對。正式 Phase 6 三條退場條件仍為 0/3：
+20×9 只證明這條 URL 授權路徑的 containment；產品沒有第三方不可逆 executor；
+Ted 的 10 筆真任務收據及 service verification 尚缺，不可提前打勾。
 
 **2026-09-29 Phase 6 審查退件後修正候選：**獨立審查指出上輪 20×9 夾具替 19 條
 注入文字附加網址，測到的是同張 OCR 重複網址拒絕；純指令仍能選可信位址列並借同址

@@ -1666,7 +1666,9 @@ Phase 6 的整體退場條件仍未打勾。
 末三種案例保留原注入文字，不再附加網址，來源仍是可信同址位址列；grant 指向
 夾具建立並歸檔的另一張同址承諾，新的模型承諾以 `Commitment` 拒絕。
 其餘六種繼續驗來源與 URL 目標閘門。乾淨、當場選定的位址列對照可執行一次。
-這是本地可執行路徑的候選收據，仍待獨立審查與 service verification；不能用它
+`0fd196f6` 的本地可執行路徑獲獨立審查 PASS，重型 gate 53/53，
+staging feature hands 171+31、CLI 程序 5 與 feature Clippy 全綠；
+service verification 尚缺。這份收據不能用來
 替代 Ted 的真 Windows 任務日誌，也不把任意畫面指令分類器說成已達 100%。
 可重跑收據：`cargo test -p sister-cli --test injection_end_to_end --quiet` 的
 `all_twenty_injections_reach_executable_facts_across_source_variants` 逐例讀
@@ -1682,7 +1684,7 @@ fixture，目標須為 `staging://`。程序層逐類測 approve／decline／exp
 及停止，且拒絕非 fixture 目標。期限計入提示期間真正流逝的單調時間，另有
 等待 31 秒的程序測試；腳本核准須明示測試旗標，收據標明輸入來源，同一資料夾
 連跑兩次仍可完整回放。正式產品尚無送出／付款／刪除等 executor，這一格的
-完整產品驗收仍待獨立審查判定，不得把 fixture 執行冒充第三方實際動作。
+完整產品驗收仍未達成；不得把 fixture 執行冒充第三方實際動作。
 可重跑收據：`cargo test -p sister-hands --features staging-approval --quiet` 的
 `all_five_classes_use_live_dispatch_and_replay_is_read_only` 和
 `stop_and_clock_rollback_refuse_after_approval_before_dispatch`；私有票的
