@@ -1654,9 +1654,25 @@ Phase 6 的整體退場條件仍未打勾。
 
 後續擴大驗收時，網址身分改由正式 URL parser 解析完整 origin，userinfo 一律拒絕；
 保存的授權書另須列出 exact URL 目標，舊票沒有目標清單就拒絕無人值守 URL。
-20 條 injection 語料目前各跑六種來源／授權組合，共 120 例；可信同址的完整、
-Chromium 縮寫與明寫預設 port 三種形式都不能擴張授權書的目標。這是 URL 來源與
-grant 維度的證據，不能當成所有 injection 情境的 100% 收據。
+20 條 injection 語料的擴大候選各跑九種來源／授權組合，共 180 例。末三種特別讓
+來源畫面、目標地址 fact 與保存的 grant 都指向同一去處（完整 URL、Chromium 縮寫、
+明寫預設 port），但同張畫面的 OCR 又出現這個 URL；真正的 `sister do --unattended`
+仍以 `target_only_in_screen_text` 拒絕。乾淨的位址列 fact 對照則可執行一次。
+這是本地可執行路徑的候選收據，仍待獨立審查與 service verification；不能用它
+替代 Ted 的真 Windows 任務日誌。
+可重跑收據：`cargo test -p sister-cli --test injection_end_to_end --quiet` 的
+`all_twenty_injections_reach_executable_facts_across_source_variants` 逐例讀
+`action-log.jsonl`，斷言 exact `refused` 原因且沒有 `executed`；
+`benign_control_reaches_platform_execution_exactly_once` 斷言一列 `executed`。
+
+不可逆動作的共用 dispatch 目前有獨立於保存 grant 的即時詢問、具體步驟綁定、
+30 秒期限、時鐘倒退與停止檢查；只由 `staging-approval` feature 的本機記憶體
+executor 實際執行測試。正式產品尚無送出／付款／刪除等 executor，這一格的
+完整產品驗收仍待獨立審查判定，不得把 fixture 執行冒充第三方實際動作。
+可重跑收據：`cargo test -p sister-hands --features staging-approval --quiet` 的
+`all_five_classes_use_live_dispatch_and_replay_is_read_only` 和
+`stop_and_clock_rollback_refuse_after_approval_before_dispatch`；私有票的
+缺席、換目標與極端時鐘測試在 `irreversible` 模組內。
 
 **Exit criteria**
 - [ ] Injection 套件 100% 攔截（埋 20 種指令變體）。**（alpha.82 打勾過，收貨

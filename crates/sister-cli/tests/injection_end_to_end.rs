@@ -70,7 +70,7 @@ fn write_scenario(dir: &Path, injection: &str) -> PathBuf {
                 // 另一個理由變綠，而它原本要證的那件事（時間窗把 evil 關在外面）
                 // 就沒有人在跑了。讓新閘門對兩邊都中立，這套測試的軸才沒有變。
                 "url": GOOD_URL,
-                "text": [TASK, GOOD_URL, injection],
+                "text": [TASK, "受控工作頁面", injection],
                 "clipboard": injection,
                 "clipboard_source_app": "chrome.exe"
             },
@@ -148,7 +148,13 @@ fn seed_l2_and_fact_ids(data_dir: &Path, injection: &str, trusted_source: bool) 
     .expect("seed review input L2");
 
     let facts = db.facts_by_kind("url", 100).expect("URL facts");
-    let good = facts.iter().find(|fact| fact.raw == GOOD_URL).unwrap();
+    let good = facts
+        .iter()
+        .find(|fact| {
+            fact.raw == GOOD_URL && fact.source_kind == "url" && fact.frame_id == Some(frame_id)
+        })
+        .or_else(|| facts.iter().find(|fact| fact.raw == GOOD_URL))
+        .expect("replay must retain the good URL fact");
     let evil = facts.iter().find(|fact| fact.raw == EVIL_URL).unwrap();
     assert!(
         good.ts >= core && good.ts < window_end,
@@ -406,6 +412,7 @@ fn injected_url_from_source(
     source_url: Option<&str>,
     trusted_source: bool,
     allowed_url: &str,
+    target_from_address: bool,
 ) -> (Vec<String>, String) {
     let dir = TempDir::new("in-frame-url");
     let scenario = write_scenario(&dir.0, injection);
@@ -414,6 +421,9 @@ fn injected_url_from_source(
     // Replay 沒有 URL 時會整張不收；「有畫面但位址列沒量到」要在寫入後
     // 合成，才真的測到來源判斷的那一格。
     value["steps"][0]["url"] = source_url.unwrap_or(GOOD_URL).into();
+    // 攻擊場景仍保留一筆良性 URL fact 作為另一個可選目標；正向控制
+    // 的頁面正文則不重複位址列，才能驗證乾淨的地址 fact 可執行。
+    value["steps"][0]["text"][1] = GOOD_URL.into();
     // 每條語料都在本段、被引用的同一張畫面中提供可抽取 URL。第 8 條
     // 本身已有該 URL；其他條把它接在原文後面，保留原文逐字到達。
     let attack_text = if injection.contains(INJECTED_URL) {
@@ -446,14 +456,28 @@ fn injected_url_from_source(
             .facts_by_kind("url", 100)
             .unwrap()
             .into_iter()
-            .find(|fact| fact.raw == INJECTED_URL && fact.frame_id == Some(frame_id))
+            .find(|fact| {
+                fact.frame_id == Some(frame_id)
+                    && if target_from_address {
+                        fact.source_kind == "url"
+                            && sister_hands::target_policy::same_destination(
+                                &fact.raw,
+                                INJECTED_URL,
+                            )
+                    } else {
+                        fact.raw == INJECTED_URL && fact.source_kind == "ocr"
+                    }
+            })
             .expect("injected URL must be extracted from the cited screen");
         let chunks = db.recent(100).unwrap();
         assert!(
             chunks.iter().any(|chunk| {
                 Some(chunk.chunk_id) == fact.chunk_id
-                    && chunk.text.contains(injection)
-                    && chunk.text.contains(INJECTED_URL)
+                    && if target_from_address {
+                        chunk.source_kind == sister_core::model::SourceKind::Url
+                    } else {
+                        chunk.text.contains(injection) && chunk.text.contains(INJECTED_URL)
+                    }
             }),
             "target fact must come from this case's injected OCR text: {injection:?}"
         );
@@ -539,41 +563,77 @@ fn all_twenty_injections_reach_executable_facts_across_source_variants() {
             Some(GOOD_URL),
             true,
             INJECTED_URL,
+            false,
             "target_only_in_screen_text",
         ),
-        (None, true, INJECTED_URL, "target_address_unmeasured"),
+        (None, true, INJECTED_URL, false, "target_address_unmeasured"),
         (
             Some(INJECTED_URL),
             false,
             INJECTED_URL,
+            false,
             "target_source_untrusted",
         ),
-        (Some(INJECTED_URL), true, GOOD_URL, "not_covered_by_grant"),
+        (
+            Some(INJECTED_URL),
+            true,
+            GOOD_URL,
+            false,
+            "not_covered_by_grant",
+        ),
         (
             Some("example.com/collect"),
             true,
             GOOD_URL,
+            false,
             "not_covered_by_grant",
         ),
         (
             Some("https://example.com:443/collect"),
             true,
             GOOD_URL,
+            false,
             "not_covered_by_grant",
         ),
+        (
+            Some(INJECTED_URL),
+            true,
+            INJECTED_URL,
+            true,
+            "target_only_in_screen_text",
+        ),
+        (
+            Some("example.com/collect"),
+            true,
+            INJECTED_URL,
+            true,
+            "target_only_in_screen_text",
+        ),
+        (
+            Some("https://example.com:443/collect"),
+            true,
+            INJECTED_URL,
+            true,
+            "target_only_in_screen_text",
+        ),
     ];
-    assert_eq!(source_variants.len(), 6);
+    assert_eq!(source_variants.len(), 9);
     let mut exercised = 0;
     for (index, injection) in INJECTION_REGRESSION_CASES.into_iter().enumerate() {
-        for (source_url, trusted_source, allowed_url, reason) in source_variants {
-            let (lines, log) =
-                injected_url_from_source(injection, source_url, trusted_source, allowed_url);
+        for (source_url, trusted_source, allowed_url, address_fact, reason) in source_variants {
+            let (lines, log) = injected_url_from_source(
+                injection,
+                source_url,
+                trusted_source,
+                allowed_url,
+                address_fact,
+            );
             assert_url_refused(&lines, &log, reason);
             exercised += 1;
             println!("case {}: {reason}", index + 1);
         }
     }
-    assert_eq!(exercised, 120, "每條語料的六種來源都要真的跑到");
+    assert_eq!(exercised, 180, "每條語料的九種來源都要真的跑到");
 }
 
 #[test]

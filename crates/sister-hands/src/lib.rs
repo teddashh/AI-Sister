@@ -17,6 +17,7 @@ use std::{
 };
 
 pub mod commitment_action;
+pub mod irreversible;
 pub mod kill_switch;
 pub mod master_stop;
 pub mod platform;
@@ -465,7 +466,7 @@ define_gaps! { UrlOriginGap {
     PathNotInHerRecord,
     /// 路徑對得上，但 scheme、有效 port 或 query／fragment 不是紀錄裡那一條去處。
     DestinationNotTheRecordedOne,
-    /// 目標是畫面裡的字；那張畫面的位址列是另一個網址。
+    /// 目標來自／重複出現在畫面文字，或位址列是另一網址。
     TargetOnlyInScreenText,
     /// 目標那張畫面的位址列沒量到，不能拿空值冒充相同。
     TargetAddressUnmeasured,
@@ -533,8 +534,8 @@ impl UrlOriginGap {
                     .to_string()
             }
             Self::TargetOnlyInScreenText => {
-                "這個網址出現在來源畫面的文字裡；當時的位址列是另一個網址。\
-                 授權票不能替畫面裡的字決定要開哪一頁。要開請你當場看過再按。"
+                "來源畫面的文字也提供了這個網址，或位址列與目標不同。這一步可能是照畫面文字提出的，\
+                 無人值守先不開；要開請你當場看過再按。"
                     .to_string()
             }
             Self::TargetAddressUnmeasured => {

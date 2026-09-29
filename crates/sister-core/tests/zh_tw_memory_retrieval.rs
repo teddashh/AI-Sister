@@ -301,10 +301,8 @@ fn traditional_chinese_multiday_memory_keeps_sources_dates_and_missing_screensho
             "https://bill.cht.com.tw/query"
         );
         assert_eq!(got.answers[0].latest.source_kind, "url");
-        assert_eq!(
-            got.answers[0].latest.frame_id, None,
-            "address-bar URL is a focus chunk, not a screenshot row"
-        );
+        // 位址列現在也會隨保留畫面寫入有 frame 的 URL fact；獨立的
+        // focus event URL fact 則沒有 frame。兩者都由 source_kind=url 區分於 OCR。
         assert!(
             got.answers[0].latest.ts >= yesterday.from && got.answers[0].latest.ts < yesterday.to,
             "{query} date bound"

@@ -2047,6 +2047,43 @@ impl Db {
             }
         }
 
+        // 位址列本身也建立一筆有 frame 的 URL fact，和同張畫面 OCR 抽出的
+        // URL fact 保持不同 source_kind。無人值守只能選這筆；否則惡意網頁
+        // 把自己的位址再寫進正文時，OCR fact 會借同址來源票執行指令。
+        if let Some(target) = frame
+            .focus
+            .url
+            .as_deref()
+            .and_then(sister_hands::target_policy::recorded_address_target)
+        {
+            let id = insert_chunk_tx(
+                &tx,
+                session_id,
+                frame.ts,
+                SourceKind::Url,
+                Some(frame_id),
+                Some(frame_id),
+                &frame.focus,
+                &target,
+            )?;
+            fact_count += insert_facts_tx(
+                &tx,
+                session_id,
+                frame.ts,
+                id,
+                Some(frame_id),
+                SourceKind::Url,
+                &frame.focus,
+                &[ExtractedFact {
+                    kind: crate::facts::FactKind::Url,
+                    raw: target.clone(),
+                    normalized: target.clone(),
+                    byte_start: 0,
+                    byte_end: target.len(),
+                }],
+            )?;
+        }
+
         tx.commit()?;
         Ok((frame_id, chunk_id, fact_count))
     }
@@ -5342,9 +5379,9 @@ impl Db {
         })
     }
 
-    /// 無人值守開網址時，目標 fact 必須來自同一張畫面的 OCR，且那張畫面的
-    /// 位址列是同一去處，且來源畫面屬於可採信的 Windows 錄製。別張畫面去過
-    /// 同一網址，或 replay 畫面剛好寫了同一網址，都不能借它的來源票。
+    /// 無人值守開網址時，目標 fact 必須是同張畫面位址列衍生的 URL fact，
+    /// 不能是網頁正文 OCR 裡的一串相同網址；來源畫面還必須屬於可採信的
+    /// Windows 錄製。別張畫面或 replay 的同網址也不能借票。
     /// Chromium 會省略 scheme／www.，比較去處而非逐字比較。讀不到畫面／
     /// 位址列時明確保留「沒量到」。
     pub fn target_address_on_source_frame(
@@ -5356,7 +5393,7 @@ impl Db {
         let Some(fact) = self.fact_by_id(id)? else {
             return Ok(Origin::AddressUnmeasured);
         };
-        if fact.raw != expected_raw || fact.source_kind != "ocr" {
+        if fact.raw != expected_raw {
             return Ok(Origin::AddressUnmeasured);
         }
         let Some(frame_id) = fact.frame_id else {
@@ -5373,19 +5410,38 @@ impl Db {
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()?;
-        Ok(match source {
+        let origin = match source {
             None => Origin::AddressUnmeasured,
             Some((_, platform)) if platform.as_deref() != Some(TRUSTED_URL_ORIGIN_PLATFORM) => {
                 Origin::UntrustedSourceFrame
             }
+            Some((None, _)) => Origin::AddressUnmeasured,
+            Some((Some(_), _)) if fact.source_kind != "url" => Origin::OtherScreenText,
             Some((Some(url), _))
                 if sister_hands::target_policy::same_destination(&url, expected_raw) =>
             {
                 Origin::SameFrameAddress
             }
             Some((Some(_), _)) => Origin::OtherScreenText,
-            Some((None, _)) => Origin::AddressUnmeasured,
-        })
+        };
+        if origin != Origin::SameFrameAddress {
+            return Ok(origin);
+        }
+        // 位址列本身雖然可信，網頁正文若也提供同一 URL，模型仍可能是
+        // 聽了正文的指令才挑中位址列 fact。不能讓重複出現的畫面文字
+        // 借到同址 grant；來源不明時交還給當場按鍵。
+        let mut stmt = self.conn.prepare(
+            "SELECT raw FROM facts
+              WHERE frame_id = ?1 AND kind = 'url'
+                AND source_kind IN ('ocr', 'assistive')",
+        )?;
+        let screen_urls = stmt.query_map([frame_id], |row| row.get::<_, String>(0))?;
+        for screen_url in screen_urls {
+            if sister_hands::target_policy::same_destination(&screen_url?, expected_raw) {
+                return Ok(Origin::OtherScreenText);
+            }
+        }
+        Ok(origin)
     }
 
     /// 在一個有界時間窗裡挑這一步的畫面憑據：**動作之後的優先，然後取最新的
@@ -9760,7 +9816,7 @@ mod tests {
                 db.conn
                     .execute(
                         "INSERT INTO facts(ts, kind, raw, normalized, source_kind, frame_id)
-                         VALUES(1, 'url', ?1, ?1, 'ocr', ?2)",
+                         VALUES(1, 'url', ?1, ?1, 'url', ?2)",
                         params![target, frame_id],
                     )
                     .unwrap();
@@ -9824,7 +9880,7 @@ mod tests {
             db.conn
                 .execute(
                     "INSERT INTO facts(ts, kind, raw, normalized, source_kind, frame_id)
-                     VALUES(1, 'url', ?1, ?1, 'ocr', ?2)",
+                     VALUES(1, 'url', ?1, ?1, 'url', ?2)",
                     params![recorded, frame_id],
                 )
                 .unwrap();
@@ -10195,7 +10251,7 @@ mod tests {
             db.conn
                 .execute(
                     "INSERT INTO facts(ts, kind, raw, normalized, source_kind, frame_id)
-                     VALUES(1, 'url', ?1, ?1, 'ocr', ?2)",
+                     VALUES(1, 'url', ?1, ?1, 'url', ?2)",
                     params![target, frame_id],
                 )
                 .unwrap();
@@ -10211,6 +10267,42 @@ mod tests {
                 "an old fact id cannot authorize a different target"
             );
         }
+    }
+
+    #[test]
+    fn same_address_ocr_fact_cannot_borrow_the_address_fact_authority() {
+        use sister_hands::url_policy::TargetAddressOrigin as Origin;
+        let mut db = test_db();
+        let target = "https://example.com/collect";
+        let trusted = db
+            .start_session(TRUSTED_URL_ORIGIN_PLATFORM, "test")
+            .unwrap();
+        let mut frame = frame_with_text(1, "chrome.exe", "test", &[target]);
+        frame.focus.url = Some("example.com/collect".into());
+        let (frame_id, _, count) = db.insert_frame(trusted, &frame, None, 0).unwrap();
+        assert_eq!(count, 2, "address and OCR must be distinct URL facts");
+        let facts = db.facts_by_kind("url", 10).unwrap();
+        let address = facts
+            .iter()
+            .find(|fact| fact.frame_id == Some(frame_id) && fact.source_kind == "url")
+            .expect("writer must produce an address fact");
+        let screen = facts
+            .iter()
+            .find(|fact| fact.frame_id == Some(frame_id) && fact.source_kind == "ocr")
+            .expect("writer must retain screen text for retrieval");
+        assert_eq!(address.raw, target);
+        assert_eq!(screen.raw, target);
+        assert_eq!(
+            db.target_address_on_source_frame(address.id, target)
+                .unwrap(),
+            Origin::OtherScreenText,
+            "the address fact cannot borrow a grant while the page repeats it"
+        );
+        assert_eq!(
+            db.target_address_on_source_frame(screen.id, target)
+                .unwrap(),
+            Origin::OtherScreenText
+        );
     }
 
     #[test]
@@ -10232,7 +10324,7 @@ mod tests {
         db.conn
             .execute(
                 "INSERT INTO facts(ts, kind, raw, normalized, source_kind, frame_id)
-                 VALUES(1, 'url', ?1, ?1, 'ocr', ?2)",
+                 VALUES(1, 'url', ?1, ?1, 'url', ?2)",
                 params![target, frame_id],
             )
             .unwrap();
@@ -10270,7 +10362,7 @@ mod tests {
         db.conn
             .execute(
                 "INSERT INTO facts(ts, kind, raw, normalized, source_kind, frame_id)
-                 VALUES(1, 'url', ?1, ?1, 'ocr', ?2)",
+                 VALUES(1, 'url', ?1, ?1, 'url', ?2)",
                 params![target, frame_id],
             )
             .unwrap();
@@ -11001,7 +11093,7 @@ mod tests {
         assert_eq!(report.events, 5);
         assert_eq!(report.frames, 1);
         assert_eq!(
-            report.facts, 6,
+            report.facts, 7,
             "frame、focus title、clipboard、位址列網址的 L1 都要算進回報：{report:?}"
         );
         assert_eq!(

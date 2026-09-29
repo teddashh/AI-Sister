@@ -434,7 +434,9 @@ a 類（顯式時間承諾）**——這兩類是「使用者自己能立刻驗�
    query、fragment 都須相符；path 的 percent escape 與結尾 `/` 保留原形，query
    依原始順序比較，空 `?`／`#` 分隔符的有無也不同，不能讓伺服器可區分的寫法借票
    （只有錄製位址列省略 scheme 時容許一層 `www.` 差異，並只推定 HTTPS）。目標 fact 自己那張
-   可信畫面的位址列也須是同一去處。URL 結構由正式 parser 解析，userinfo 不得進入
+   可信畫面的位址列也須是同一去處。無人值守選用的是該畫面位址列衍生的 URL fact，
+   不是 OCR／輔助文字抽出的同字串；若同張畫面的文字又提供了同一網址，仍交回當場
+   按鍵，以免正文指令借同址票。URL 結構由正式 parser 解析，userinfo 不得進入
    standing grant；path、query 與 fragment 的原始寫法仍須相符。alpha.103
    起來源紀錄只信 exact
    `sessions.platform = windows/windows-gdi-uia-focused-url-v2`。歷史 v1 可讀、可顯示，

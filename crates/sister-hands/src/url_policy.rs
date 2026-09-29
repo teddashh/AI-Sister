@@ -166,7 +166,8 @@ pub enum UrlOrigin {
     SameSiteDifferentPath,
     /// 路徑對得上，但 scheme、有效 port 或 query／fragment 不是紀錄裡那一條去處。
     SamePathDifferentDestination,
-    /// 目標從同一張畫面的 OCR 文字抽出，但當時位址列是另一個網址。
+    /// 目標是同張畫面文字抽出的 URL fact，或可信位址列 fact 被同張
+    /// 畫面文字重複提供；即使字面相同，文字也不能取得授權。
     TargetOnlyInScreenText,
     /// 目標來源畫面的位址列沒有量到，不能說它和這串字相同。
     TargetAddressUnmeasured,
@@ -184,6 +185,7 @@ pub enum UrlOrigin {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TargetAddressOrigin {
     SameFrameAddress,
+    /// 網頁正文 fact（即使字面相同）或不同位址。
     OtherScreenText,
     AddressUnmeasured,
     UntrustedSourceFrame,
@@ -471,7 +473,11 @@ mod tests {
             "同 path 不同去處那一句要說得出可能差在哪：{}",
             said[2]
         );
-        assert!(said[5].contains("另一個網址"), "位址列不同：{}", said[5]);
+        assert!(
+            said[5].contains("文字也提供") && said[5].contains("位址列與目標不同"),
+            "正文重複或位址列不同：{}",
+            said[5]
+        );
         assert!(said[6].contains("沒有可確認"), "位址列沒量到：{}", said[6]);
     }
 

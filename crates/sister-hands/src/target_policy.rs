@@ -199,6 +199,19 @@ fn parse_web_url(value: &str) -> Option<Url> {
     Some(parsed)
 }
 
+/// 將可信 recorder 位址列轉成可供開啟的完整 URL fact。Chromium 省略的
+/// scheme 只補 HTTPS；其餘原始 path/query/fragment 與空分隔符照錄。
+/// 此值仍須連同原始 `frames.url` 和可信 session 驗證，不能單獨充當授權。
+pub fn recorded_address_target(value: &str) -> Option<String> {
+    let target = if explicit_http_scheme_len(value).is_some() {
+        value.to_owned()
+    } else {
+        format!("https://{value}")
+    };
+    validate_url(&target).ok()?;
+    same_destination(value, &target).then_some(target)
+}
+
 fn has_userinfo(parsed: &Url) -> bool {
     parsed[Position::BeforeUsername..Position::BeforeHost].contains('@')
 }
@@ -657,6 +670,20 @@ mod tests {
         assert_eq!(host_of(unicode).as_deref(), Some("é.example"));
         assert!(same_destination(unicode, punycode));
         assert!(!same_destination(unicode, "https://xn--9ca.example/a"));
+    }
+
+    #[test]
+    fn recorded_address_target_preserves_exact_tail_and_rejects_credentials() {
+        assert_eq!(
+            recorded_address_target("example.com/a%2Fb?x=1&x=2?#"),
+            Some("https://example.com/a%2Fb?x=1&x=2?#".into())
+        );
+        assert_eq!(
+            recorded_address_target("http://é.example/a"),
+            Some("http://é.example/a".into())
+        );
+        assert_eq!(recorded_address_target("example.com@evil.test/a"), None);
+        assert_eq!(recorded_address_target("ftp://example.com/a"), None);
     }
 
     #[test]

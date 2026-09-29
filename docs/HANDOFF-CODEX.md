@@ -1,5 +1,18 @@
 # HANDOFF — 交給下一位 agent（Codex）
 
+**2026-09-29 Phase 6 自足部分候選：**`insert_frame` 現在另存同張位址列衍生的 URL
+fact；無人值守不再接受 OCR 網址 fact 借同址票，位址列 fact 若被同張畫面的
+OCR／輔助文字重複提供同 URL 也拒絕。20 條 injection 語料 × 九種來源／授權
+組合（180 例）走 `sister do --unattended` 與 action log；其中三種同址、可信
+來源、grant 涵蓋的案例選位址列 fact，仍以 `target_only_in_screen_text` 拒絕，
+乾淨位址列控制組執行一次。共用不可逆 dispatch 新增逐次即時核准、30 秒期限、
+時鐘倒退、停止、具體步驟綁定與不可重播票；唯一 executor 是 feature-gated
+本機 staging fixture，五類權限均測 approve／decline／expiry／JSONL replay。
+正式產品仍沒有第三方不可逆 executor。workspace fmt／Clippy／test、staging feature
+test／Clippy、Windows 交叉編譯／Clippy、no-network gate 均通過；仍待 service
+verification 與獨立審查。Ted 的 10 項真實 Windows／staging 任務日誌仍未提供，
+絕不可用 fake executor 演練冒充。Phase 6 checkbox 目前保持未勾。
+
 **2026-09-28 Phase 6 擴大工作候選（Ted 已核准完整範圍）：**URL 授權改用 `url`
 parser 正規化 scheme／host／有效 port；userinfo 一律拒絕，path、query、fragment
 保留原始位元組與空分隔符。保存的 grant 新增 exact `url_targets[]`，舊票預設空集合。
