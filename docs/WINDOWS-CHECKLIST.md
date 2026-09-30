@@ -2438,13 +2438,6 @@ alpha.70 把第一個接上去：`sister do`。
 alpha.77 起另有明確的 `--use-grant --unattended` 路徑；它不是把這些歷史步驟改寫成
 「當時也能自己跑」。目前無人值守 URL 的額外政策見第 15 節。
 
-**Phase 6 真機收據仍待完成：**Ted 在專用測試資料目錄中選 10 個不同的本機、可逆
-semi-action 任務（例如打開自有測試文件或聚焦測試視窗），逐步親手核准並確認 OS
-結果。每個任務都保存原始 `action-log.jsonl`、`sister hands log` 回放輸出、對應任務
-描述與結果；逐項核對 `proposed`、`approved`、`executed`、`step_finished`、`concluded`
-以及實際成功。測試執行器跑的 10 個受控演練只能驗證接線，不能充作 Ted 的 10 個
-真實任務；付款、刪除第三方資料與公開發文不在這份真機驗收內。
-
 - [ ] **先確認手上有東西可以做。** `sister.exe commitments` 要看到至少一張活著的
       承諾卡。一張都沒有的話先 `sister.exe review --force --last 24h` 跑一次 L3
       （要簽過第二張同意書，而且 `sister.exe doctor` 說得出你設定的那個 CLI）。

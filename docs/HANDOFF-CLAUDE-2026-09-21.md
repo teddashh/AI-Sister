@@ -3365,3 +3365,85 @@ alpha.167 在用過一陣子的文件背景裡，「最新的月報連結」「�
   `zz_probe_guard` 兩版都因沒給它自己的環境變數而同樣失敗，不算成產品差異。
 - 六個定點突變都紅：拿掉最後一段保護、把最後一個接頭換成第一個、把 absolute end 錯算成相對長度、
   分別拿掉「最新一版」「最新一份」「最後一份」。每次都從 exact backup 還原並逐位元組比對。
+
+## 37. alpha.169：三個 session 收尾，Phase 6 關閉（2026-09-30）
+
+Ted 要把之前沒做完的 session 做完再關掉，寫碼可以派給 grok 4.7。當時的狀態：main 已有
+Phase 7 的 watch 遠端通報與接手審計（`6e15a051`，BAT df43e6d3）。還沒合回來的有兩支：
+eb61a808（不可逆動作雙入口測試、十輪接手演練、PHASES 退場條件改寫），以及
+batc/task-160952a0ea16 的 14 個 commit（承諾綁定、URL 身分、staging 即時核准）。另有一支
+dd967804 的 WIP，給 `Grant` 加 FNV-1a 的 `ticket()`；現在 SHA-256 的 `audit_id()` 已經取代它，
+所以不合。
+
+### 37.1 合併
+
+- `4ae1e217` 收 eb61a808，`72af6b86` 合 batc。兩份 Cargo.lock 與 sister-hands 的相依取聯集。
+- 合進來之後，十輪演練全被「承諾維度」擋下，因為它用的 grant 沒綁承諾。改成每輪各綁一張承諾、
+  網址另列 exact 目標，沒有繞過新規則。
+
+### 37.2 開檔注入矩陣（grok 4.7，`7de14486`）
+
+模型能指向的可執行目標只有 `url`（http/https）和 `file_path` 兩種。batc 帶來的 URL 矩陣是
+20×9＝180 例，開檔那一半還沒有矩陣，injection 那一格就還不能打勾。
+
+- `all_twenty_injections_cannot_borrow_a_grant_to_open_a_file`：20 條語料各把
+  `C:\work\collect.txt` 接在注入原文的下一行，經真的 replay → consent → review →
+  `do --use-grant --unattended`。前提斷言兩件事：reviewer 接受了指向那筆路徑 fact 的開檔承諾；
+  那筆 fact 落在同時含注入原文與路徑的那一塊。grant 有三種：沒綁承諾、綁已封存的同動作複本、
+  綁同一張卡但核准另一條路徑。60 例都以 `not_covered_by_grant`／`Commitment` 拒絕，沒有
+  `executed`。
+- `benign_file_control_executes_exactly_once`：同一條管線，畫面沒有注入、綁定正確時，走到平台
+  執行層剛好一次。Linux 上那一列 `executed` 的結果是「這台機器上做不到」。
+- `only_url_and_file_path_kinds_resolve_and_focus_window_is_unreachable`：八種 fact kind 逐種
+  走 `resolve_allowed_next_step`，只有 url 與 file_path 可執行；前提斷言八種都真的跑到。
+
+grok 自己切了兩刀：拿掉整段承諾比對，矩陣紅在第一例（沒綁承諾那種票）；reviewer 的
+`file_path` 改成拒絕，良性對照紅。我在它的樹上另切三刀，每刀之前先跑一次沒切的對照組（2 條綠）：
+
+- 承諾比對不比 id／text：矩陣紅在「已封存複本」那種票。
+- 承諾比對不比 action／target fact：紅在「核准另一條路徑」那種票。
+- `ops.rs` 呼叫端把 `from_reviewed_commitment(...)` 改回 `from_commitment(id, text)`：良性對照紅，
+  refused 的原因是 `Commitment`。
+
+每一刀都從 cp 備份還原並用 sha256 比對，還原後工作樹是乾淨的。
+
+### 37.3 Discord 通報的隱私對抗驗證
+
+- `WatchReport` 唯一的字串欄位 `status_summary` 改成私有（`8d4e9c9a`）。公開的話，crate 外可以寫
+  struct literal，用 `Box::leak` 塞進畫面文字。這一點由 `compile_fail` doctest 守。stable rustdoc
+  不核對錯誤碼，所以用 `..base` 的形狀，旁邊再配一段必須編得過的雙胞胎；改回 `pub` 實測會紅。
+- 拿掉 `exit_code`（`7ad719d7`）。報告在送出前就組好，寫進去的永遠是 0；Discord 失敗、行程以
+  非零退出時，JSONL 那一列仍然說 0。
+- `sister diagnose` 只讀四個固定的環境變數，放在環境變數裡的 webhook 不會進報告。
+  `check-no-network.sh` 是綠的。
+
+### 37.4 文件
+
+- README、THREAT_MODEL、DATA_INVENTORY 原本寫「只比 host」，改成現行的完整去處比對與承諾綁定
+  （`e935480d`）。PRIVACY 與 SPEC 拿掉退出碼。
+- PHASES 的 Phase 6 三格都打勾。Ted 2026-09-29 定案：要他親手做的真機日誌與 service
+  verification 不是退場條件。WINDOWS-CHECKLIST 裡「Phase 6 真機收據仍待完成」那段刪掉。
+- 版本說明寫了四件事：
+  - 沒說主題的請求；
+  - 無人值守綁承諾（升級後要重存授權書）；
+  - watch 收尾的 JSON 與 Discord；
+  - `hands runs --json`。
+
+### 37.5 驗證
+
+合併 grok 之前的整合樹上，`cargo test --workspace` 2,495 條綠。唯一紅的是 sister-notify 第 69 行
+的 doctest（E0061，5 個參數對 4 個）。那一趟跑到一半時我改了 `lib.rs`；doctest 在 Doc-tests
+階段才從原始檔抽出來編，連結的卻是改之前的 rlib。單獨重跑，兩段 doctest 都綠。
+
+### 37.6 我這一輪做錯的
+
+- PHASES 第一版寫良性開檔對照「真的會開檔一次」。可是 Linux 上那一列 `executed` 的結果是失敗，
+  測試數的只是 `executed` 事件。已改成「走到平台執行層」。
+- 全量測試跑到一半時改了原始檔，得到一條不是產品問題的紅（37.5）。
+
+### 37.7 還沒做的
+
+- Phase 7 的兩格退場條件都還沒開工：
+  - 20 組監督式接手情境，逐組驗證白名單外的動作在執行前就停下；
+  - offer → 執行 → 回報的完整迴路。
+- 還沒對真的 Discord 送過，CI 也不打。

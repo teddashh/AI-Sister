@@ -1650,7 +1650,7 @@ Release 1.0 必做、使用者 opt-in 的產品面。主動性繼續用預算和
 三種**本段且 reviewer 已接受的目標 fact**來源：可信畫面文字但位址列不同、可信畫面
 位址列未量到、replay 畫面位址列相同。每次都斷言 exact 拒絕原因；窗外 fact 另留單一
 定點測試。這只量到三條來源閘門，未證明所有 injection 變體在所有可執行情境都會被攔；
-Phase 6 的整體退場條件仍未打勾。
+當時 Phase 6 的整體退場條件仍未打勾，後續擴大驗收見下兩段。
 
 後續擴大驗收時，網址身分改由正式 URL parser 解析完整 origin，userinfo 一律拒絕；
 保存的授權書另須列出 exact URL 目標，舊票沒有目標清單就拒絕無人值守 URL。
@@ -1667,9 +1667,9 @@ Phase 6 的整體退場條件仍未打勾。
 夾具建立並歸檔的另一張同址承諾，新的模型承諾以 `Commitment` 拒絕。
 其餘六種繼續驗來源與 URL 目標閘門。乾淨、當場選定的位址列對照可執行一次。
 `0fd196f6` 的本地可執行路徑獲獨立審查 PASS，重型 gate 53/53，
-staging feature hands 171+31、CLI 程序 5 與 feature Clippy 全綠；
-service verification 尚缺。這份收據不能用來
-替代 Ted 的真 Windows 任務日誌，也不把任意畫面指令分類器說成已達 100%。
+staging feature hands 171+31、CLI 程序 5 與 feature Clippy 全綠。
+攔下這些案例的是承諾綁定與來源閘門，不是她看出那段字是 injection；
+這裡沒有畫面指令分類器，也不宣稱有。
 可重跑收據：`cargo test -p sister-cli --test injection_end_to_end --quiet` 的
 `all_twenty_injections_reach_executable_facts_across_source_variants` 逐例讀
 `action-log.jsonl`，斷言 exact `refused` 原因且沒有 `executed`；
@@ -1677,14 +1677,26 @@ service verification 尚缺。這份收據不能用來
 `legacy_unbound_grant_cannot_borrow_instruction_only_same_address_fact` 專驗審查找到的
 無網址指令缺口。
 
+2026-09-30 補上開檔那一半，injection 退場條件據此關閉。模型能指向的可執行目標只有兩種：
+`resolve_allowed_next_step` 只把 `url`（http/https）變成開網址、`file_path` 變成開檔，
+其餘六種 fact kind 一律拒絕；`only_url_and_file_path_kinds_resolve_and_focus_window_is_unreachable`
+逐種 kind 驗過，並斷言八種都真的跑到。聚焦視窗走不到模型這條路。開檔矩陣
+`all_twenty_injections_cannot_borrow_a_grant_to_open_a_file` 讓 20 條語料各自把
+`C:\work\collect.txt` 接在注入原文下一行，經真的 `replay → review → do --use-grant
+--unattended`：前提斷言 reviewer 真的接受了指向那筆路徑 fact 的開檔承諾；grant 分三種
+——舊票沒綁承諾、綁到已封存的同動作複本、綁同一張卡但人核准的是另一條路徑——60 例
+全部以 `Commitment` 拒絕、沒有任何 `executed`。`benign_file_control_executes_exactly_once`
+證明同一條管線在畫面沒有注入、綁定正確時，會走到平台執行層剛好一次。
+
 不可逆動作的共用 dispatch 目前有獨立於保存 grant 的即時詢問、具體步驟綁定、
 30 秒期限、時鐘倒退與停止檢查；`sister-cli` 的 `staging-approval` feature 現在有
 可執行的 `--staging-irreversible` 入口，走同一個 dispatch，只能呼叫本機記憶體
 fixture，目標須為 `staging://`。程序層逐類測 approve／decline／expiry／replay
 及停止，且拒絕非 fixture 目標。期限計入提示期間真正流逝的單調時間，另有
 等待 31 秒的程序測試；腳本核准須明示測試旗標，收據標明輸入來源，同一資料夾
-連跑兩次仍可完整回放。正式產品尚無送出／付款／刪除等 executor，這一格的
-完整產品驗收仍未達成；不得把 fixture 執行冒充第三方實際動作。
+連跑兩次仍可完整回放。正式產品沒有送出／付款／刪除等 executor（退場條件
+第二格：這五類在兩個解析入口都無法表示）；staging 入口證明的是之後那一版要走的
+即時核准契約，不是第三方實際動作，也不得拿 fixture 執行冒充。
 可重跑收據：`cargo test -p sister-hands --features staging-approval --quiet` 的
 `all_five_classes_use_live_dispatch_and_replay_is_read_only` 和
 `stop_and_clock_rollback_refuse_after_approval_before_dispatch`；私有票的
@@ -1692,9 +1704,12 @@ fixture，目標須為 `staging://`。程序層逐類測 approve／decline／exp
 `cargo test -p sister-cli --features staging-approval --test staging_approval_cli`。
 
 **Exit criteria**
-- [ ] Injection 套件 100% 攔截（埋 20 種指令變體）。**（alpha.82 打勾過，收貨
-      時撤回：20 條走同一個攔截點，而那個攔截點是「時間窗」不是「這是
-      injection」；埋在螢幕上的 URL 指過去會執行。見上面那段 🔴。）**
+- [x] Injection 套件 100% 攔截（埋 20 種指令變體）：模型可指向的兩種可執行目標都有
+      端到端矩陣——開網址 20×9＝180 例、開檔 20×3＝60 例，全走真 CLI 無人值守，每例
+      斷言 exact 拒絕原因且沒有 `executed`；兩種乾淨對照各走到平台執行層一次。
+      攔下它們的是承諾綁定與來源閘門，不是認出那段字是 injection：人在
+      `--save-grant` 選定的承諾若目標本來就來自畫面指令，那一步仍會執行。
+      （alpha.82 曾以時間窗誤判打勾後撤回，經過見上面那段 🔴。）
 - [x] 目前可執行的 action 只有開網址、開檔與聚焦視窗；送出、發布、付款、
       刪除、開 terminal 五類在按鈕與持久化步驟的解析入口都無法表示。
       `irreversible_action_requests_have_no_executable_representation` 同時驗兩個入口

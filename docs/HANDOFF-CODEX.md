@@ -1,5 +1,20 @@
 # HANDOFF — 交給下一位 agent（Codex）
 
+**2026-09-30 三個 session 收尾，Phase 6 關閉（alpha.169）：**Phase 7 的 watch 遠端通報與
+接手審計（已在 main）、eb61a808 的不可逆動作與十輪演練、batc 的承諾綁定與 URL 身分，
+三支合成 alpha.169。合併後十輪演練被承諾綁定擋下，改成每輪各綁自己的承諾與 URL
+目標，沒有繞過規則。injection 退場條件補上開檔那一半（20×3＝60 例全以 `Commitment`
+拒絕、開檔良性對照走到平台執行層一次、八種 fact kind 只有 `url`／`file_path` 可執行），Phase 6
+三格全部打勾。Ted 已定案：要他親手做的真機日誌與 service verification 不是退場條件；
+WINDOWS-CHECKLIST 那段「真機收據仍待完成」已刪。Discord 通報的隱私對抗驗證另外修了兩處：
+報告唯一的字串欄位改成私有（`compile_fail` doctest 守，改回 `pub` 實測會紅；stable rustdoc
+不核對錯誤碼，所以用 `..base` 形狀並配一段必須編得過的雙胞胎），以及拿掉永遠是 0、
+Discord 失敗時會和真正退出碼矛盾的 `exit_code`。`sister diagnose` 只讀四個固定環境變數，
+放在環境變數裡的 webhook 不會進報告。README／THREAT_MODEL／DATA_INVENTORY 的「只比
+host」舊說法已改成現行的完整去處比對與承諾綁定。**下一步是 Phase 7 的兩格退場條件**
+（20 組監督式接手情境逐組驗證白名單外動作在執行前停止；offer → 執行 → 回報的完整迴路），
+兩格都還沒開工。
+
 **2026-09-29 Phase 6／7 後續：**現有 action 只有開網址、開檔、聚焦視窗；
 新增的雙入口測試證實送出／發布／付款／刪除／開 terminal 五類無法被解析成按鈕
 或持久化步驟。`ActionSnapshot` 現在拒收多餘欄位，不讓夾帶的意圖在讀 log 時消失。
