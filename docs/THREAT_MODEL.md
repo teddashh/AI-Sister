@@ -401,16 +401,20 @@ Windows 10 是 Release 1.0 最低支援版本；不把 Windows 7／Server 2008 R
    重新讀一次資料庫。
 
 **螢幕內容本身在這五道裡從來不是批准。** 互動路徑最後由人承重，所以按鈕一定
-印出完整、不截斷的目標；無人值守路徑最後由先前保存的結構化 grant、雙 pass
-target provenance、exact-action permit 與 URL 政策一起承重。URL 政策的
-「說得出來源」只比對保留中的真 Windows 錄製是否看過同一 host（容許一層 `www.`
-差異）；alpha.103 起只有 exact
+印出完整、不截斷的目標；無人值守路徑最後由先前保存的結構化 grant、人當場選定的
+承諾綁定、雙 pass target provenance、exact-action permit 與 URL 政策一起承重。
+alpha.169 起每張無人值守 grant 都綁一張人在 `--save-grant` 時選定的承諾（ID、原文、
+具體動作、目標 fact 與兩個 pass 同意的畫面）；模型之後提出的其他步驟一律以
+`Commitment` 拒絕，不論它像不像 injection。URL 政策的「說得出來源」比對保留中的
+真 Windows 錄製是否看過同一條完整去處（scheme、有效 port、host、path、query、
+fragment；只有位址列省略 scheme 時容許一層 `www.`），目標還必須是來源畫面的位址列、
+列在 grant 的 exact URL 目標裡；alpha.103 起只有 exact
 `sessions.platform = windows/windows-gdi-uia-focused-url-v2` 的列能背書。歷史
 `windows/windows-gdi-uia-focused-url-v1` 仍可讀、仍可顯示，但因當時的全域 focused
 element 與 stale URL cache 無法證明 exact HWND／當拍 live value，已撤銷來源授權；
-更舊錄製、import 與 replay 也不能背書。v2 仍不證明網站安全、使用者意圖、path、
-redirect 或站內內容。被埋在已授權 app、已見過 host 裡的 URL 仍可能通過，所以
-這些防線不等於 Phase 6 的 prompt-injection 退場條件已完成。
+更舊錄製、import 與 replay 也不能背書。v2 仍不證明網站安全、使用者意圖、
+redirect 或站內內容。承諾綁定擋的是「模型自己換目標」，不替人判斷目標可不可信：
+人選定的那張承諾若目標本來就來自畫面上的指令，那一步照樣會在他不在時執行。
 
 ---
 
@@ -460,9 +464,9 @@ redirect 或站內內容。被埋在已授權 app、已見過 host 裡的 URL �
 12. **網址長得像不像，只在互動路徑交給人看。** `https://evil.example` 和
     `https://ev1l.example`、以及各種同形異義字（IDN homograph），對
     `validate_url` 來說完全一樣，兩個都是合法的 https 網址。互動時分辨它們的是
-    按鈕上那串字和讀它的人，所以樣式刻意不截斷、可換行。無人值守的來源政策會做
-    exact-host 比對（另容許一層 `www.`），但 IDN homograph 仍然成立，而且「以前
-    看過這個 host」不等於它安全。
+    按鈕上那串字和讀它的人，所以樣式刻意不截斷、可換行。無人值守的來源政策比對
+    完整去處（見上），但它不分辨 IDN homograph，而且「以前看過這個網址」不等於
+    它安全。
 13. **視窗標題比對可能挑錯視窗。** `EnumWindows` + 子字串，比到第一個就停。
     兩個視窗標題長得像的時候她會挑錯一個。空標題擋掉了（那會比中畫面上第一
     個有標題的視窗），但「像」擋不掉——那要改成收集全部再讓人選。

@@ -662,8 +662,9 @@ trigram 給中日韓、unicode61 給英文。
 > 只信 exact `platform = 'windows/windows-gdi-uia-focused-url-v2'` 的保留中真 Windows
 > recorder session。歷史 `windows/windows-gdi-uia-focused-url-v1` 列仍可讀、可顯示，
 > 但不再能當來源票；舊 `windows/windows-gdi`、corpus import、scenario replay 也不行。
-> 比對只到 host，最多把一層 `www.` 視為同站；它不證明網站安全或是你主動開的，
-> 也不證明 path、redirect 或站內內容。
+> 比對完整去處：scheme、有效 port、host、path、query、fragment 都須相符，只有
+> 位址列省略 scheme 時把一層 `www.` 視為同站；它不證明網站安全或是你主動開的，
+> 也不證明 redirect 或站內內容。
 
 ### `clipboard_events` — 複製了什麼
 
