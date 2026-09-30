@@ -105,6 +105,7 @@ timeout，相關設定／key／consent mutation 或 native cancel 可能等它�
 | `stop.request` | 尚未交給 recorder 的 durable stop latch；內容是 `desktop-quit`、`requested` 或 `consent-revoked`，舊版 `stop` 仍讀成 `requested`。獨立 revoke barrier 活著時先顯示撤回；成功 regrant 清 barrier 前若原本沒有 stop，會在這裡留下 `consent-revoked`，既有 marker 則原封保留 | 可能讓已排重試在不知使用者已停／已撤回的情況下又啟動；不要手動刪 |
 | `stop.consumed` | recorder 已收到的同一種 durable stop latch。recorder 把 pending 原子搬到這裡，不刪除意圖；內容與強度同上 | 可能讓 child 在 DB finalize 失敗、非零退出後被 watchdog 當 crash 復活；真人顯式 start 可清三種，下一個全新 opt-in login 只可在五分鐘 bounded handoff 與完整 barrier 後清 `desktop-quit`，不要手動刪 |
 | `stop.lock` | 空的跨行程 stop transaction 鎖。request、consume 與 explicit clear 在 OS whole-file exclusive lock 內更新兩顆 marker；probe 只取 shared lock。檔案永久保留，存在不代表有人要求停止 | Windows 的 live handle 會拒絕刪除；Unix Preview 的 advisory lock 擋不住 unlink／replace。執行中不可刪，否則 request 與 clear 可能各鎖到不同 inode、讓停止意圖消失；所有 AI-Sister 行程關閉後才可修復／重建 |
+| `takeover.lock` | 空的接手單一擁有者鎖（alpha.170 起）。`sister takeover` 從讀承諾表、端出提議到收尾整段持 OS whole-file exclusive lock；第二個 `sister takeover` 拿不到就不提議。`sister takeover --status` 只短暫取 shared lock，用它分辨「還在跑」和「中斷了」。行程被殺掉時由 OS 釋放。symlink／non-regular path 拒絕 | Windows 的 live handle 會拒絕刪除；Unix Preview 的 advisory lock 擋不住 unlink／replace。檔案本來就可持久留著，刪掉不是「解除占用」；執行中刪除可讓第二個接手鎖到另一個 inode、同時端出提議。所有 AI-Sister 行程關閉後才可修復／重建 |
 | `desktop.log` / `desktop.log.1` | 字母人這一輪（與上一輪）自己發生了什麼事 | 沒有影響，下次開會重寫 |
 | `record.log` / `record.log.1` | 從字母人按「開始記錄」跑起來的那個 `record`，它印在終端機上的東西 | 沒有影響，下次開會重寫 |
 | `capabilities.json` | 上一份能力快照：這台機器對每一項是已知可用、已知不可用，還是沒量到；錄製中每分鐘更新 URL 實測證據 | 設定頁改說「還不知道這幾條會不會生效」 |
@@ -1164,15 +1165,35 @@ fail-closed，不能靠字首或版本字串大小猜成可信。歷史 v1 ident
 這是刻意的（不然「她提過但我拒絕了」這件事就沒有任何紀錄），但它的意思是
 alpha.69 那句「沒按過就沒有這個檔案」在 alpha.70 之後是假的。
 
-只有既沒跑過 `sister do`、也沒按過字母人「要我幫你打開嗎」那顆按鈕，才是真的
-**沒有這個檔案**（不是空檔案）。`sister do` 只要跑過一次就會寫，即使一步都沒答應；
-字母人則是你真的按下那顆按鈕、讓她執行時才寫。
+**alpha.170 起，`sister takeover` 也寫這個檔案。** 只要她端出過一次接手提議，
+即使他說不要，檔案裡就會有：
+
+- 一列 `handoff_offered`，在問他**之前**寫下：端出去的那張授權書（任務名是固定的
+  「接手承諾表上的下一步」，不是你打的字；app、動作種類、完整網址目標、期限、
+  步數上限，以及每一張端出去的承諾原文、**完整網址或檔案路徑**、目標 fact 的 id
+  與兩個 pass 都指過的證據），還有她這次不接的每一件（承諾原文、完整動作目標與
+  理由）；
+- 一列 `handoff_answered`：他的回答。說好的話帶著底下那一輪的 `run_id`，緊接著是
+  同一張授權書的 `granted` 與每一步的列。
+
+接手那張授權書只存在這個檔案的這幾列裡，**不寫 `grant.json`**。承諾表上沒有
+她做得到的下一步、她沒在錄、手被拔掉或全停開著、另一個接手還沒收尾時，她不提議，
+這個檔案一列都不多。
+
+只有既沒跑過 `sister do`、沒被端出過接手提議、也沒按過字母人「要我幫你打開嗎」
+那顆按鈕，才是真的**沒有這個檔案**（不是空檔案）。`sister do` 只要跑過一次就會寫，
+即使一步都沒答應；`sister takeover` 端出提議就會寫，即使他說不要；字母人則是你
+真的按下那顆按鈕、讓她執行時才寫。
 
 | 欄位 | 內容 |
 |---|---|
-| `event` | `granted` / `proposed` / `approved` / `executed` / `refused` / `step_finished` / `aborted` / `concluded` |
+| `event` | `granted` / `proposed` / `approved` / `executed` / `refused` / `step_finished` / `aborted` / `concluded` / `handoff_offered` / `handoff_answered` |
 | `at_ms` | 這件事發生的時戳 |
 | `grant` | 只在 `granted` 那一列：**你打的 `--task` 原文**、授權的 app 清單、動作種類、有效毫秒數、步數上限 |
+| `grant`（接手） | `handoff_offered` 那一列與緊接的 `granted`：同一張授權書。任務名是固定字，另外帶著每一張端出去的承諾原文、完整動作目標、目標 fact 的 id 與證據 |
+| `handoff_id` | 只在兩種 `handoff_*` 列：一次提議的 opaque 關聯 ID（`handoff-sha256:…`），讓提議與回答對得回同一次；不是授權票據 |
+| `left_out` | 只在 `handoff_offered`：她這次不接的每一件——承諾 id 與原文、完整動作目標（下一步讀不懂時是 `null`）、理由 |
+| `answer` | 只在 `handoff_answered`：`accepted`（帶 `run_id`）／`declined`／`no_answer`（輸入結束了）／`too_late`（過了十分鐘期限，帶等了多久）／`clock_went_back` |
 | `run_id` | Phase 7 起只在新 `granted` 列：每次執行新產生的 opaque 關聯 ID（`run-sha256:…`）；不是授權票據。舊列是 `null`，不補造 |
 | `grant_id` | Phase 7 起只在新 `granted` 列：完整 `Grant` canonical JSON 的 SHA-256（`grant-sha256:…`），同一份授權範圍穩定相同；它用來辨識票據，不取代每一步 scope／期限／步數／畫面驗證。舊列是 `null`，不補造 |
 | `action` | 完整的動作與目標——**含完整網址或檔案路徑** |
@@ -1187,6 +1208,9 @@ alpha.69 那句「沒按過就沒有這個檔案」在 alpha.70 之後是假的�
 數量與讀不懂的原始列也在最外層回報，不讓殘缺 audit 冒充完整。輸出因此仍含 task、完整
 網址或檔案路徑、結果與理由，不能當成已去敏報告分享。未完成的 run 會把結束與耗時留成
 `null`、`complete=false`；舊列沒有 ID 時也維持 `null`，不拿假 ID 填空。
+接手的那幾輪和它的提議、回答放在同一組，另帶一欄 `handoff`（提議 ID、提議與回答的
+時刻、她不接的件數、回答）；那一組的開始時間是拿到授權書那一刻，和文字報告的
+「開始：」一致。沒答應的提議自己收成一組；不是接手開的那幾輪 `handoff` 是 `null`。
 
 **它會跟著「忘掉」一起走。** `sister forget --last 7d --yes` 和字母人上的
 「忘掉這一整天」都會把落在那段時間裡的列從檔案裡刪掉——刪的是字本身，不是
@@ -1194,11 +1218,12 @@ alpha.69 那句「沒按過就沒有這個檔案」在 alpha.70 之後是假的�
 
 **它也會跟著 `sister export` 一起走。** 那個指令自稱全量匯出（SPEC §11.8），
 而這個檔案是記憶、不是這台機器的設定，所以它跟 `sister.db` 一起被帶走，
-不用另外加開關。只有既沒跑過 `sister do`、也沒按過字母人「要我幫你打開嗎」
-那顆按鈕，匯出的目錄裡才**不會有**這個檔案（不是一個空檔案）。`sister do`
-只要跑過一次就會寫，即使一步都沒答應；字母人則是你真的按下那顆按鈕、讓她執行時
-才寫。檔案一旦存在就會跟著匯出走，包含其中的完整網址或檔案路徑；`sister do`
-還會留下你打的 `--task` 原文和她提議過的每一串網址。
+不用另外加開關。只有既沒跑過 `sister do`、沒被端出過接手提議、也沒按過字母人
+「要我幫你打開嗎」那顆按鈕，匯出的目錄裡才**不會有**這個檔案（不是一個空檔案）。
+`sister do` 只要跑過一次就會寫，即使一步都沒答應；`sister takeover` 端出提議就會寫，
+即使他說不要；字母人則是你真的按下那顆按鈕、讓她執行時才寫。檔案一旦存在就會跟著
+匯出走，包含其中的完整網址或檔案路徑；`sister do` 還會留下你打的 `--task` 原文和
+她提議過的每一串網址，`sister takeover` 還會留下端出去與不接的每一張承諾原文。
 
 **但它不受保留期管**（alpha.69 的狀態，見〈已知缺口〉第 8 條）。`sister prune`
 會清掉過期的畫面與文字，不會碰這個檔案——三年前你按過的那顆按鈕，那串網址

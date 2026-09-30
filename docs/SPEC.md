@@ -407,7 +407,9 @@ a 類（顯式時間承諾）**——這兩類是「使用者自己能立刻驗�
    不是授權夠精確〕。授權是結構化物件，不是一句話。目前 saved grant 落地的是
    `grant = {task, apps[], allowed_actions[], expiry, step_limit, url_targets[]}`。
    `url_targets[]` 只授權列出的完整 URL 去處；舊授權書缺欄時是空集合，無人值守 URL
-   一律拒絕。現在的三種 action
+   一律拒絕。`takeover` 目前落地為 `sister takeover`，它不是一組更寬的權限：她把
+   承諾表上做得到的下一步連同一張只涵蓋那幾步的授權書一次端出來，他答一次「好」，
+   每一步仍照上面那條無人值守的路重新檢查；那張授權書只活在那一次執行裡。現在的三種 action
    沒有資料 payload，先加 `data_scope`／`denied_actions[]` 只會造出沒人讀的假授權；
    新增資料型或不可逆 action 時，才必須在同一版把對應 scope／deny 語意與 enforcement
    原子加入。

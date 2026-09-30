@@ -1,5 +1,19 @@
 # HANDOFF — 交給下一位 agent（Codex）
 
+**2026-09-30 Phase 7 關閉（alpha.170）：**`sister takeover` 把承諾表上做得到的下一步（最多
+五步）連同一張剛好涵蓋那幾步的授權書一次端出來；他在終端機答一次「好」，她照順序做，每一步
+看下一張畫面。提議與回答寫在 `action-log.jsonl`（`handoff_offered`／`handoff_answered`），和
+底下那一輪同一份檔案，所以 forget／export 不必另接；`takeover.lock` 從提議拿到收尾，讓
+`--status` 分得出還在跑和中斷了。入口是 `ops.rs` 的 `act::takeover` 與
+`crates/sister-hands/src/handoff.rs`。收據：`crates/sister-cli/src/ops/takeover_tests.rs` 的 24 條
+（正常／拒絕／中止，以及 12 列紀錄的每一個前綴在鎖在與不在時的 `--status`）與
+`takeover_tests::scenarios` 的 20 組加一條表格測試（真 replay＋真 `sister review`，停法兩兩
+不同）；提議端與執行端 11 刀、回報分組 6 刀突變全紅。
+測試注意：同一個測試行程裡別的測試正在 spawn 假大腦，子行程在 exec 之前握著所有 fd 的拷貝，
+剛放掉的 flock 會短暫看起來還被拿著，所以 `assert_unlocked` 最多等兩秒（Windows 的 handle
+不繼承，產品不受影響）。**還缺**：離開偵測（她不會自動提議；`sister speak` 照實說 leaving
+沒有訊號源）與白名單 #2（文件整理類，需要會搬動檔案的動作，要做就整條一起做）。
+
 **2026-09-30 三個 session 收尾，Phase 6 關閉（alpha.169）：**Phase 7 的 watch 遠端通報與
 接手審計（已在 main）、eb61a808 的不可逆動作與十輪演練、batc 的承諾綁定與 URL 身分，
 三支合成 alpha.169。合併後十輪演練被承諾綁定擋下，改成每輪各綁自己的承諾與 URL
@@ -417,10 +431,10 @@ runner 背景終端機文字干擾 OCR 而失敗；測試現在自行建立全�
 | 3 | 斷句 + 事實層 | 2 / 1 | 剩斷句邊界 F1 ≥ 0.75（要手標語料） |
 | 4 | 理解與記憶（大腦） | 2 / 3 | L2/L3 已接 CLI；剩 A/B +10pt、成本實測、兩週自用 |
 | 5 | **Release 1.0** | 2 / 10 | **現在的主戰場**，見下一節 |
-| 6 | 手 v1（hands sidecar） | 0 / 3 | 有實作與 injection 套件，三個退場條件都沒收 |
-| 7 | 接手模式 | 0 / 2 | 沒開始 |
+| 6 | 手 v1（hands sidecar） | 3 / 0 | alpha.169 關閉：injection 開網址 180 例＋開檔 60 例、五類不可逆動作無法表示、十輪自動演練 |
+| 7 | 接手模式 | 2 / 0 | alpha.170 關閉：`sister takeover` 的 offer → 執行 → 回報迴路與 20 組情境；離開偵測與文件整理類還沒做 |
 | 8 | 生態與 Preview 成熟化 | — | 持續，不擋 1.0 |
-| | **合計** | **18 / 27** | |
+| | **合計** | **23 / 22** | |
 
 ### Release 1.0 合約〔2026-09-06 由 Ted 定案，不要重新辯論〕
 
