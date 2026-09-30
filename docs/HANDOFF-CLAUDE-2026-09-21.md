@@ -3477,3 +3477,66 @@ grok 自己切了兩刀：拿掉整段承諾比對，矩陣紅在第一例（沒
   `sister-desktop.exe`、`AI-Sister-Linux-X11-amd64.deb`。release body 的前綴和
   `./scripts/release-notes.sh v0.1.0-alpha.169` 的輸出逐字相同，後面只接了 GitHub 自動加的
   Full Changelog。
+
+## 38. alpha.170：`sister takeover`，Phase 7 關閉（2026-09-30）
+
+Ted 要 Phase 7 往下推。37.7 留下的兩格退場條件都還沒開工；這一版兩格都做完。
+
+### 38.1 做了什麼
+
+- `sister takeover`（`ops.rs` 的 `act::takeover`、`crates/sister-hands/src/handoff.rs`）：
+  她把承諾表上做得到的下一步一次端出來，最多五步；他答一次「好」，她照順序做，每一步看
+  下一張畫面，最後印一行收尾。
+- 提議上的每一道檢查，都和執行那一刻跑同一支函式、同一個順序（`build_offer`）：兩個 pass
+  都指過目標畫面、剛好一個 app、授權書指名得了這條網址、網址過得了 `url-policy`、目標白名單。
+  不接的那一件寫進紀錄的理由，就是 `refused` 會寫的同一個 `RefusalReason`。同一張卡的同一步
+  先前憑綁著它的授權書做成過，列成「已經做過了」，不再端。
+- 授權書剛好涵蓋端出去的那幾步（app、動作種類、完整網址目標、步數、每一張承諾），期限是
+  提議端出來起十分鐘；只活在那一個行程裡，不存成 `grant.json`。
+- 紀錄：`handoff_offered` 寫在問他之前，`handoff_answered` 分五種回答，只有「好」往下寫
+  `granted`（帶同一個 run_id）與每一步。`takeover.lock` 從提議拿到收尾，`--status` 用共享鎖
+  看一眼，分得出還在跑和中斷了。
+- `hands runs` 把提議、回答和底下那一輪排成同一組；`--json` 多 `handoff` 欄位，開始時間是
+  他答好的那一刻，和文字報告的「開始：」同一個時間。只剩提議那一列時，文字報告指向這個
+  資料目錄的 `takeover --status`。
+
+### 38.2 驗收
+
+- `takeover_tests::scenarios`：20 組加一條表格測試。每一組由真的 replay 錄三張畫面、真的
+  `sister review` 以假大腦寫出承諾表，再走產品同一支 `run_with_output`；每一組至少一步對照
+  真的交到手上，斷言停在哪一層與 exact 理由，20 組的停法兩兩不同。
+- `crates/sister-cli/src/ops/takeover_tests.rs`：24 條，正常、拒絕（不要／輸入結束／過期／
+  時鐘倒退）、中止，以及 12 列紀錄的每一個前綴在鎖在與不在時的 `--status`。
+- 突變。兩支突變腳本開頭各跑一次沒切的對照組（全綠），每一刀之後從備份還原並比 sha256：
+  提議端五刀（目標白名單、明確去處、網址來源、目標畫面、
+  兩個 app 算成一個）、執行端五刀（步前拔手、步前全停、重讀不看狀態、步上畫面、沒驗到的一步
+  不停後面）、授權書不比網址目標一刀，11 刀各自讓對應的情境紅；回報分組六刀（說好之後的
+  `granted` 自成一組、說不要不收組、`--status` 指標不帶資料目錄、開始時間用提議那一刻、
+  `left_out` 不計、回答不併進提議）全紅。
+
+### 38.3 我這一輪做錯的
+
+- 突變的對照組紅過一次「收尾之後還有人拿著接手鎖」。同一個測試行程裡，情境組正在 spawn
+  假大腦；子行程在 exec 之前握著所有 fd 的拷貝，剛放掉的 flock 會短暫看起來還被拿著。
+  `assert_unlocked` 改成最多等兩秒；真的漏掉的鎖兩秒後還是紅的。Windows 的 handle 不繼承，
+  產品不受影響。
+- 突變腳本還在跑的時候讀了工作樹的 `ops.rs`，讀到的是被切過的那一版。之後讀 commit 過的
+  程式一律用 `git show HEAD:…`。
+- 一則 commit 訊息寫了前一個 commit 才做的改動，已 amend。
+- PHASES 第一版寫「拿掉其中任一道檢查」，實際只切了 11 刀，改成照實列出；「聽不懂的回答再問
+  一次」那條測試最後是答好，從「拒絕」移到「正常」。
+- 第一趟閘門（detached `a3cbc7e0`）紅在 clippy 與 `check-windows.sh`：`takeover_tests.rs` 有
+  三條 lint（兩處 `type_complexity`、一處 `err_expect`）。commit 之前沒有對測試目標跑
+  `cargo clippy --all-targets`。
+- 閘門和接手測試同時跑的時候，兩組情境紅在「輪到了它才被擋」。情境組原本用真時鐘：假手把
+  「之後」那張畫面寫在收到動作那一刻加一秒，產品在那之後還要寫一列紀錄才讀時鐘；機器一忙、
+  中間超過一秒，第一步就被讀成畫面沒對上，第二步輪不到。改成情境組自己的時鐘：產品每問一次
+  往前走 1 毫秒，手讀同一個鐘。驗法是在「寫完那一列、讀時鐘」之間插 1.5 秒：舊夾具兩組都紅
+  在同一行，新夾具兩組都綠。CI runner 比開發機慢，舊夾具在 CI 上一樣可能紅。
+
+### 38.4 還沒做的
+
+- 離開偵測：她不會因為他要走了就自動提議；`sister speak` 照實說 leaving 沒有訊號源。
+- 白名單 #2（文件整理類）：需要會搬動檔案的動作，要做就連 scope 與驗收整條一起做。
+- `run_with_stdin_kind` 在終端機那一側接上真的 stdin 與 `PlatformExecutor`，沒有測試走到；
+  和 `sister do` 同一個形狀。沒在 Windows 真機跑過 `sister takeover`。
