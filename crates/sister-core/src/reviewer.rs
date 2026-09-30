@@ -4885,6 +4885,105 @@ mod tests {
         assert_refused(&db, &result, &["money", "拒絕"]);
     }
 
+    /// 模型這條路只認 `url`（http/https）與 `file_path`。
+    ///
+    /// 八種 kind 都用 `test_insert_fact` 種進清單。這支函式只讀已經落庫的
+    /// kind 與 raw，不經 OCR。email、error_code、id_like、datetime 跟網址或
+    /// 路徑寫在同一行時，重疊規則會讓優先權較高的 kind 先吃掉字，單行 OCR
+    /// 夾具保證不了「這一列的 kind 就是要測的那一種」。抽取覆蓋在 `facts.rs`；
+    /// url／file_path 寫進承諾卡的那條路在上面的 fixture。
+    #[test]
+    fn only_url_and_file_path_kinds_resolve_and_focus_window_is_unreachable() {
+        use crate::facts::FactKind;
+        #[derive(Clone, Copy)]
+        enum Expect {
+            OpenUrl,
+            OpenFile,
+            Refused,
+        }
+
+        assert_eq!(FactKind::ALL.len(), 8, "前提：FactKind 要有 8 種");
+        let mut db = Db::open_in_memory().expect("db");
+        let mut kinds_run = 0usize;
+        let mut open_url = 0usize;
+        let mut open_file = 0usize;
+        let mut refused = 0usize;
+        let mut seq = 0i64;
+        for kind in FactKind::ALL {
+            let samples: &[(&str, Expect)] = match kind {
+                FactKind::Url => &[
+                    ("https://example.com/x", Expect::OpenUrl),
+                    ("http://example.com/y", Expect::OpenUrl),
+                ],
+                FactKind::FilePath => &[(r"C:\work\report.txt", Expect::OpenFile)],
+                FactKind::Money => &[("NT$500", Expect::Refused)],
+                FactKind::Phone => &[("0912345678", Expect::Refused)],
+                FactKind::Email => &[("person@example.com", Expect::Refused)],
+                FactKind::ErrorCode => &[("ENOENT", Expect::Refused)],
+                FactKind::IdLike => &[("A123456789", Expect::Refused)],
+                FactKind::DateTimeMention => &[("2026-09-30 17:00", Expect::Refused)],
+            };
+            for (raw, expect) in samples {
+                let id = db
+                    .test_insert_fact(1_700_250_000_000 + seq, kind.as_str(), raw)
+                    .expect("insert fact");
+                seq += 1;
+                let row = db.fact_by_id(id).expect("query").expect("listed fact");
+                assert_eq!(row.kind, kind.as_str());
+                assert_eq!(row.raw, *raw);
+                let resolved =
+                    resolve_allowed_next_step(&db, &[row], Some(&NextStepRef { fact: id }))
+                        .expect("resolve");
+                match (expect, resolved) {
+                    (Expect::OpenUrl, ResolvedNextStep::Resolved { json, fact_id }) => {
+                        assert_eq!(fact_id, id);
+                        let value: serde_json::Value = serde_json::from_str(&json).expect("json");
+                        assert_eq!(value["action"], "open_url");
+                        assert_eq!(value["url"], *raw);
+                        assert!(value.get("path").is_none(), "{json}");
+                        assert!(!json.contains("focus_window"), "{json}");
+                        open_url += 1;
+                    }
+                    (Expect::OpenFile, ResolvedNextStep::Resolved { json, fact_id }) => {
+                        assert_eq!(fact_id, id);
+                        let value: serde_json::Value = serde_json::from_str(&json).expect("json");
+                        assert_eq!(value["action"], "open_file");
+                        assert_eq!(value["path"], *raw);
+                        assert!(value.get("url").is_none(), "{json}");
+                        assert!(!json.contains("focus_window"), "{json}");
+                        open_file += 1;
+                    }
+                    (Expect::Refused, ResolvedNextStep::Refused(reason)) => {
+                        assert!(
+                            reason.contains(kind.as_str()),
+                            "拒絕句沒有點名 kind：{reason}"
+                        );
+                        assert!(
+                            reason.contains("不是 url 或 file_path"),
+                            "不是走 kind 拒絕那一臂：{reason}"
+                        );
+                        assert!(!reason.contains("focus_window"), "{reason}");
+                        assert!(!reason.contains("open_url"), "{reason}");
+                        assert!(!reason.contains("open_file"), "{reason}");
+                        refused += 1;
+                    }
+                    (Expect::OpenUrl | Expect::OpenFile, ResolvedNextStep::Refused(reason)) => {
+                        panic!("{kind:?} {raw} 不該被拒絕：{reason}")
+                    }
+                    (Expect::Refused, ResolvedNextStep::Resolved { json, .. }) => {
+                        panic!("{kind:?} 不該變成可執行下一步：{json}")
+                    }
+                    (_, ResolvedNextStep::NotAsked) => panic!("{kind:?} {raw} 被當成沒有人問"),
+                }
+            }
+            kinds_run += 1;
+        }
+        assert_eq!(kinds_run, 8, "前提：八種 kind 都要真的跑過");
+        assert_eq!(open_url, 2, "http 與 https 都要變成 open_url");
+        assert_eq!(open_file, 1, "file_path 要變成 open_file");
+        assert_eq!(refused, 6, "其餘六種 kind 都要被拒絕");
+    }
+
     #[test]
     fn a_url_without_a_scheme_is_refused_and_the_reason_is_visible() {
         let ocr = "LINE：五點去接她 17:00 example.com/x";
