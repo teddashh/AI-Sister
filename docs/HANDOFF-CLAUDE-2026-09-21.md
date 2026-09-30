@@ -3447,3 +3447,33 @@ grok 自己切了兩刀：拿掉整段承諾比對，矩陣紅在第一例（沒
   - 20 組監督式接手情境，逐組驗證白名單外的動作在執行前就停下；
   - offer → 執行 → 回報的完整迴路。
 - 還沒對真的 Discord 送過，CI 也不打。
+
+### 37.8 alpha.169 的出貨收據
+
+- 閘門：`/home/ted-h/tmp-tests/gates-all.sh` 在 detached `2b488faf` 上 53/53 綠；修完
+  Windows 之後在 detached `c81d44b9` 上也是 53/53 綠（樹 `9f8046bc071fc31d`）。
+- main 的第一趟 CI（run 36742609786，`2b488faf`）紅在 Windows：
+  `ops::watch::tests::json_report_is_written_but_live_master_stop_blocks_discord_before_transport`
+  取 JSONL 寫鎖回 `Access is denied. (os error 5)`。`append_json_report` 只用 `append(true)`
+  開檔；Windows 的 `LockFileEx` 要 handle 有讀或寫資料的權限，只有附加權限不夠。Linux 的
+  flock 不看開檔權限，所以本機與 Linux CI 都綠。`c81d44b9` 加上 `.read(true)`。
+  也就是說，`2b488faf` 在 Windows 上每一次 `--remote-json` 都會失敗；它沒有打 tag。
+- 同一個 commit 也修了 sister-notify 單元測試的暫存目錄。原本拿 thread 名稱組路徑，
+  而 libtest 的 thread 名稱是 `tests::…`，Windows 路徑不收冒號。這條在 Windows 上一次都
+  沒跑過：`cargo test --workspace` 碰到第一個紅的 binary（`sister-cli --bin sister`）就停，
+  排在後面的 binary 那一趟在 Windows 上都沒跑，包括這一版新加的 sister-notify、sister-core、
+  sister-hands 與 CLI 整合測試（含新的開檔注入矩陣）。第二趟才第一次跑到它們。
+- 第二趟 CI（run 36744097901，`c81d44b9`）：六個 job 全綠，Release 與 Website 只在 tag 上跑。
+  Windows 上 sister-notify 的 8 條單元測試與兩段 doctest、`injection_end_to_end` 的 11 條
+  （含 60 例開檔矩陣與良性開檔對照）、reviewer 的八種 kind 可達性都真的跑到而且綠。
+  良性開檔對照在 runner 上也走到平台執行層，沒有卡住。
+- staging 時 `master_stop::tests::release_admission_and_engage_have_no_lock_cycle_and_linearize`
+  紅過一次（`round 11: engage did not drain`）。這個檔案從 alpha.168 起沒動過；單獨重跑
+  20/20 綠，整個 sister-hands 套件重跑 5/5 綠。判斷是機器負載把 liveness 等待撐過逾時，
+  不是安全性問題。再紅時先看負載。
+- tag：`v0.1.0-alpha.169` 打在 `c81d44b9`，等 main 那趟 CI 全綠之後才打。tag 那趟
+  CI（run 36750437780）八個 job 全綠，含 Release 與 Website；2026-09-30T18:08:47Z 發布為
+  prerelease。四個 asset 和 alpha.168 同一組：`AI-Sister-Setup.exe`、`sister.exe`、
+  `sister-desktop.exe`、`AI-Sister-Linux-X11-amd64.deb`。release body 的前綴和
+  `./scripts/release-notes.sh v0.1.0-alpha.169` 的輸出逐字相同，後面只接了 GitHub 自動加的
+  Full Changelog。
