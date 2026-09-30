@@ -1,5 +1,23 @@
 # HANDOFF — 交給下一位 agent（Codex）
 
+**2026-09-29 Phase 6／7 後續：**現有 action 只有開網址、開檔、聚焦視窗；
+新增的雙入口測試證實送出／發布／付款／刪除／開 terminal 五類無法被解析成按鈕
+或持久化步驟。`ActionSnapshot` 現在拒收多餘欄位，不讓夾帶的意圖在讀 log 時消失。
+`PHASES.md` 的當前 Phase 6 條件據此更新；Phase 7 原本「等 Ted 累積真實 run 才
+能開始 offer／文件整理」的停點已移除，改由自動化正常／拒絕／停止／重開情境驗收。
+本輪 `cargo fmt --all -- --check`、`cargo clippy --workspace --all-targets -- -D warnings`、
+`cargo test --workspace --quiet` 與 `check-no-network.sh` 全通過。Phase 6 的注入
+退場條件仍未通過；不能把原有 20 條窗外 URL 測試算成 100% 注入攔截。
+
+**2026-09-29 Phase 6 驗收調整：**Ted 明確表示，不要把他在 Windows 親自完成
+10 項 semi-action 任務、交出真實可回放日誌當作前進條件。`PHASES.md` 已把這條
+換成 10 輪可重跑的自動演練，Phase 7 的自用次數門檻也改成自動化情境。
+新增的 CLI integration test 讓 10 個不同目標各自走 grant、核准、公開執行隘口，
+寫入 `action-log.jsonl`，再由 `hands runs --json` 確認 10 輪完整且目標相符。
+executor 仍是模擬的，不算 Windows 真實動作。`cargo fmt --all -- --check`、
+`cargo clippy --workspace --all-targets -- -D warnings`、`cargo test --workspace --quiet`
+與 `check-no-network.sh` 全通過；可以接著推 Phase 7，不等 Ted 的私有日誌。
+
 **2026-09-26 Phase 7 接手收據：**本分支已替 `sister watch` 加上每次命令明確指定的
 `--remote-json` 與 `--discord-webhook-env`。兩條路只共用封閉、去文字化 schema；Discord
 只准 exact webhook、不 redirect／proxy／retry，並在 physical all-stop admission/fence 內

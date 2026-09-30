@@ -901,6 +901,50 @@ fn the_gate_asks_both_copies_of_the_never_inherited_rule() {
     )));
 }
 
+/// The five reserved irreversible classes are absent from both inputs that can
+/// reach a public execution gateway. A future action cannot silently reuse this
+/// receipt: adding it to either enum requires this test and the exhaustive
+/// authorization/platform matches to be updated in the same change.
+#[test]
+fn irreversible_action_requests_have_no_executable_representation() {
+    let unavailable = [
+        r#"{"action":"submit","target":"form"}"#,
+        r#"{"action":"publish","target":"release"}"#,
+        r#"{"action":"pay","target":"invoice"}"#,
+        r#"{"action":"delete","target":"document"}"#,
+        r#"{"action":"open_terminal","target":"shell"}"#,
+    ];
+    assert_eq!(unavailable.len(), NeverInherited::ALL.len());
+    for (request, class) in unavailable.into_iter().zip(NeverInherited::ALL) {
+        assert!(
+            SuggestionButton::parse_json(request).is_err(),
+            "{} must not become a clickable or standing-grant suggestion",
+            class.name()
+        );
+        assert!(
+            serde_json::from_str::<ActionSnapshot>(request).is_err(),
+            "{} must not become a stored step that could receive a grant",
+            class.name()
+        );
+    }
+
+    // A stored step must not silently discard an extra field that changes the
+    // caller's apparent intent. The clickable-button parser already rejects it.
+    let disguised = r#"{"action":"open_url","url":"https://example.test/help","pay":"invoice"}"#;
+    assert!(SuggestionButton::parse_json(disguised).is_err());
+    assert!(serde_json::from_str::<ActionSnapshot>(disguised).is_err());
+
+    for request in [
+        r#"{"action":"open_url","url":"https://example.test/help"}"#,
+        r#"{"action":"open_file","path":"C:/work/report.txt"}"#,
+        r#"{"action":"focus_window","title":"Report"}"#,
+    ] {
+        let button = SuggestionButton::parse_json(request).expect("supported suggestion");
+        let snapshot: ActionSnapshot = serde_json::from_str(request).expect("supported step");
+        assert_eq!(button.snapshot(), snapshot);
+    }
+}
+
 /// 「忘掉」要把存著的授權書**兩個檔案**都帶走，而且回報的是真的刪掉的那幾個。
 ///
 /// **這一條守的是兩個執行檔共用的那一份。** CLI 的 `sister forget` 和字母人

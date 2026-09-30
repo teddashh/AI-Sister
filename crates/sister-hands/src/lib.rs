@@ -311,7 +311,7 @@ impl SuggestionButton {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "action", rename_all = "snake_case")]
+#[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ActionSnapshot {
     OpenUrl { url: String },
     OpenFile { path: PathBuf },
