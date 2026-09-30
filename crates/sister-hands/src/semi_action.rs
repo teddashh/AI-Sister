@@ -164,6 +164,13 @@ pub struct Grant {
     url_targets: Vec<String>,
     #[serde(default)]
     approved_commitment: Option<ApprovedCommitment>,
+    /// 接手提議一次端出好幾步時，第一步以外的那幾張（第一張在上面那一欄）。
+    ///
+    /// `sister do --save-grant` 只綁一張，這一欄永遠是空的；空的時候整欄不寫進
+    /// JSON，所以舊授權書和 `sister do` 的授權書序列化出來一個位元組都不變，
+    /// `audit_id` 也不變。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    also_approved: Vec<ApprovedCommitment>,
 }
 
 /// 由人選定並看過的承諾與具體動作。畫面與模型不能只靠相同網址借用這份意圖。
@@ -193,6 +200,7 @@ impl Grant {
             step_limit,
             url_targets: Vec::new(),
             approved_commitment: None,
+            also_approved: Vec::new(),
         }
     }
     /// 無人值守 URL 的 exact 去處清單。舊授權書沒有此欄，預設空集合並拒絕
@@ -213,7 +221,27 @@ impl Grant {
     }
     pub fn with_approved_commitment(mut self, approved: ApprovedCommitment) -> Self {
         self.approved_commitment = Some(approved);
+        self.also_approved.clear();
         self
+    }
+    /// 接手提議用：他一次看過、一次答應的那幾張，依端出來的順序。
+    ///
+    /// 每一張仍然各自要五樣都對得上（id、原文、動作、目標 fact、兩個 pass 都
+    /// 指過的證據）才鑄得出票；多綁幾張不會讓任何一張變寬。
+    pub fn with_approved_commitments(
+        mut self,
+        approved: impl IntoIterator<Item = ApprovedCommitment>,
+    ) -> Self {
+        let mut approved = approved.into_iter();
+        self.approved_commitment = approved.next();
+        self.also_approved = approved.collect();
+        self
+    }
+    /// 親手核准過的每一張，依核准時的順序。
+    pub fn approved_commitments(&self) -> impl Iterator<Item = &ApprovedCommitment> {
+        self.approved_commitment
+            .iter()
+            .chain(self.also_approved.iter())
     }
     pub const fn step_limit(&self) -> StepLimit {
         self.step_limit
@@ -284,17 +312,23 @@ impl Grant {
         } else {
             self.url_targets.join("、")
         };
-        let commitment = self.approved_commitment.as_ref().map_or_else(
-            || "（沒有，無人值守動作一律拒絕）".to_owned(),
-            |approved| {
-                format!(
-                    "#{}「{}」；{}",
-                    approved.id,
-                    approved.text,
-                    approved.action.describe()
-                )
-            },
-        );
+        // 問的是「會放行哪幾張」，不是「第一欄有沒有值」：一張手改過、第一欄
+        // 空著而後面那欄有值的授權書，放行的就是後面那幾張，這句話要照實列出來。
+        let commitment = if self.approved_commitments().next().is_none() {
+            "（沒有，無人值守動作一律拒絕）".to_owned()
+        } else {
+            self.approved_commitments()
+                .map(|approved| {
+                    format!(
+                        "#{}「{}」；{}",
+                        approved.id,
+                        approved.text,
+                        approved.action.describe()
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("／")
+        };
         format!(
             "任務「{}」；app：{apps}；動作：{actions}；網址目標：{url_targets}；親手核准的承諾：{commitment}；整張票在發出後 {} 毫秒內有效；每一輪各自最多 {} 步",
             self.task.0, self.expiry.valid_for_ms, self.step_limit.0
@@ -340,7 +374,7 @@ impl Grant {
         }
         // No unattended action may inherit a broad task grant solely from
         // model-produced screen text, regardless of its action kind.
-        if !self.approved_commitment.as_ref().is_some_and(|approved| {
+        if !self.approved_commitments().any(|approved| {
             step.commitment.as_ref().is_some_and(|source| {
                 approved.id == source.id
                     && approved.text == source.text
@@ -601,6 +635,15 @@ pub enum AbortActor {
     HandsPulled,
     /// 有人在別的地方啟用了跨 capture／brain／hands 的全停。
     MasterStopped,
+    /// 接手模式裡上一步做完之後，畫面沒有對上它要開的東西（或看不出來），
+    /// 所以後面的步驟不做（SPEC §9.3「每步後截圖驗證，失敗即停」）。
+    UnverifiedStep,
+    /// 接手模式裡上一步沒有做成——在交給作業系統之前被擋下來，或交出去了
+    /// 那一端失敗——所以後面的步驟不做。
+    StepNotDone,
+    /// 接手模式裡輪到這一步時重讀承諾表，他答應的那張卡已經不在進行中
+    /// （被整理掉、標成做完或放下），所以這一步和後面的步驟都不做。
+    PlanChanged,
 }
 impl AbortActor {
     const fn name(self) -> &'static str {
@@ -609,6 +652,9 @@ impl AbortActor {
             Self::System => "系統",
             Self::HandsPulled => "外部拔手開關",
             Self::MasterStopped => "外部三層全停開關",
+            Self::UnverifiedStep => "畫面驗證（上一步做完之後，畫面沒有對上它要開的東西）",
+            Self::StepNotDone => "逐步檢查（上一步沒有做成：被擋下來，或交出去之後那一端失敗）",
+            Self::PlanChanged => "開工前重讀承諾表（他答應的那張卡已經不在進行中）",
         }
     }
 }

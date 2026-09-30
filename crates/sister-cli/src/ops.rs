@@ -839,6 +839,10 @@ pub(crate) const MIN_TICK_MS: u64 = 200;
 /// `sister url-policy`——她問「我可不可以自己按網址」，他答（PHASES #42）。
 pub(crate) mod url_policy;
 
+/// `sister takeover` 的測試：交接迴路，以及白名單外的動作一步都交不到手上。
+#[cfg(test)]
+mod takeover_tests;
+
 /// 測試用的暫存目錄。自己刻，不引 `tempfile`——理由見
 /// `scripts/check-no-network.sh`：出貨的相依樹上每多一個 crate，那份稽核
 /// 就多一份要人讀的東西，而這個結構只有九行。
@@ -3638,27 +3642,7 @@ pub mod act {
     ) -> Result<()> {
         let pulled_at_start = sister_hands::kill_switch::is_pulled(data_dir);
         let master_stopped_at_start = sister_hands::master_stop::is_stopped(data_dir);
-        if pulled_at_start || master_stopped_at_start {
-            let pulled_since = sister_hands::kill_switch::pulled_since(data_dir)
-                .map(|value| format!("（從 {} 起）", crate::fmt::timestamp(value)))
-                .unwrap_or_else(|| "（拔手時間讀不到）".into());
-            let master_since = sister_hands::master_stop::stopped_since(data_dir)
-                .map(|value| format!("（從 {} 起）", crate::fmt::timestamp(value)))
-                .unwrap_or_else(|| "（全停時間讀不到）".into());
-            let hands_resume = cmd(data_dir, "hands resume");
-            let master_resume = cmd(data_dir, "stop-all --off");
-            let blockers = match (pulled_at_start, master_stopped_at_start) {
-                (true, true) => format!(
-                    "手目前被拔掉了{pulled_since}，而且全停閘門也擋著新工作{master_since}；要真的交出動作，兩個都要解除：先後跑 `{hands_resume}` 與 `{master_resume}`"
-                ),
-                (true, false) => {
-                    format!("手目前被拔掉了{pulled_since}；要接回去請跑 `{hands_resume}`")
-                }
-                (false, true) => {
-                    format!("全停閘門目前擋著新工作{master_since}；要恢復請跑 `{master_resume}`")
-                }
-                (false, false) => unreachable!("outer condition checked"),
-            };
+        if let Some(blockers) = stop_blockers(data_dir, pulled_at_start, master_stopped_at_start) {
             if opts.dry_run {
                 writeln!(
                     out,
@@ -3988,28 +3972,7 @@ pub mod act {
                         &step,
                         clock(),
                         sister_hands::url_policy::UrlOpenPolicy::from_answer(opts.url_open),
-                        |url| {
-                            use sister_hands::url_policy::{TargetAddressOrigin, UrlOrigin};
-                            let visited = source.site_in_her_record(url)?;
-                            if visited != UrlOrigin::InHerRecord {
-                                return Ok(visited);
-                            }
-                            let Some(fact_id) = commitment.allowed_next_step_fact else {
-                                return Ok(UrlOrigin::TargetAddressUnmeasured);
-                            };
-                            Ok(match source.target_address_on_source_frame(fact_id, url)? {
-                                TargetAddressOrigin::SameFrameAddress => UrlOrigin::InHerRecord,
-                                TargetAddressOrigin::OtherScreenText => {
-                                    UrlOrigin::TargetOnlyInScreenText
-                                }
-                                TargetAddressOrigin::AddressUnmeasured => {
-                                    UrlOrigin::TargetAddressUnmeasured
-                                }
-                                TargetAddressOrigin::UntrustedSourceFrame => {
-                                    UrlOrigin::TargetSourceUntrusted
-                                }
-                            })
-                        },
+                        |url| unattended_url_origin(source, commitment.allowed_next_step_fact, url),
                     ) {
                         // **這道網址閘門擺在授權書通過之後，不是之前。** 兩邊都
                         // 是拒絕、都不會執行，所以順序只影響他讀到哪一句——而
@@ -4307,6 +4270,59 @@ pub mod act {
         Ok(())
     }
 
+    /// 拔手與三層全停：擋著的是哪一個（或兩個），以及各自怎麼解除。都沒擋就是 `None`。
+    ///
+    /// `sister do` 與 `sister takeover` 開頭共用這一句。兩邊各寫一份的話，某一版
+    /// 只有一邊學會講「兩個都要解除」，另一邊還在叫他只解一個。
+    fn stop_blockers(data_dir: &Path, pulled: bool, master_stopped: bool) -> Option<String> {
+        let pulled_since = sister_hands::kill_switch::pulled_since(data_dir)
+            .map(|value| format!("（從 {} 起）", crate::fmt::timestamp(value)))
+            .unwrap_or_else(|| "（拔手時間讀不到）".into());
+        let master_since = sister_hands::master_stop::stopped_since(data_dir)
+            .map(|value| format!("（從 {} 起）", crate::fmt::timestamp(value)))
+            .unwrap_or_else(|| "（全停時間讀不到）".into());
+        let hands_resume = cmd(data_dir, "hands resume");
+        let master_resume = cmd(data_dir, "stop-all --off");
+        Some(match (pulled, master_stopped) {
+            (true, true) => format!(
+                "手目前被拔掉了{pulled_since}，而且全停閘門也擋著新工作{master_since}；要真的交出動作，兩個都要解除：先後跑 `{hands_resume}` 與 `{master_resume}`"
+            ),
+            (true, false) => {
+                format!("手目前被拔掉了{pulled_since}；要接回去請跑 `{hands_resume}`")
+            }
+            (false, true) => {
+                format!("全停閘門目前擋著新工作{master_since}；要恢復請跑 `{master_resume}`")
+            }
+            (false, false) => return None,
+        })
+    }
+
+    /// 無人值守開網址時，「這個網址說得出來源嗎」那道查詢（PHASES #42）。
+    ///
+    /// 站在她的紀錄裡還不夠：目標那筆 fact 的來源畫面，位址列上要就是這一條。
+    /// `sister do --unattended` 與 `sister takeover` 的提議、執行三個地方都問這一支，
+    /// 所以「提議上說她會做」和「真的跑到那一步」問的是同一個問題。
+    fn unattended_url_origin(
+        source: &impl StepSource,
+        target_fact_id: Option<i64>,
+        url: &str,
+    ) -> Result<sister_hands::url_policy::UrlOrigin> {
+        use sister_hands::url_policy::{TargetAddressOrigin, UrlOrigin};
+        let visited = source.site_in_her_record(url)?;
+        if visited != UrlOrigin::InHerRecord {
+            return Ok(visited);
+        }
+        let Some(fact_id) = target_fact_id else {
+            return Ok(UrlOrigin::TargetAddressUnmeasured);
+        };
+        Ok(match source.target_address_on_source_frame(fact_id, url)? {
+            TargetAddressOrigin::SameFrameAddress => UrlOrigin::InHerRecord,
+            TargetAddressOrigin::OtherScreenText => UrlOrigin::TargetOnlyInScreenText,
+            TargetAddressOrigin::AddressUnmeasured => UrlOrigin::TargetAddressUnmeasured,
+            TargetAddressOrigin::UntrustedSourceFrame => UrlOrigin::TargetSourceUntrusted,
+        })
+    }
+
     /// 一張都端不出來的時候，**為什麼**。
     ///
     /// 這四種處境在 alpha.70 剛做出來的時候印的是同一句話——
@@ -4441,6 +4457,1015 @@ pub mod act {
             )?;
         }
         Ok(())
+    }
+
+    /// `sister takeover`：她把承諾表上自己做得到的下一步一次端出來，他在鍵盤上
+    /// 答一次「好」，她照順序做；每一步做完看下一張畫面，對不上、沒做成、手被拔掉
+    /// 或三層全停，後面的步驟都不做。
+    ///
+    /// **這不是新的一種手。** 每一步走的是 `sister do --use-grant --unattended`
+    /// 同一串閘門：目標畫面兩個 pass 都指過、五維授權、綁卡、網址來源、目標白名單、
+    /// 拔手與全停，最後才交給作業系統。多出來的只有三件事：她自己把做得到的挑出來
+    /// （挑不進來的逐件講理由）；授權書只活在這個行程的記憶體裡，不存成
+    /// `grant.json`，下一個行程拿不到；提議、回答、每一步與收尾都寫進同一份
+    /// `action-log.jsonl`，重開之後 `--status` 讀得回走到哪裡。
+    pub mod takeover {
+        use super::*;
+        use sister_hands::handoff::{
+            self, HandoffAnswer, HandoffState, LeftOut, LeftOutWhy, LockAttempt, RunEnd,
+        };
+        use sister_hands::semi_action::{
+            ApprovedCommitment, TargetOnScreen, UnattendedAuthorizationFailure,
+        };
+
+        /// 接手那張授權書的任務名。一次接手就是一張，只活在那個行程裡。
+        const TASK: &str = "接手承諾表上的下一步";
+
+        /// 一次最多端出幾步。做得到的比這多時，多的這次先不端——他答一次「好」，
+        /// 要看得完、記得住自己答應了什麼。
+        pub(crate) const MAX_STEPS: usize = 5;
+
+        pub struct Options {
+            /// 只讀出最後一次接手走到哪裡，不提議、不做。
+            pub status: bool,
+            /// 同 [`super::Options::url_open`]：由呼叫端讀好傳進來，這裡不自己讀設定檔。
+            pub url_open: Option<sister_hands::url_policy::UrlOpenAnswer>,
+            /// 這一趟 CLI 明確收到的 `--config`；只用來印下一步。
+            pub url_policy_config: Option<PathBuf>,
+        }
+
+        pub fn run(data_dir: &Path, opts: &Options) -> Result<()> {
+            if opts.status {
+                return status_to(data_dir, &mut std::io::stdout());
+            }
+            run_with_stdin_kind(data_dir, opts, std::io::stdin().is_terminal())
+        }
+
+        pub(crate) fn run_with_stdin_kind(
+            data_dir: &Path,
+            opts: &Options,
+            stdin_is_terminal: bool,
+        ) -> Result<()> {
+            // 和 `sister do` 同一條：管子或檔案餵進來的「好」會被記成他當場答應。
+            // 擋在打開資料庫、拿鎖、寫任何一列之前。
+            if !stdin_is_terminal {
+                anyhow::bail!(
+                    "沒有提議，也沒有做任何事：stdin 不是終端機。接手只收你在鍵盤上當場打的「好」——管子或檔案餵進來的字會被記成你答應了。"
+                );
+            }
+            let db = open_existing(data_dir)?;
+            let stdin = std::io::stdin();
+            let mut executor = sister_hands::platform::PlatformExecutor::new(data_dir);
+            run_with_output(
+                data_dir,
+                opts,
+                &db,
+                &mut stdin.lock(),
+                &mut executor,
+                &mut sister_core::now_ms,
+                &mut |ms| std::thread::sleep(std::time::Duration::from_millis(ms)),
+                &mut std::io::stdout(),
+            )
+        }
+
+        /// 端得出去的一步。
+        struct Step {
+            card: sister_core::db::CommitmentRow,
+            action: sister_hands::ActionSnapshot,
+            app: String,
+        }
+
+        /// 她不接的一件：寫進紀錄的那一份，和印在畫面上的那一句。
+        ///
+        /// 畫面那一句可以比紀錄多講一點（哪一筆 fact、哪個網站、改哪份設定檔），
+        /// 但理由的型別只有紀錄裡那一個。
+        struct Skipped {
+            left_out: LeftOut,
+            screen: String,
+        }
+
+        struct Offer {
+            steps: Vec<Step>,
+            skipped: Vec<Skipped>,
+            live: usize,
+            not_open: usize,
+            without_next_step: usize,
+            held_back: usize,
+        }
+
+        impl Offer {
+            fn skip(
+                &mut self,
+                card: &sister_core::db::CommitmentRow,
+                action: Option<sister_hands::ActionSnapshot>,
+                why: LeftOutWhy,
+                screen: Option<String>,
+            ) {
+                let screen = screen.unwrap_or_else(|| why.message());
+                self.skipped.push(Skipped {
+                    left_out: LeftOut {
+                        commitment_id: card.id,
+                        text: card.text.clone(),
+                        action,
+                        why,
+                    },
+                    screen,
+                });
+            }
+
+            /// 他答應的那張授權書：範圍剛好是端出去的這幾步，一步不多。
+            fn grant(&self, now: i64) -> Result<Grant> {
+                let steps = u32::try_from(self.steps.len()).context("端出去的步數超出範圍")?;
+                let step_limit = StepLimit::new(steps).context("沒有步驟的提議不會端出去")?;
+                let grant = Grant::new(
+                    Task::new(TASK),
+                    AllowedApps::new(self.steps.iter().map(|step| App::new(step.app.as_str()))),
+                    AllowedActions::new(self.steps.iter().map(|step| ActionKind::of(&step.action))),
+                    Expiry::after_issued(now, handoff::OFFER_WINDOW_MS),
+                    step_limit,
+                )
+                .with_url_targets(self.steps.iter().filter_map(|step| match &step.action {
+                    sister_hands::ActionSnapshot::OpenUrl { url } => Some(url.clone()),
+                    _ => None,
+                }))
+                .map_err(anyhow::Error::msg)?;
+                Ok(
+                    grant.with_approved_commitments(self.steps.iter().map(|step| {
+                        ApprovedCommitment {
+                            id: step.card.id,
+                            text: step.card.text.clone(),
+                            action: step.action.clone(),
+                            target_fact_id: step.card.allowed_next_step_fact,
+                            agreed_evidence_json: step.card.agreed_evidence_json.clone(),
+                        }
+                    })),
+                )
+            }
+        }
+
+        fn refused(reason: RefusalReason) -> LeftOutWhy {
+            LeftOutWhy::WouldBeRefused { reason }
+        }
+
+        /// 把承諾表讀成一份提議。
+        ///
+        /// **每一道檢查都是執行那一刻會跑的同一支函式，排在同一個順序。** 提議上
+        /// 說「這件她做得到」，到了那一步卻被擋，他答的「好」就答在一份假的清單上；
+        /// 反過來，這裡多擋一道執行時不會擋的，就是替產品發明一條規則。
+        fn build_offer(
+            source: &impl StepSource,
+            replay: &sister_hands::Replay,
+            opts: &Options,
+        ) -> Result<Offer> {
+            let cards = source.live_commitments()?;
+            let mut offer = Offer {
+                steps: Vec::new(),
+                skipped: Vec::new(),
+                live: cards.len(),
+                not_open: 0,
+                without_next_step: 0,
+                held_back: 0,
+            };
+            let policy = sister_hands::url_policy::UrlOpenPolicy::from_answer(opts.url_open);
+            // `live_commitments` 新的在前；接手照答應的先後做，舊的在前。
+            for card in cards.into_iter().rev() {
+                if card.status != "open" {
+                    offer.not_open += 1;
+                    continue;
+                }
+                let button = match sister_hands::commitment_action::parse_allowed_next_step(
+                    card.allowed_next_step.as_deref(),
+                ) {
+                    AllowedNextStep::Missing => {
+                        offer.without_next_step += 1;
+                        continue;
+                    }
+                    AllowedNextStep::Unparseable { reason, .. } => {
+                        offer.skip(&card, None, LeftOutWhy::NextStepUnreadable { reason }, None);
+                        continue;
+                    }
+                    AllowedNextStep::Suggestion(button) => button,
+                };
+                let action = button.snapshot();
+                if let Some(at_ms) = handoff::step_done_at(replay, card.id, &action) {
+                    offer.skip(&card, Some(action), LeftOutWhy::AlreadyDone { at_ms }, None);
+                    continue;
+                }
+                let expected_target = action.expected_target();
+                let target = card.allowed_next_step_fact.zip(expected_target.as_deref());
+                // 1. 目標那筆 fact 的畫面，兩個 pass 都指過嗎。
+                if let Some((message, why)) = unattended_target_frame_refusal(
+                    source,
+                    card.agreed_evidence_json.as_deref(),
+                    &card.evidence_json,
+                    target,
+                )? {
+                    offer.skip(
+                        &card,
+                        Some(action),
+                        refused(RefusalReason::UnattendedTargetHasNoCitedFrame { why }),
+                        Some(message),
+                    );
+                    continue;
+                }
+                // 2. 問得出剛好一個 app 嗎。問不出的話，授權書只能寫一個佔位的名字，
+                //    而那個名字不該被寫進任何一張授權書。
+                let app = step_app(source, &card.evidence_json, target)?;
+                let StepApp::Known { app: app_name, .. } = &app else {
+                    let rejection = GrantRejection::Apps;
+                    let screen = match app.explanation() {
+                        Some(extra) => format!("{} {extra}", rejection.message()),
+                        None => rejection.message().to_string(),
+                    };
+                    offer.skip(
+                        &card,
+                        Some(action),
+                        refused(RefusalReason::NotCoveredByGrant { rejection }),
+                        Some(screen),
+                    );
+                    continue;
+                };
+                // 3. 授權書指名得了這條網址嗎（寫全的 http／https、不帶帳號資訊）。
+                if let sister_hands::ActionSnapshot::OpenUrl { url } = &action
+                    && !sister_hands::target_policy::same_explicit_destination(url, url)
+                {
+                    offer.skip(
+                        &card,
+                        Some(action.clone()),
+                        refused(RefusalReason::NotCoveredByGrant {
+                            rejection: GrantRejection::Target,
+                        }),
+                        Some(
+                            "這條網址不是寫全的 http／https 去處（或帶著帳號資訊），授權書沒辦法指名它。"
+                                .to_string(),
+                        ),
+                    );
+                    continue;
+                }
+                // 4. 網址過得了他選的那道規則嗎（PHASES #42）。
+                if let Some(why) = sister_hands::url_policy::try_url_origin_gap(
+                    &action,
+                    sister_hands::ApprovedBy::StandingGrant,
+                    policy,
+                    |url| unattended_url_origin(source, card.allowed_next_step_fact, url),
+                )? {
+                    let host = match &action {
+                        sister_hands::ActionSnapshot::OpenUrl { url } => {
+                            sister_hands::target_policy::host_of(url)
+                        }
+                        _ => None,
+                    };
+                    let screen = why.unattended_message(
+                        host.as_deref(),
+                        Some(&url_policy_cmd(opts.url_policy_config.as_deref())),
+                    );
+                    offer.skip(
+                        &card,
+                        Some(action),
+                        refused(RefusalReason::UnattendedUrlOriginUnknown { why }),
+                        Some(screen),
+                    );
+                    continue;
+                }
+                // 5. 目標白名單：交給作業系統前的最後一道。
+                if let Err(why) = sister_hands::target_policy::validate_action(&action) {
+                    offer.skip(
+                        &card,
+                        Some(action),
+                        refused(RefusalReason::TargetRejectedBeforeOs { why }),
+                        None,
+                    );
+                    continue;
+                }
+                if offer.steps.len() == MAX_STEPS {
+                    offer.held_back += 1;
+                    continue;
+                }
+                let app = app_name.clone();
+                offer.steps.push(Step { card, action, app });
+            }
+            Ok(offer)
+        }
+
+        /// 一步都端不出去的時候，為什麼。和 [`super::nothing_to_offer`] 同一個原則：
+        /// 幾種處境的下一步不一樣，就不能印同一句話。
+        fn nothing_to_take_over(offer: &Offer) -> String {
+            if offer.live == 0 {
+                return "承諾表上一張活著的卡都沒有，所以沒有東西可以接手。先讓她整理一次：`sister review --force`（要簽過第二張同意書）。"
+                    .to_string();
+            }
+            let open = offer.live - offer.not_open;
+            if open == 0 {
+                return format!(
+                    "{} 張活著的承諾都已經不是進行中（做完或放下了），所以沒有東西可以接手。",
+                    offer.live
+                );
+            }
+            if offer.skipped.is_empty() {
+                return format!(
+                    "{open} 張進行中的承諾都沒有帶著下一步——整理承諾的那一段在那天的事實裡挑不到可以打開的網址或檔案，就會把那一欄留空。這不是她做完了。"
+                );
+            }
+            format!(
+                "{open} 張進行中的承諾裡，{} 張她不接（理由在上面），{} 張沒有下一步。這次沒有東西可以接手。",
+                offer.skipped.len(),
+                offer.without_next_step
+            )
+        }
+
+        fn print_skipped(out: &mut impl Write, skipped: &[Skipped]) -> Result<()> {
+            if skipped.is_empty() {
+                return Ok(());
+            }
+            writeln!(out, "她不接的 {} 件：", skipped.len())?;
+            for item in skipped {
+                let left_out = &item.left_out;
+                let action = left_out
+                    .action
+                    .as_ref()
+                    .map(|action| format!("——{}", action.describe()))
+                    .unwrap_or_default();
+                writeln!(
+                    out,
+                    "  #{}「{}」{action}：{}",
+                    left_out.commitment_id, left_out.text, item.screen
+                )?;
+            }
+            Ok(())
+        }
+
+        fn print_offer(out: &mut impl Write, offer: &Offer) -> Result<()> {
+            writeln!(out, "她可以接手這 {} 步，照這個順序做：", offer.steps.len())?;
+            for (index, step) in offer.steps.iter().enumerate() {
+                writeln!(
+                    out,
+                    "  {}. #{}「{}」——{}",
+                    index + 1,
+                    step.card.id,
+                    step.card.text,
+                    step.action.describe()
+                )?;
+            }
+            print_skipped(out, &offer.skipped)?;
+            if offer.held_back > 0 {
+                writeln!(
+                    out,
+                    "另外還有 {} 步也過得了這些檢查；一次最多端 {MAX_STEPS} 步，這次先不端。",
+                    offer.held_back
+                )?;
+            }
+            writeln!(
+                out,
+                "每一步只是開網址、開檔案或切到某個視窗；她不會打字，也不會按畫面上的任何按鈕。"
+            )?;
+            writeln!(
+                out,
+                "每一步做完她會看下一張畫面。畫面對不上、某一步沒做成、你拔掉手或按下全停，後面的步驟都不做；做完的不會被收回。"
+            )?;
+            writeln!(
+                out,
+                "這份提議 {} 內有效。",
+                crate::fmt::duration_ms(handoff::OFFER_WINDOW_MS as i64)
+            )?;
+            Ok(())
+        }
+
+        /// 他在鍵盤上的回答。**「輸入結束了」不是「不要」**：兩者都什麼都不做，
+        /// 但紀錄上一個是他拒絕、一個是他根本沒答。
+        enum Reply {
+            Yes,
+            No,
+            InputEnded,
+        }
+
+        fn ask(input: &mut impl BufRead, out: &mut impl Write) -> Result<Reply> {
+            loop {
+                write!(out, "要她接手嗎？好／不要：")?;
+                out.flush()?;
+                let mut answer = String::new();
+                if input.read_line(&mut answer)? == 0 {
+                    writeln!(out)?;
+                    return Ok(Reply::InputEnded);
+                }
+                match answer.trim().to_lowercase().as_str() {
+                    "好" | "y" | "yes" | "是" => return Ok(Reply::Yes),
+                    "不要" | "n" | "no" | "停" | "q" | "quit" => return Ok(Reply::No),
+                    _ => writeln!(out, "聽不懂；好／不要")?,
+                }
+            }
+        }
+
+        fn not_recording_sentence(reason: NotRecordingReason) -> String {
+            let ts = crate::fmt::timestamp;
+            let why = match reason {
+                NotRecordingReason::NeverStarted => "她從來沒有開始錄".to_string(),
+                NotRecordingReason::Stopped { at_ms: Some(at) } => {
+                    format!("她在 {} 收工了", ts(at))
+                }
+                NotRecordingReason::Stopped { at_ms: None } => "她已經收工了".to_string(),
+                NotRecordingReason::Thinking { until_ms } => format!(
+                    "錄製已停，只剩解釋層在把最後一段想完（估到 {}）",
+                    ts(until_ms)
+                ),
+                NotRecordingReason::Stalled { at_ms } => {
+                    format!("她從 {} 起就沒有回報過心跳", ts(at_ms))
+                }
+                NotRecordingReason::Booting => "她才剛起來，還沒開始錄".to_string(),
+                NotRecordingReason::Unreadable => "錄製狀態那個檔案讀不懂".to_string(),
+            };
+            format!(
+                "沒有提議：{why}。接手的每一步做完都要看下一張畫面才知道有沒有做到，她沒在錄就看不到。她開始錄之後再跑一次。"
+            )
+        }
+
+        fn abort(
+            run: &mut SemiActionRun,
+            log: &ActionLog,
+            at_ms: i64,
+            by: AbortActor,
+        ) -> Result<RunConclusion> {
+            let event = run.abort(at_ms, by);
+            log.append(&event)?;
+            Ok(match event {
+                ActionEvent::Aborted {
+                    after_completed_steps,
+                    by,
+                    ..
+                } => RunConclusion::Aborted {
+                    after_completed_steps,
+                    by,
+                },
+                _ => unreachable!("abort always returns Aborted"),
+            })
+        }
+
+        // 和 `sister do` 的 `run_with_output_and_sleep` 同形：sleeper 是唯一的測試
+        // seam，其餘參數 production 與測試走同一條接線。
+        #[allow(clippy::too_many_arguments)]
+        pub(crate) fn run_with_output(
+            data_dir: &Path,
+            opts: &Options,
+            source: &impl StepSource,
+            input: &mut impl BufRead,
+            executor: &mut impl sister_hands::Executor,
+            clock: &mut impl FnMut() -> i64,
+            sleep: &mut dyn FnMut(u64),
+            out: &mut impl Write,
+        ) -> Result<()> {
+            if let Some(blockers) = stop_blockers(
+                data_dir,
+                sister_hands::kill_switch::is_pulled(data_dir),
+                sister_hands::master_stop::is_stopped(data_dir),
+            ) {
+                writeln!(out, "{blockers}。沒有提議，也沒有動作會交給作業系統。")?;
+                return Ok(());
+            }
+            // 從提議到收尾一直拿著：同一個資料目錄同時只能有一個接手，而 `--status`
+            // 靠它分辨「還在跑」和「中斷了」。
+            let _lock = match handoff::try_lock(data_dir)
+                .with_context(|| format!("打不開接手鎖（{}）", handoff::LOCK_FILE))?
+            {
+                LockAttempt::Acquired(lock) => lock,
+                LockAttempt::HeldByAnother => anyhow::bail!(
+                    "另一個接手還沒收尾，這一趟沒有提議。看它走到哪裡：`{}`",
+                    cmd(data_dir, "takeover --status")
+                ),
+            };
+            let now = clock();
+            if let Some(reason) =
+                not_recording_reason(sister_core::heartbeat::presence(data_dir, now))
+            {
+                writeln!(out, "{}", not_recording_sentence(reason))?;
+                return Ok(());
+            }
+            let log = ActionLog::in_data_dir(data_dir);
+            let replay = log.replay()?;
+            // 鎖在我們手上，所以上一次沒收尾的那一輪不可能還在跑：它是中斷了。
+            if let Some(HandoffState::Interrupted {
+                completed_steps,
+                last_at_ms,
+            }) = handoff::last_handoff(&replay).map(|previous| previous.state(false))
+            {
+                writeln!(
+                    out,
+                    "上一次接手停在 {}，做完 {completed_steps} 步之後就沒有收尾；那一輪不會接著做。下面是重新讀過承諾表的提議。",
+                    crate::fmt::timestamp(last_at_ms)
+                )?;
+            }
+            let offer = build_offer(source, &replay, opts)?;
+            if offer.steps.is_empty() {
+                print_skipped(out, &offer.skipped)?;
+                writeln!(out, "{}", nothing_to_take_over(&offer))?;
+                return Ok(());
+            }
+            let grant = offer.grant(now)?;
+            print_offer(out, &offer)?;
+            let handoff_id = handoff::new_handoff_id(now);
+            // **先寫提議，再問。** 他答之前行程被關掉的話，紀錄上留下的是「端出去了、
+            // 沒有回答」，而不是一片空白。
+            log.append(&ActionEvent::HandoffOffered {
+                at_ms: now,
+                handoff_id: handoff_id.clone(),
+                grant: grant.clone(),
+                left_out: offer
+                    .skipped
+                    .iter()
+                    .map(|item| item.left_out.clone())
+                    .collect(),
+            })?;
+            let reply = ask(input, out)?;
+            let answered_at = clock();
+            let answer = match reply {
+                Reply::Yes => match grant.validate_expiry(answered_at) {
+                    Ok(()) => HandoffAnswer::Accepted {
+                        run_id: sister_hands::new_audit_run_id(answered_at, &grant.audit_id()),
+                    },
+                    Err(GrantRejection::ExpiryClockWentBack) => HandoffAnswer::ClockWentBack,
+                    Err(_) => HandoffAnswer::TooLate {
+                        answered_after_ms: u64::try_from(answered_at.saturating_sub(now))
+                            .unwrap_or(u64::MAX),
+                    },
+                },
+                Reply::No => HandoffAnswer::Declined,
+                Reply::InputEnded => HandoffAnswer::NoAnswer,
+            };
+            log.append(&ActionEvent::HandoffAnswered {
+                at_ms: answered_at,
+                handoff_id,
+                answer: answer.clone(),
+            })?;
+            let run_id = match answer {
+                HandoffAnswer::Accepted { run_id } => run_id,
+                HandoffAnswer::Declined => {
+                    writeln!(out, "好，什麼都沒做。")?;
+                    return Ok(());
+                }
+                HandoffAnswer::NoAnswer => {
+                    writeln!(out, "沒有收到回答；什麼都沒做。")?;
+                    return Ok(());
+                }
+                HandoffAnswer::TooLate { answered_after_ms } => {
+                    writeln!(
+                        out,
+                        "這份提議已經端出來 {}，過了 {} 的期限；她看過的畫面可能已經不是現在的樣子，所以什麼都沒做。要接手請再跑一次 `{}`。",
+                        crate::fmt::duration_ms(
+                            i64::try_from(answered_after_ms).unwrap_or(i64::MAX)
+                        ),
+                        crate::fmt::duration_ms(handoff::OFFER_WINDOW_MS as i64),
+                        cmd(data_dir, "takeover")
+                    )?;
+                    return Ok(());
+                }
+                HandoffAnswer::ClockWentBack => {
+                    writeln!(
+                        out,
+                        "系統時鐘比提議端出來的那一刻還早，這份提議的期限沒辦法驗，所以什麼都沒做。要接手請再跑一次 `{}`。",
+                        cmd(data_dir, "takeover")
+                    )?;
+                    return Ok(());
+                }
+            };
+            let grant_id = grant.audit_id();
+            log.append(&ActionEvent::Granted {
+                at_ms: answered_at,
+                grant: grant.clone(),
+                run_id: Some(run_id),
+                grant_id: Some(grant_id),
+            })?;
+            writeln!(out)?;
+
+            let policy = sister_hands::url_policy::UrlOpenPolicy::from_answer(opts.url_open);
+            let mut run = SemiActionRun::new(grant);
+            let mut tally = Tally::default();
+            let mut terminal: Option<RunConclusion> = None;
+            let total = offer.steps.len();
+            for (index, offered) in offer.steps.iter().enumerate() {
+                let more_after_this = index + 1 < total;
+                if let Err(conclusion) = run.may_start_step() {
+                    terminal = Some(conclusion);
+                    break;
+                }
+                let stopped = if sister_hands::kill_switch::is_pulled(data_dir) {
+                    Some((AbortActor::HandsPulled, "手被拔掉，所以這一輪到此為止。"))
+                } else if sister_hands::master_stop::is_stopped(data_dir) {
+                    Some((
+                        AbortActor::MasterStopped,
+                        "全停閘門已生效，所以這一輪到此為止。",
+                    ))
+                } else {
+                    None
+                };
+                if let Some((by, message)) = stopped {
+                    terminal = Some(abort(&mut run, &log, clock(), by)?);
+                    writeln!(out, "{message}")?;
+                    break;
+                }
+                // **每一步都重讀那張卡**（SPEC §9.5：不拿過期的東西充數）。他答好之後
+                // 她可能又整理過一次承諾表；卡不在了就停，卡換了內容就交給底下同一串
+                // 閘門去判——授權書綁的是他答應的那一版。
+                let current = source
+                    .live_commitments()?
+                    .into_iter()
+                    .find(|card| card.id == offered.card.id && card.status == "open")
+                    .and_then(
+                        |card| match sister_hands::commitment_action::parse_allowed_next_step(
+                            card.allowed_next_step.as_deref(),
+                        ) {
+                            AllowedNextStep::Suggestion(button) => Some((card, button)),
+                            AllowedNextStep::Missing | AllowedNextStep::Unparseable { .. } => None,
+                        },
+                    );
+                let Some((card, button)) = current else {
+                    terminal = Some(abort(&mut run, &log, clock(), AbortActor::PlanChanged)?);
+                    writeln!(
+                        out,
+                        "#{}「{}」在你答好之後已經不是進行中、帶著下一步的那張卡了；這一步和後面的都不做。",
+                        offered.card.id, offered.card.text
+                    )?;
+                    break;
+                };
+                let action = button.snapshot();
+                let expected_target = action.expected_target();
+                let target = card.allowed_next_step_fact.zip(expected_target.as_deref());
+                let declared_app = step_app(source, &card.evidence_json, target)?;
+                let step =
+                    StepRequest::new(Task::new(TASK), declared_app.request_app(), action.clone())
+                        .from_reviewed_commitment(
+                            card.id,
+                            &card.text,
+                            card.allowed_next_step_fact,
+                            card.agreed_evidence_json.clone(),
+                        );
+                writeln!(
+                    out,
+                    "第 {}／{total} 步：#{}「{}」——{}",
+                    index + 1,
+                    card.id,
+                    card.text,
+                    action.describe()
+                )?;
+                tally.asked += 1;
+                log.append(&ActionEvent::Proposed {
+                    at_ms: clock(),
+                    action: action.clone(),
+                })?;
+                let authorized = if let Some((message, why)) = unattended_target_frame_refusal(
+                    source,
+                    card.agreed_evidence_json.as_deref(),
+                    &card.evidence_json,
+                    target,
+                )? {
+                    let reason = RefusalReason::UnattendedTargetHasNoCitedFrame { why };
+                    tally.count_refusal(&reason);
+                    writeln!(out, "沒有做，也沒有交給作業系統：{message}")?;
+                    log.append(&ActionEvent::Refused {
+                        at_ms: clock(),
+                        action: action.clone(),
+                        reason,
+                    })?;
+                    None
+                } else {
+                    match run
+                        .grant()
+                        .authorize_unattended(&step, clock(), policy, |url| {
+                            unattended_url_origin(source, card.allowed_next_step_fact, url)
+                        }) {
+                        Ok((approval, permit)) => {
+                            log.append(&ActionEvent::Approved {
+                                at_ms: clock(),
+                                action: action.clone(),
+                                by: Some(sister_hands::ApprovedBy::StandingGrant),
+                            })?;
+                            Some((approval, button.take_up(permit)?))
+                        }
+                        Err(UnattendedAuthorizationFailure::Grant(rejection)) => {
+                            let reason = RefusalReason::NotCoveredByGrant { rejection };
+                            tally.count_refusal(&reason);
+                            writeln!(
+                                out,
+                                "沒有做，也沒有交給作業系統：{}",
+                                reason.message_with_commands(
+                                    &cmd(data_dir, "hands resume"),
+                                    Some(&cmd(data_dir, "stop-all --off")),
+                                )
+                            )?;
+                            log.append(&ActionEvent::Refused {
+                                at_ms: clock(),
+                                action: action.clone(),
+                                reason,
+                            })?;
+                            None
+                        }
+                        Err(UnattendedAuthorizationFailure::UrlPolicy(why)) => {
+                            let host = match &action {
+                                sister_hands::ActionSnapshot::OpenUrl { url } => {
+                                    sister_hands::target_policy::host_of(url)
+                                }
+                                _ => None,
+                            };
+                            let reason = RefusalReason::UnattendedUrlOriginUnknown { why };
+                            tally.count_refusal(&reason);
+                            writeln!(
+                                out,
+                                "沒有做，也沒有交給作業系統：{}",
+                                why.unattended_message(
+                                    host.as_deref(),
+                                    Some(&url_policy_cmd(opts.url_policy_config.as_deref())),
+                                )
+                            )?;
+                            log.append(&ActionEvent::Refused {
+                                at_ms: clock(),
+                                action: action.clone(),
+                                reason,
+                            })?;
+                            None
+                        }
+                        Err(UnattendedAuthorizationFailure::OriginLookup(error)) => {
+                            return Err(error);
+                        }
+                    }
+                };
+                let Some((approval, suggestion)) = authorized else {
+                    if more_after_this {
+                        terminal = Some(abort(&mut run, &log, clock(), AbortActor::StepNotDone)?);
+                        writeln!(out, "這一步沒有做成，後面的步驟不做。")?;
+                        break;
+                    }
+                    writeln!(out)?;
+                    continue;
+                };
+                // 執行那一刻另外問一次時間：到期管的是她真的動手的那一刻。
+                let outcome = execute_approved_step(
+                    run.grant(),
+                    clock(),
+                    approval,
+                    &step,
+                    executor,
+                    &suggestion,
+                );
+                let event = match &outcome {
+                    Outcome::Refused { reason } => {
+                        tally.count_refusal(reason);
+                        writeln!(
+                            out,
+                            "沒有做，也沒有交給作業系統：{}",
+                            reason.message_with_commands(
+                                &cmd(data_dir, "hands resume"),
+                                Some(&cmd(data_dir, "stop-all --off")),
+                            )
+                        )?;
+                        ActionEvent::Refused {
+                            at_ms: clock(),
+                            action: action.clone(),
+                            reason: reason.clone(),
+                        }
+                    }
+                    Outcome::Failed { error } => {
+                        tally.failed += 1;
+                        writeln!(out, "交出去了，那一端失敗了：{error}")?;
+                        ActionEvent::Executed {
+                            at_ms: clock(),
+                            action: action.clone(),
+                            result: ExecutionResult::Failed {
+                                error: error.clone(),
+                            },
+                        }
+                    }
+                    Outcome::Done { detail } => {
+                        tally.done += 1;
+                        writeln!(out, "做了：{detail}")?;
+                        ActionEvent::Executed {
+                            at_ms: clock(),
+                            action: action.clone(),
+                            result: ExecutionResult::Succeeded {
+                                detail: detail.clone(),
+                            },
+                        }
+                    }
+                };
+                log.append(&event)?;
+                let stopped_by = match &outcome {
+                    Outcome::Refused {
+                        reason: RefusalReason::HandsPulled { .. },
+                    } => Some((AbortActor::HandsPulled, "手被拔掉，所以這一輪到此為止。")),
+                    Outcome::Refused {
+                        reason: RefusalReason::MasterStopped { .. },
+                    } => Some((
+                        AbortActor::MasterStopped,
+                        "全停閘門已生效，所以這一輪到此為止。",
+                    )),
+                    _ => None,
+                };
+                if let Some((by, message)) = stopped_by {
+                    terminal = Some(abort(&mut run, &log, clock(), by)?);
+                    writeln!(out, "{message}")?;
+                    break;
+                }
+                if !matches!(outcome, Outcome::Done { .. }) {
+                    if more_after_this {
+                        terminal = Some(abort(&mut run, &log, clock(), AbortActor::StepNotDone)?);
+                        writeln!(out, "這一步沒有做成，後面的步驟不做。")?;
+                        break;
+                    }
+                    writeln!(out)?;
+                    continue;
+                }
+                // SPEC §9.3：每一步做完看下一張畫面。對得上才往下走。
+                let finished_at = clock();
+                let evidence = step_evidence(data_dir, source, &action, finished_at, sleep)?;
+                let verified = matches!(
+                    evidence,
+                    StepEvidence::After {
+                        target: TargetOnScreen::Matched { .. },
+                        ..
+                    }
+                );
+                writeln!(out, "{}", evidence.message())?;
+                let finished = run
+                    .finish_step(finished_at, action, Some(evidence))
+                    .map_err(|conclusion| anyhow::anyhow!(conclusion.message()))?;
+                log.append(&finished)?;
+                if !verified && more_after_this {
+                    terminal = Some(abort(&mut run, &log, clock(), AbortActor::UnverifiedStep)?);
+                    writeln!(out, "畫面沒有對上這一步要開的東西，後面的步驟不做。")?;
+                    break;
+                }
+                writeln!(out)?;
+            }
+
+            let conclusion = terminal.unwrap_or(RunConclusion::Completed);
+            match conclusion {
+                RunConclusion::Aborted { .. } => {}
+                RunConclusion::StepLimitReached {
+                    completed_steps,
+                    limit,
+                } => log.append(&ActionEvent::Concluded {
+                    at_ms: clock(),
+                    conclusion: RunConclusionRecord::StepLimitReached {
+                        completed_steps,
+                        limit: limit.get(),
+                    },
+                })?,
+                RunConclusion::Completed => log.append(&ActionEvent::Concluded {
+                    at_ms: clock(),
+                    conclusion: RunConclusionRecord::Completed {
+                        asked: Some(tally.asked),
+                        decided_by: Some(sister_hands::ApprovedBy::StandingGrant),
+                    },
+                })?,
+            }
+            if matches!(conclusion, RunConclusion::Completed) {
+                writeln!(out, "接手走完了。")?;
+            } else {
+                writeln!(out, "{}", conclusion.message())?;
+            }
+            let reached = usize::try_from(tally.asked).unwrap_or(usize::MAX);
+            let not_reached = total.saturating_sub(reached);
+            let not_reached = if not_reached > 0 {
+                format!("，沒有輪到 {not_reached} 步")
+            } else {
+                String::new()
+            };
+            let refusals = tally.refusal_clauses(
+                &url_policy_cmd(opts.url_policy_config.as_deref()),
+                &cmd(data_dir, "stop-all --off"),
+            );
+            writeln!(
+                out,
+                "這一輪：端出去 {total} 步，做成 {} 步，授權擋掉 {} 步{refusals}，執行失敗 {} 步{not_reached}。",
+                tally.done, tally.blocked, tally.failed
+            )?;
+            writeln!(
+                out,
+                "每一步的紀錄與畫面憑據：`{}`",
+                cmd(data_dir, "hands runs")
+            )?;
+            Ok(())
+        }
+
+        /// `sister takeover --status`：最後一次接手走到哪裡。只讀，不提議、不做。
+        pub(crate) fn status_to(data_dir: &Path, out: &mut impl Write) -> Result<()> {
+            anyhow::ensure!(
+                data_dir.exists(),
+                "找不到這個資料目錄：{}\n這不是「沒有接手過」，是我們沒有看到那個目錄。",
+                data_dir.display()
+            );
+            let log = ActionLog::in_data_dir(data_dir);
+            let replay = log.replay()?;
+            let running = handoff::is_running(data_dir).with_context(|| {
+                format!(
+                    "讀不到接手鎖（{}），分不出現在有沒有一個接手正在跑，所以不猜。",
+                    handoff::LOCK_FILE
+                )
+            })?;
+            let ts = crate::fmt::timestamp;
+            match handoff::last_handoff(&replay) {
+                None if running => {
+                    writeln!(out, "有一個接手正在起來，還沒端出提議。")?;
+                }
+                None if log.path().exists() => {
+                    writeln!(out, "紀錄裡沒有任何接手提議。")?;
+                }
+                None => {
+                    writeln!(out, "還沒有提議過接手。")?;
+                }
+                Some(record) => {
+                    let offered = record.offered.map(|offered| {
+                        (offered.at_ms, offered.grant.approved_commitments().count())
+                    });
+                    let of_total = |done: u32| match offered {
+                        Some((_, total)) => format!("{done}／{total} 步"),
+                        None => format!("{done} 步（提議那一列不在紀錄裡，不知道端出去幾步）"),
+                    };
+                    let offered_at = || match offered {
+                        Some((at, _)) => format!("{} 端出了接手提議", ts(at)),
+                        None => "接手提議那一列不在紀錄裡了".to_string(),
+                    };
+                    let line = match record.state(running) {
+                        HandoffState::AwaitingAnswer { .. } => {
+                            format!("{}，那個終端機還在等你回答。", offered_at())
+                        }
+                        HandoffState::NeverAnswered { .. } => format!(
+                            "{}，還沒等到回答那個行程就結束了；什麼都沒做。",
+                            offered_at()
+                        ),
+                        HandoffState::Declined { at_ms } => {
+                            format!("{} 你說不要；什麼都沒做。", ts(at_ms))
+                        }
+                        HandoffState::NoAnswer { at_ms } => {
+                            format!("{} 沒有收到回答，輸入就結束了；什麼都沒做。", ts(at_ms))
+                        }
+                        HandoffState::TooLate {
+                            at_ms,
+                            answered_after_ms,
+                        } => format!(
+                            "{} 你答好的時候，提議已經端出來 {}，過了 {} 的期限；什麼都沒做。",
+                            ts(at_ms),
+                            crate::fmt::duration_ms(
+                                i64::try_from(answered_after_ms).unwrap_or(i64::MAX)
+                            ),
+                            crate::fmt::duration_ms(handoff::OFFER_WINDOW_MS as i64)
+                        ),
+                        HandoffState::ClockWentBack { at_ms } => format!(
+                            "{} 你答好的時候，系統時鐘比提議端出來的那一刻還早，期限沒辦法驗；什麼都沒做。",
+                            ts(at_ms)
+                        ),
+                        HandoffState::Running { completed_steps } => {
+                            format!("正在接手：做完 {}。", of_total(completed_steps))
+                        }
+                        HandoffState::Interrupted {
+                            completed_steps,
+                            last_at_ms,
+                        } => format!(
+                            "上一次接手沒有收尾：最後一列在 {}，做完 {}；那一輪不會自己接著做。",
+                            ts(last_at_ms),
+                            of_total(completed_steps)
+                        ),
+                        HandoffState::Finished {
+                            end: RunEnd::Concluded { at_ms, conclusion },
+                        } => format!(
+                            "{} 接手收尾：{} 做成 {}。",
+                            ts(at_ms),
+                            conclusion.message(),
+                            of_total(record.completed_steps())
+                        ),
+                        HandoffState::Finished {
+                            end:
+                                RunEnd::Aborted {
+                                    at_ms,
+                                    after_completed_steps,
+                                    by,
+                                },
+                        } => format!(
+                            "{} 接手停下來了：{} 做成 {}。",
+                            ts(at_ms),
+                            RunConclusion::Aborted {
+                                after_completed_steps,
+                                by,
+                            }
+                            .message(),
+                            of_total(after_completed_steps)
+                        ),
+                    };
+                    writeln!(out, "{line}")?;
+                    if record.run.is_some() {
+                        writeln!(
+                            out,
+                            "每一步的紀錄與畫面憑據：`{}`",
+                            cmd(data_dir, "hands runs")
+                        )?;
+                    }
+                }
+            }
+            if !replay.unreadable.is_empty() {
+                writeln!(
+                    out,
+                    "紀錄裡另有 {} 列讀不懂，上面沒有把它們算進去。",
+                    replay.unreadable.len()
+                )?;
+            }
+            Ok(())
+        }
     }
 
     #[cfg(test)]
@@ -7292,6 +8317,8 @@ pub mod act {
                     ActionEvent::StepFinished { .. } => "finished",
                     ActionEvent::Aborted { .. } => "aborted",
                     ActionEvent::Concluded { .. } => "concluded",
+                    ActionEvent::HandoffOffered { .. } => "handoff_offered",
+                    ActionEvent::HandoffAnswered { .. } => "handoff_answered",
                 })
                 .collect();
             assert_eq!(

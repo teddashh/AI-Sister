@@ -224,7 +224,8 @@ fn activity_lock_is_drained(data_dir: &Path) -> bool {
     }
 }
 
-fn open_lock(data_dir: &Path, name: &str) -> io::Result<File> {
+/// 接手鎖（`handoff`）也走這一支：同一套「單連結、一般檔、不跟 symlink／reparse」檢查。
+pub(crate) fn open_lock(data_dir: &Path, name: &str) -> io::Result<File> {
     std::fs::create_dir_all(data_dir)?;
     if dir_state(data_dir) != DirState::Dir {
         return Err(io::Error::new(
@@ -264,7 +265,8 @@ fn open_lock(data_dir: &Path, name: &str) -> io::Result<File> {
     Ok(file)
 }
 
-fn open_existing_lock(data_dir: &Path, name: &str) -> io::Result<File> {
+/// 接手鎖（`handoff`）也走這一支：同一套「單連結、一般檔、不跟 symlink／reparse」檢查。
+pub(crate) fn open_existing_lock(data_dir: &Path, name: &str) -> io::Result<File> {
     if dir_state(data_dir) != DirState::Dir {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,

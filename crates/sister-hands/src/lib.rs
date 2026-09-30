@@ -17,6 +17,7 @@ use std::{
 };
 
 pub mod commitment_action;
+pub mod handoff;
 pub mod irreversible;
 pub mod kill_switch;
 pub mod master_stop;
@@ -30,9 +31,11 @@ pub mod url_policy;
 
 /// 權限階梯（SPEC §9.1）。
 ///
-/// Phase 7 的 bounded takeover 目前走 `SemiAction` + saved grant 的同一條窄路：
-/// `sister do --use-grant --unattended` 每一步仍重新驗 scope、期限、步數與畫面，
-/// 並留下 run audit。它沒有一組更寬的執行權限，所以不另放一個 `Takeover` 變體。
+/// Phase 7 的接手（`sister takeover`）走的仍是 `SemiAction` 這一級：她把一張
+/// 最窄的授權書連同要做的每一步端到他面前，他答「好」之後，每一步照樣重新驗
+/// scope、期限、步數與畫面，並留下 run audit。那張授權書只活在那一個行程的記憶
+/// 體裡、不存成 `grant.json`；它沒有一組更寬的執行權限，所以不另放一個
+/// `Takeover` 變體。
 ///
 /// **這個 enum 沒有 `Default`，而且不要替它加一個。** 字母人那一支唯一的
 /// 呼叫端寫死 [`Self::Suggest`]，因為那條路上會走到 [`execute_with`] 的只有
@@ -1047,6 +1050,23 @@ pub enum ActionEvent {
         at_ms: i64,
         conclusion: semi_action::RunConclusionRecord,
     },
+    /// 她提議接手：端到他面前的那張授權書，以及這次她不接的那幾件。
+    ///
+    /// 這一列寫在他回答**之前**。行程在等回答的時候被殺掉，紀錄上仍然留得下
+    /// 「她提過什麼」；少了它，重開之後只剩一列回答，而沒人說得出他答應的是什麼。
+    HandoffOffered {
+        at_ms: i64,
+        handoff_id: String,
+        grant: semi_action::Grant,
+        #[serde(default)]
+        left_out: Vec<handoff::LeftOut>,
+    },
+    /// 他對那次提議的回答。說好的話，緊接著是同一個 `run_id` 的 `Granted`。
+    HandoffAnswered {
+        at_ms: i64,
+        handoff_id: String,
+        answer: handoff::HandoffAnswer,
+    },
 }
 
 /// 產生一輪 action audit 的關聯 ID。這不是 secret 或授權票；唯一目的只是讓同一
@@ -1089,7 +1109,9 @@ impl ActionEvent {
             | Self::Refused { at_ms, .. }
             | Self::StepFinished { at_ms, .. }
             | Self::Aborted { at_ms, .. }
-            | Self::Concluded { at_ms, .. } => *at_ms,
+            | Self::Concluded { at_ms, .. }
+            | Self::HandoffOffered { at_ms, .. }
+            | Self::HandoffAnswered { at_ms, .. } => *at_ms,
         }
     }
 }

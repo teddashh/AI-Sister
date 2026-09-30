@@ -7,6 +7,7 @@
 //!
 //! 同一個理由讓 `target_policy` 和 [`crate::platform`] 也搬進了這個 crate。
 
+use crate::handoff::{HandoffAnswer, LeftOut};
 use crate::semi_action::RunConclusion;
 use crate::{ActionEvent, ApprovedBy, ExecutionResult, Replay};
 use chrono::{Local, TimeZone};
@@ -341,6 +342,20 @@ pub fn replay_lines(replay: &Replay) -> Vec<String> {
             ActionEvent::Concluded { at_ms, conclusion } => {
                 format!("{} {}", at(*at_ms), conclusion.message())
             }
+            ActionEvent::HandoffOffered {
+                at_ms,
+                grant,
+                left_out,
+                ..
+            } => format!(
+                "{} 提議接手：{}{}",
+                at(*at_ms),
+                grant.describe(),
+                left_out_clause(left_out)
+            ),
+            ActionEvent::HandoffAnswered { at_ms, answer, .. } => {
+                format!("{} 接手的回答：{}", at(*at_ms), answer_sentence(answer))
+            }
         })
         .collect::<Vec<_>>();
     lines.extend(unreadable_lines(replay));
@@ -354,6 +369,61 @@ fn unreadable_lines(replay: &Replay) -> Vec<String> {
         .iter()
         .map(|bad| format!("第 {} 列讀不懂：{}", bad.line_no, bad.why))
         .collect()
+}
+
+/// 提議時她不接的那幾件，接在提議那句後面。一件都沒有就什麼都不加——
+/// 「她不接 0 件」和「這一列沒有記」在這裡是同一件事：舊版沒有這種列。
+fn left_out_clause(left_out: &[LeftOut]) -> String {
+    if left_out.is_empty() {
+        return String::new();
+    }
+    let items = left_out
+        .iter()
+        .map(|item| {
+            let action = item
+                .action
+                .as_ref()
+                .map_or_else(|| "下一步讀不懂".to_string(), |action| action.describe());
+            format!(
+                "#{}「{}」（{}；{}）",
+                item.commitment_id,
+                item.text,
+                action,
+                item.why.message()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("／");
+    format!("；她不接的 {} 件：{items}", left_out.len())
+}
+
+/// 他對一次接手提議的回答，讀成一句話。說好以外的四種都明講「什麼都沒做」：
+/// 那一列之後不會有任何步驟，而沒有步驟的空白讀起來不能像「做完了」。
+fn answer_sentence(answer: &HandoffAnswer) -> String {
+    match answer {
+        HandoffAnswer::Accepted { run_id } => format!("他說好；這一輪是 {run_id}"),
+        HandoffAnswer::Declined => "他說不要；什麼都沒做".to_string(),
+        HandoffAnswer::NoAnswer => "沒有收到回答，輸入就結束了；什麼都沒做".to_string(),
+        HandoffAnswer::TooLate { answered_after_ms } => format!(
+            "他答好的時候，提議已經端出去 {}，過了 {} 的期限；什麼都沒做",
+            spoken_duration(*answered_after_ms),
+            spoken_duration(crate::handoff::OFFER_WINDOW_MS)
+        ),
+        HandoffAnswer::ClockWentBack => {
+            "他答好的時候，時鐘比提議端出來的那一刻還早，期限沒辦法驗；什麼都沒做".to_string()
+        }
+    }
+}
+
+/// 「10 分 3 秒」。這裡只拿來講提議等了多久，所以不必處理到天。
+fn spoken_duration(ms: u64) -> String {
+    let seconds = ms / 1_000;
+    let (minutes, seconds) = (seconds / 60, seconds % 60);
+    match (minutes, seconds) {
+        (0, s) => format!("{s} 秒"),
+        (m, 0) => format!("{m} 分鐘"),
+        (m, s) => format!("{m} 分 {s} 秒"),
+    }
 }
 
 /// action-log 沒有任何可讀列時，依檔案是否存在分開兩種歷史。
@@ -418,7 +488,18 @@ pub fn recent_run_report_lines(replay: &Replay, shown: usize) -> Vec<String> {
 
 fn run_report_lines(run_number: usize, events: &[&ActionEvent]) -> Vec<String> {
     let mut lines = vec![format!("── 第 {run_number} 輪 ──")];
+    let offered_grant = match events.first() {
+        Some(ActionEvent::HandoffOffered { grant, .. }) => Some(grant),
+        _ => None,
+    };
     match events.first() {
+        // 接手的那幾輪由提議那一列開頭；它自己在底下的迴圈裡印。
+        Some(ActionEvent::HandoffOffered { .. }) => {}
+        // 回答在、提議不在：跟下面那一臂同一個道理，不替它挑一種原因。
+        Some(ActionEvent::HandoffAnswered { at_ms, .. }) => lines.push(format!(
+            "開頭：{}；接手提議那一列不在紀錄裡，所以不知道當初提的範圍——可能被 `sister forget`、時間軸的忘掉或保留期拿掉了。",
+            at(*at_ms)
+        )),
         Some(ActionEvent::Granted {
             at_ms,
             grant,
@@ -458,7 +539,7 @@ fn run_report_lines(run_number: usize, events: &[&ActionEvent]) -> Vec<String> {
     // 規矩：`Proposed` 開一步；`Approved` 在前一列不是 `Proposed` 的時候也開一步。
     let mut proposed_number = 0_u32;
     let mut previous_was_proposed = false;
-    for event in events {
+    for (index, event) in events.iter().enumerate() {
         let opens_a_step = match event {
             ActionEvent::Proposed { .. } => true,
             ActionEvent::Approved { .. } => !previous_was_proposed,
@@ -469,7 +550,60 @@ fn run_report_lines(run_number: usize, events: &[&ActionEvent]) -> Vec<String> {
         }
         previous_was_proposed = matches!(event, ActionEvent::Proposed { .. });
         match event {
+            // 一般那幾輪的授權書在開頭印過了；接手那幾輪的授權書在提議那一列印過，
+            // 這裡只補 run 的開始與審計 ID。兩張不是同一張的話要照實印出來——
+            // 產品不會寫出這種紀錄，但紀錄是純文字，讀的人要看得到它被改過。
+            ActionEvent::Granted {
+                at_ms,
+                grant,
+                run_id,
+                grant_id,
+            } if index > 0 => {
+                let scope = if offered_grant == Some(grant) {
+                    "授權書就是上面提議的那一張".to_string()
+                } else {
+                    format!(
+                        "⚠ 這一輪的授權書和上面提議的不是同一張：{}",
+                        grant.describe()
+                    )
+                };
+                lines.push(format!("開始：{}；{scope}", at(*at_ms)));
+                lines.push(format!(
+                    "審計 ID：run={}；grant={}",
+                    run_id.as_deref().unwrap_or("舊版沒有記"),
+                    grant_id.as_deref().unwrap_or("舊版沒有記")
+                ));
+            }
             ActionEvent::Granted { .. } => {}
+            ActionEvent::HandoffOffered {
+                at_ms,
+                handoff_id,
+                grant,
+                left_out,
+            } => {
+                lines.push(format!(
+                    "接手提議：{}；她要做的：{}",
+                    at(*at_ms),
+                    grant.describe()
+                ));
+                for item in left_out.iter() {
+                    let action = item
+                        .action
+                        .as_ref()
+                        .map_or_else(|| "下一步讀不懂".to_string(), |action| action.describe());
+                    lines.push(format!(
+                        "她不接：#{}「{}」；{}；{}",
+                        item.commitment_id,
+                        item.text,
+                        action,
+                        item.why.message()
+                    ));
+                }
+                lines.push(format!("提議 ID：{handoff_id}"));
+            }
+            ActionEvent::HandoffAnswered { at_ms, answer, .. } => {
+                lines.push(format!("回答：{}；{}", at(*at_ms), answer_sentence(answer)));
+            }
             ActionEvent::Proposed { at_ms, action } => {
                 lines.push(format!(
                     "第 {proposed_number} 步：{}；提出動作：{}",
@@ -556,13 +690,35 @@ fn run_report_lines(run_number: usize, events: &[&ActionEvent]) -> Vec<String> {
             }
         }
     }
-    if !matches!(
-        events.last(),
-        Some(ActionEvent::Concluded { .. } | ActionEvent::Aborted { .. })
-    ) {
-        lines.push("收尾：這一輪的紀錄到這裡就沒有了。".to_string());
+    match events.last() {
+        Some(last) if closes_a_group(last) => {}
+        // 提議端出去了、沒有回答那一列：可能還有一個行程在等他回答，也可能那個
+        // 行程在他回答之前就結束了。紀錄上分不出來；`sister takeover --status`
+        // 看得到接手鎖，分得出來。
+        Some(ActionEvent::HandoffOffered { .. }) => lines.push(
+            "收尾：提議之後沒有回答那一列——可能還在等他回答，也可能那個行程在他回答之前就結束了；`sister takeover --status` 分得出是哪一種。"
+                .to_string(),
+        ),
+        _ => lines.push("收尾：這一輪的紀錄到這裡就沒有了。".to_string()),
     }
     lines
+}
+
+/// 這一列之後，這一組就收完了：一輪收尾，或一次沒有答應的提議。
+fn closes_a_group(event: &ActionEvent) -> bool {
+    match event {
+        ActionEvent::Concluded { .. } | ActionEvent::Aborted { .. } => true,
+        ActionEvent::HandoffAnswered { answer, .. } => {
+            !matches!(answer, HandoffAnswer::Accepted { .. })
+        }
+        ActionEvent::Granted { .. }
+        | ActionEvent::Proposed { .. }
+        | ActionEvent::Approved { .. }
+        | ActionEvent::Executed { .. }
+        | ActionEvent::Refused { .. }
+        | ActionEvent::StepFinished { .. }
+        | ActionEvent::HandoffOffered { .. } => false,
+    }
 }
 
 /// 給交接還原與機器讀取的每輪審計摘要。完整的逐步目標、批准來源、執行結果與
@@ -576,8 +732,24 @@ pub struct RunAuditReport {
     pub ended_at_ms: Option<i64>,
     pub duration_ms: Option<u64>,
     pub complete: bool,
+    /// `None`：這一輪不是 `sister takeover` 開的（`sister do`、字母人上的按鈕、舊版）。
+    pub handoff: Option<HandoffAudit>,
     pub summary: RunAuditSummary,
     pub events: Vec<ActionEvent>,
+}
+
+/// 一次接手提議在這一組裡的樣子。完整內容仍在 `events`；這裡只把「提過、答了什麼」
+/// 拉出來，讓讀的人不必自己在事件裡找。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct HandoffAudit {
+    pub handoff_id: String,
+    /// `None`：提議那一列不在紀錄裡。
+    pub offered_at_ms: Option<i64>,
+    /// 提議時她不接的件數；提議那一列不在就是 `None`，不是 0。
+    pub left_out: Option<usize>,
+    /// `None`：沒有回答那一列。
+    pub answered_at_ms: Option<i64>,
+    pub answer: Option<HandoffAnswer>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
@@ -623,18 +795,47 @@ pub fn run_audit_reports(replay: &Replay) -> Vec<RunAuditReport> {
         .collect()
 }
 
+/// 一組從哪裡開始、到哪裡收完。
+///
+/// * `granted` 開一組——**除非**它緊接在同一個 run 的「他說好」後面：那是接手
+///   那一輪的開始，要和它的提議、回答留在同一組，否則報告會把「他答應了什麼」
+///   和「她做了什麼」拆成兩輪。
+/// * `handoff_offered` 一律開一組。
+/// * `handoff_answered` 接在自己那次提議的同一組；提議那一列不在的話，它自己開一組。
+/// * 收尾、中止，以及說好以外的回答，收掉這一組。
 fn split_runs(events: &[ActionEvent]) -> Vec<Vec<&ActionEvent>> {
     let mut runs = Vec::new();
-    let mut current = Vec::new();
+    let mut current: Vec<&ActionEvent> = Vec::new();
     for event in events {
-        if matches!(event, ActionEvent::Granted { .. }) && !current.is_empty() {
+        let continues_current = match event {
+            ActionEvent::Granted {
+                run_id: Some(run_id),
+                ..
+            } => matches!(
+                current.last(),
+                Some(ActionEvent::HandoffAnswered {
+                    answer: HandoffAnswer::Accepted { run_id: accepted },
+                    ..
+                }) if accepted == run_id
+            ),
+            ActionEvent::Granted { run_id: None, .. } | ActionEvent::HandoffOffered { .. } => false,
+            ActionEvent::HandoffAnswered { handoff_id, .. } => matches!(
+                current.first(),
+                Some(ActionEvent::HandoffOffered { handoff_id: offered, .. }) if offered == handoff_id
+            ),
+            ActionEvent::Proposed { .. }
+            | ActionEvent::Approved { .. }
+            | ActionEvent::Executed { .. }
+            | ActionEvent::Refused { .. }
+            | ActionEvent::StepFinished { .. }
+            | ActionEvent::Aborted { .. }
+            | ActionEvent::Concluded { .. } => true,
+        };
+        if !continues_current && !current.is_empty() {
             runs.push(std::mem::take(&mut current));
         }
         current.push(event);
-        if matches!(
-            event,
-            ActionEvent::Concluded { .. } | ActionEvent::Aborted { .. }
-        ) {
+        if closes_a_group(event) {
             runs.push(std::mem::take(&mut current));
         }
     }
@@ -646,20 +847,19 @@ fn split_runs(events: &[ActionEvent]) -> Vec<Vec<&ActionEvent>> {
 
 fn run_audit_report(events: Vec<&ActionEvent>) -> RunAuditReport {
     use crate::semi_action::{StepEvidence, TargetOnScreen};
-    let (run_id, grant_id, started_at_ms) = match events.first() {
-        Some(ActionEvent::Granted {
-            at_ms,
-            run_id,
-            grant_id,
-            ..
-        }) => (run_id.clone(), grant_id.clone(), Some(*at_ms)),
-        Some(first) => (None, None, Some(first.at_ms())),
-        None => (None, None, None),
-    };
-    let complete = matches!(
-        events.last(),
-        Some(ActionEvent::Concluded { .. } | ActionEvent::Aborted { .. })
-    );
+    // 接手那幾輪的 `granted` 不在第一列（前面是提議與回答），所以用找的。
+    let (run_id, grant_id) = events
+        .iter()
+        .find_map(|event| match event {
+            ActionEvent::Granted {
+                run_id, grant_id, ..
+            } => Some((run_id.clone(), grant_id.clone())),
+            _ => None,
+        })
+        .unwrap_or((None, None));
+    let started_at_ms = events.first().map(|first| first.at_ms());
+    let handoff = handoff_audit(&events);
+    let complete = events.last().is_some_and(|last| closes_a_group(last));
     let ended_at_ms = complete.then(|| events.last().expect("complete run has an end").at_ms());
     let duration_ms = started_at_ms
         .zip(ended_at_ms)
@@ -677,7 +877,9 @@ fn run_audit_report(events: Vec<&ActionEvent>) -> RunAuditReport {
         match event {
             ActionEvent::Granted { .. }
             | ActionEvent::Aborted { .. }
-            | ActionEvent::Concluded { .. } => {}
+            | ActionEvent::Concluded { .. }
+            | ActionEvent::HandoffOffered { .. }
+            | ActionEvent::HandoffAnswered { .. } => {}
             ActionEvent::Proposed { .. } => {}
             ActionEvent::Approved { by, .. } => match by {
                 Some(ApprovedBy::Press) => summary.approved_by_press += 1,
@@ -717,9 +919,51 @@ fn run_audit_report(events: Vec<&ActionEvent>) -> RunAuditReport {
         ended_at_ms,
         duration_ms,
         complete,
+        handoff,
         summary,
         events: events.into_iter().cloned().collect(),
     }
+}
+
+fn handoff_audit(events: &[&ActionEvent]) -> Option<HandoffAudit> {
+    let mut audit: Option<HandoffAudit> = None;
+    for event in events {
+        match event {
+            ActionEvent::HandoffOffered {
+                at_ms,
+                handoff_id,
+                left_out,
+                ..
+            } => {
+                let entry = audit.get_or_insert_with(|| HandoffAudit {
+                    handoff_id: handoff_id.clone(),
+                    offered_at_ms: None,
+                    left_out: None,
+                    answered_at_ms: None,
+                    answer: None,
+                });
+                entry.offered_at_ms = Some(*at_ms);
+                entry.left_out = Some(left_out.len());
+            }
+            ActionEvent::HandoffAnswered {
+                at_ms,
+                handoff_id,
+                answer,
+            } => {
+                let entry = audit.get_or_insert_with(|| HandoffAudit {
+                    handoff_id: handoff_id.clone(),
+                    offered_at_ms: None,
+                    left_out: None,
+                    answered_at_ms: None,
+                    answer: None,
+                });
+                entry.answered_at_ms = Some(*at_ms);
+                entry.answer = Some(answer.clone());
+            }
+            _ => {}
+        }
+    }
+    audit
 }
 
 #[cfg(test)]

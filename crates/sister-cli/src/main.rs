@@ -476,6 +476,16 @@ enum Command {
         show_grant: bool,
     },
 
+    /// 接手：她把承諾表上自己做得到的下一步一次端出來，你答一次「好」，她照順序做。
+    ///
+    /// 每一步只是開網址、開檔案或切到某個視窗；每一步做完她會看下一張畫面，
+    /// 對不上、沒做成、拔手或全停，後面的步驟都不做。
+    Takeover {
+        /// 只讀出最後一次接手走到哪裡，不提議、不做。
+        #[arg(long)]
+        status: bool,
+    },
+
     /// 叫她閉眼睛。正在跑的 `record` 下一個 tick 就會停下來。
     ///
     /// 暫停**不會自己過期**——她會一直停到有人 `sister resume`（或在字母人
@@ -895,6 +905,14 @@ fn main() -> Result<()> {
                 use_grant,
                 unattended,
                 show_grant,
+                url_open: config()?.hands.url_open,
+                url_policy_config: cli.config.clone(),
+            },
+        ),
+        Command::Takeover { status } => ops::act::takeover::run(
+            &data_dir,
+            &ops::act::takeover::Options {
+                status,
                 url_open: config()?.hands.url_open,
                 url_policy_config: cli.config.clone(),
             },

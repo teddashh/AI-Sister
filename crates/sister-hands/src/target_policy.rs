@@ -11,15 +11,23 @@
 use std::path::Path;
 use url::{Position, Url};
 
-use crate::Suggestion;
+use crate::{ActionSnapshot, Suggestion};
 
 /// 三種公開 suggestion 共用的一道目標白名單。執行隘口在呼叫 `Executor` 前走
 /// 一次；平台實作貼著 OS 呼叫再走一次，擋住日後繞過隘口或 TOCTOU 的退步。
 pub(crate) fn validate_suggestion(suggestion: &Suggestion) -> Result<(), String> {
-    match suggestion {
-        Suggestion::OpenUrl { url, .. } => validate_url(url),
-        Suggestion::OpenFile { path, .. } => validate_file(path),
-        Suggestion::FocusWindow { title, .. } => validate_window_title(title),
+    validate_action(&suggestion.snapshot())
+}
+
+/// 同一道白名單，問的是一個還沒變成按鈕的動作。
+///
+/// 接手提議要在端出去之前就知道哪幾步一定會在作業系統前被擋；那句理由必須和
+/// 執行隘口講的是同一句，所以兩邊都走這一支，不另寫一份。
+pub fn validate_action(action: &ActionSnapshot) -> Result<(), String> {
+    match action {
+        ActionSnapshot::OpenUrl { url } => validate_url(url),
+        ActionSnapshot::OpenFile { path } => validate_file(path),
+        ActionSnapshot::FocusWindow { title } => validate_window_title(title),
     }
 }
 
