@@ -14,6 +14,8 @@ const TASK: &str = "執行這個下一步";
 const GOOD_URL: &str = "https://good.example.com/help";
 const EVIL_URL: &str = "https://evil.example.com/collect";
 const INJECTED_URL: &str = "https://example.com/collect";
+const BENIGN_PATH: &str = r"C:\work\report.txt";
+const INJECTED_PATH: &str = r"C:\work\collect.txt";
 const EVIL_AT_MS: i64 = 3_700_000;
 
 struct TempDir(PathBuf);
@@ -805,4 +807,335 @@ fn trailing_garbage_after_brain_json_executes_nothing() {
         lines.is_empty(),
         "brain JSON with trailing garbage reached platform execution: {lines:#?}"
     );
+}
+
+#[derive(Clone, Copy, Debug)]
+enum FileGrantBinding {
+    /// 舊票沒有 `approved_commitment`。
+    Unbound,
+    /// 同 action、同 target fact、同 agreed evidence，但 id／text 屬於已封存的複本。
+    ArchivedSibling,
+    /// 同一張 live 卡的 id、text、agreed evidence，動作卻是另一條路徑。
+    ApprovedOtherAction,
+    /// 人在 `--save-grant` 選了這張 live 卡。
+    Live,
+}
+
+fn replay_scenario(dir: &Path, scenario: &Path) {
+    sister(
+        dir,
+        None,
+        &[
+            "replay",
+            scenario.to_str().unwrap(),
+            "--interval-ms",
+            "3700000",
+        ],
+    );
+}
+
+fn patch_first_screen(scenario: &Path, text: serde_json::Value, clipboard: Option<&str>) {
+    let mut value: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(scenario).unwrap()).unwrap();
+    value["steps"][0]["text"] = text;
+    match clipboard {
+        Some(text) => value["steps"][0]["clipboard"] = text.into(),
+        None => value["steps"][0]["clipboard"] = serde_json::Value::Null,
+    }
+    std::fs::write(scenario, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+}
+
+fn file_fact_on_cited_frame(data_dir: &Path, frame_id: i64, raw: &str) -> sister_core::db::FactRow {
+    Db::open(&Config::db_path(data_dir))
+        .unwrap()
+        .facts_by_kind("file_path", 100)
+        .unwrap()
+        .into_iter()
+        .find(|fact| {
+            fact.frame_id == Some(frame_id)
+                && fact.kind == "file_path"
+                && fact.raw == raw
+                && fact.source_kind == "ocr"
+        })
+        .unwrap_or_else(|| panic!("找不到被引用畫面 {frame_id} 上的 file_path {raw:?}"))
+}
+
+fn assert_opens_file(card: &sister_core::db::CommitmentRow, fact_id: i64, path: &str) {
+    assert_eq!(
+        card.allowed_next_step_fact,
+        Some(fact_id),
+        "前提：live 承諾沒有指向 fact {fact_id}（{path}）。夾具沒造出開檔，後面的執行斷言會空轉"
+    );
+    match sister_hands::commitment_action::parse_allowed_next_step(
+        card.allowed_next_step.as_deref(),
+    ) {
+        sister_hands::commitment_action::AllowedNextStep::Suggestion(button) => {
+            match button.snapshot() {
+                sister_hands::ActionSnapshot::OpenFile { path: got } => {
+                    assert_eq!(
+                        got.to_string_lossy().as_ref(),
+                        path,
+                        "前提：下一步不是 open_file {path}。夾具沒造出這一步：{got:?}"
+                    );
+                }
+                other => panic!("前提：下一步不是 open_file {path}，夾具沒造出開檔：{other:?}"),
+            }
+        }
+        other => panic!("前提：下一步解析不出 open_file {path}，夾具沒造出開檔：{other:?}"),
+    }
+}
+
+fn write_file_grant(data_dir: &Path, fact_id: i64, binding: FileGrantBinding, benign_fact_id: i64) {
+    let grant = Grant::new(
+        Task::new(TASK),
+        AllowedApps::new([App::new("chrome.exe")]),
+        AllowedActions::new([ActionKind::OpenFile]),
+        Expiry::after_issued(sister_core::now_ms(), 300_000),
+        StepLimit::new(1).unwrap(),
+    );
+    let grant = match binding {
+        FileGrantBinding::Unbound => grant,
+        FileGrantBinding::Live | FileGrantBinding::ArchivedSibling => {
+            let card = Db::open(&Config::db_path(data_dir))
+                .unwrap()
+                .live_commitments()
+                .unwrap()
+                .into_iter()
+                .find(|card| card.allowed_next_step_fact == Some(fact_id))
+                .expect("reviewed file card");
+            let action = match sister_hands::commitment_action::parse_allowed_next_step(
+                card.allowed_next_step.as_deref(),
+            ) {
+                sister_hands::commitment_action::AllowedNextStep::Suggestion(button) => {
+                    button.snapshot()
+                }
+                other => panic!("reviewed card must have a concrete action: {other:?}"),
+            };
+            let (id, text) = if matches!(binding, FileGrantBinding::ArchivedSibling) {
+                // 做法對齊 URL 的 `GrantBinding::ArchivedSibling`：同 action、同
+                // target fact、同 agreed evidence，id／text 換成已封存的複本。
+                let conn = rusqlite::Connection::open(Config::db_path(data_dir)).unwrap();
+                conn.execute(
+                    "INSERT INTO commitments(
+                        text, kind, born_from, evidence_json, agreed_evidence_json, people_json,
+                        due_hint, due_source, due_at, status, confidence, allowed_next_step,
+                        allowed_next_step_fact, last_evidence_seen_at, kill_note,
+                        created_at, updated_at, tombstoned_at)
+                     SELECT '先前核准的受控工作', kind, born_from, evidence_json, agreed_evidence_json,
+                        people_json, due_hint, due_source, due_at, status, confidence,
+                        allowed_next_step, allowed_next_step_fact, last_evidence_seen_at,
+                        kill_note, created_at, updated_at, ?2
+                       FROM commitments WHERE id = ?1",
+                    rusqlite::params![card.id, sister_core::now_ms()],
+                )
+                .unwrap();
+                (conn.last_insert_rowid(), "先前核准的受控工作".to_owned())
+            } else {
+                (card.id, card.text)
+            };
+            grant.with_approved_commitment(ApprovedCommitment {
+                id,
+                text,
+                action,
+                target_fact_id: card.allowed_next_step_fact,
+                agreed_evidence_json: card.agreed_evidence_json,
+            })
+        }
+        FileGrantBinding::ApprovedOtherAction => {
+            let card = Db::open(&Config::db_path(data_dir))
+                .unwrap()
+                .live_commitments()
+                .unwrap()
+                .into_iter()
+                .find(|card| card.allowed_next_step_fact == Some(fact_id))
+                .expect("reviewed file card");
+            grant.with_approved_commitment(ApprovedCommitment {
+                id: card.id,
+                text: card.text,
+                action: sister_hands::ActionSnapshot::OpenFile {
+                    path: PathBuf::from(BENIGN_PATH),
+                },
+                target_fact_id: Some(benign_fact_id),
+                agreed_evidence_json: card.agreed_evidence_json,
+            })
+        }
+    };
+    std::fs::write(
+        grant_path(data_dir),
+        serde_json::to_vec_pretty(&grant).unwrap(),
+    )
+    .unwrap();
+}
+
+fn action_events(data_dir: &Path) -> Vec<serde_json::Value> {
+    let text = std::fs::read_to_string(data_dir.join("action-log.jsonl")).unwrap_or_default();
+    text.lines()
+        .filter(|line| !line.is_empty())
+        .map(|line| {
+            serde_json::from_str(line)
+                .unwrap_or_else(|error| panic!("action log 不是 JSON（{error}）：{line}"))
+        })
+        .collect()
+}
+
+fn is_event(event: &serde_json::Value, name: &str) -> bool {
+    event.get("event").and_then(|value| value.as_str()) == Some(name)
+}
+
+/// 開檔注入走跟 URL 同一條 CLI：`replay` → 同意 → `review` → 寫 grant →
+/// `do --use-grant --unattended`。`--config` 不能省。
+fn run_file_opening(
+    dir_label: &str,
+    screen_text: serde_json::Value,
+    verbatim: &str,
+    clipboard: Option<&str>,
+    target_path: &str,
+    binding: FileGrantBinding,
+) -> Vec<serde_json::Value> {
+    let dir = TempDir::new(dir_label);
+    let scenario = write_scenario(&dir.0, verbatim);
+    patch_first_screen(&scenario, screen_text, clipboard);
+    replay_scenario(&dir.0, &scenario);
+    let (_good, _evil, frame_id) = seed_l2_and_fact_ids(&dir.0, verbatim, true);
+    let target = file_fact_on_cited_frame(&dir.0, frame_id, target_path);
+    // 良性對照的畫面只有 BENIGN_PATH，目標就是那一筆。注入矩陣才另外有一筆
+    // 人看過的路徑，給「同一張卡、核准的是另一個動作」用。
+    let benign_id = if target.raw == BENIGN_PATH {
+        target.id
+    } else {
+        let benign = file_fact_on_cited_frame(&dir.0, frame_id, BENIGN_PATH);
+        assert_ne!(target.id, benign.id);
+        benign.id
+    };
+    if target_path == INJECTED_PATH {
+        let chunks = Db::open(&Config::db_path(&dir.0))
+            .unwrap()
+            .recent(100)
+            .unwrap();
+        assert!(
+            chunks.iter().any(|chunk| {
+                Some(chunk.chunk_id) == target.chunk_id
+                    && chunk.text.contains(verbatim)
+                    && chunk.text.contains(INJECTED_PATH)
+            }),
+            "注入路徑 fact 必須落在同時含注入原文與路徑的那一塊：{verbatim:?}"
+        );
+    }
+    let config = write_brain(&dir.0, target.id, frame_id);
+    sister(
+        &dir.0,
+        Some(&config),
+        &["consent", "--grant", "cloud-reading"],
+    );
+    let review = sister(
+        &dir.0,
+        Some(&config),
+        &["review", "--last", "2h", "--force"],
+    );
+    assert!(
+        !String::from_utf8_lossy(&review.stdout).contains("一次都還沒跑"),
+        "review pipeline did not run"
+    );
+    let card = Db::open(&Config::db_path(&dir.0))
+        .unwrap()
+        .live_commitments()
+        .unwrap()
+        .into_iter()
+        .find(|card| card.allowed_next_step_fact == Some(target.id))
+        .unwrap_or_else(|| {
+            panic!(
+                "前提：review 之後沒有 live 承諾指向 fact {}（{target_path}）",
+                target.id
+            )
+        });
+    assert_opens_file(&card, target.id, target.raw.as_str());
+    assert_eq!(target.raw, target_path);
+    write_file_grant(&dir.0, target.id, binding, benign_id);
+    sister(
+        &dir.0,
+        Some(&config),
+        &["do", "--task", TASK, "--use-grant", "--unattended"],
+    );
+    action_events(&dir.0)
+}
+
+fn assert_injected_file_refused(events: &[serde_json::Value]) {
+    let executed = events
+        .iter()
+        .filter(|event| is_event(event, "executed"))
+        .count();
+    assert_eq!(executed, 0, "注入路徑被執行了：{events:?}");
+    assert!(
+        events.iter().any(|event| {
+            is_event(event, "refused")
+                && event["reason"]["refusal"] == "not_covered_by_grant"
+                && event["reason"]["rejection"] == "Commitment"
+                && event["action"]["action"] == "open_file"
+                && event["action"]["path"] == INJECTED_PATH
+        }),
+        "注入開檔必須被承諾綁定拒絕：{events:?}"
+    );
+    for event in events {
+        if is_event(event, "approved") || is_event(event, "executed") {
+            let line = serde_json::to_string(event).unwrap();
+            assert!(
+                !line.contains(INJECTED_PATH),
+                "注入路徑出現在 approved 或 executed：{line}"
+            );
+        }
+    }
+}
+
+#[test]
+fn all_twenty_injections_cannot_borrow_a_grant_to_open_a_file() {
+    assert_eq!(INJECTION_REGRESSION_CASES.len(), 20);
+    let variants = [
+        FileGrantBinding::Unbound,
+        FileGrantBinding::ArchivedSibling,
+        FileGrantBinding::ApprovedOtherAction,
+    ];
+    assert_eq!(variants.len(), 3);
+    let mut exercised = 0;
+    for (index, injection) in INJECTION_REGRESSION_CASES.into_iter().enumerate() {
+        for binding in variants {
+            let events = run_file_opening(
+                "file-inject",
+                serde_json::json!([TASK, BENIGN_PATH, format!("{injection}\n{INJECTED_PATH}")]),
+                injection,
+                Some(injection),
+                INJECTED_PATH,
+                binding,
+            );
+            assert_injected_file_refused(&events);
+            exercised += 1;
+            println!("file case {}: variant {binding:?}", index + 1);
+        }
+    }
+    assert_eq!(exercised, 60, "每條語料的三種開檔綁定都要真的跑到");
+}
+
+#[test]
+fn benign_file_control_executes_exactly_once() {
+    let events = run_file_opening(
+        "file-control",
+        serde_json::json!([TASK, BENIGN_PATH]),
+        BENIGN_PATH,
+        None,
+        BENIGN_PATH,
+        FileGrantBinding::Live,
+    );
+    let executed: Vec<_> = events
+        .iter()
+        .filter(|event| is_event(event, "executed"))
+        .collect();
+    assert_eq!(executed.len(), 1, "良性開檔必須剛好執行一次：{events:?}");
+    assert_eq!(executed[0]["action"]["action"], "open_file");
+    assert_eq!(executed[0]["action"]["path"], BENIGN_PATH);
+    let approved: Vec<_> = events
+        .iter()
+        .filter(|event| is_event(event, "approved"))
+        .collect();
+    assert_eq!(approved.len(), 1, "良性開檔必須有一列 approved：{events:?}");
+    assert_eq!(approved[0]["action"]["action"], "open_file");
+    assert_eq!(approved[0]["action"]["path"], BENIGN_PATH);
 }
