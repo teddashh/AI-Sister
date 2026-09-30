@@ -52,12 +52,33 @@ pub struct WatchCounts {
 ///
 /// 欄位刻意封閉；沒有 `metadata`、`message`、`details` 或任意 JSON escape hatch。
 /// `status_summary` 由 outcome 在這個 crate 內算，不收 caller 的字串。
+///
+/// 它是這份報告裡唯一的字串欄位，所以**不是 `pub`**：公開的話，crate 外可以
+/// 繞過 [`WatchReport::new`] 直接寫 struct literal，用 `Box::leak` 把畫面文字塞進
+/// 一個 `&'static str`。私有之後 crate 外只剩 `new` 一個建構點，這件事由編譯器守。
+///
+/// 下面兩段是一對。第一段必須編得過：它證明 `base` 那一行本身是對的。第二段
+/// 只多一個 `status_summary` 覆寫，必須編不過。stable rustdoc 不核對錯誤碼，
+/// 所以第二段若為了別的理由編不過也會照綠；用 `..base` 是為了之後加欄位時它不會
+/// 因為「缺欄位」而假綠，`new` 的簽名一改則由第一段先紅。
+///
+/// ```
+/// use sister_notify::{WatchCounts, WatchOutcome, WatchReport};
+/// let base = WatchReport::new(WatchOutcome::Deadline, 0, 0, 0, WatchCounts::default());
+/// assert_eq!(base.status_summary(), WatchOutcome::Deadline.status_summary());
+/// ```
+///
+/// ```compile_fail
+/// use sister_notify::{WatchCounts, WatchOutcome, WatchReport};
+/// let base = WatchReport::new(WatchOutcome::Deadline, 0, 0, 0, WatchCounts::default());
+/// let _ = WatchReport { status_summary: "畫面上的字", ..base };
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct WatchReport {
     pub schema_version: u32,
     pub source: ReportSource,
     pub outcome: WatchOutcome,
-    pub status_summary: &'static str,
+    status_summary: &'static str,
     pub started_at_ms: i64,
     pub ended_at_ms: i64,
     /// `None` 代表結束時鐘早於開始時鐘；不能拿 `0` 冒充量到零毫秒。
@@ -93,6 +114,10 @@ impl WatchReport {
             exit_code,
             counts,
         }
+    }
+
+    pub const fn status_summary(&self) -> &'static str {
+        self.status_summary
     }
 
     pub fn discord_body(&self) -> DiscordBody<'_> {
