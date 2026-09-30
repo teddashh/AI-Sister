@@ -700,7 +700,7 @@ AI-Sister 不提供、不保證這份免費額度，也不把它當費用上限�
 遠端通報不是預設能力，也不借用四張同意書。只有該次 `sister watch` 明確指定
 `--remote-json <JSONL>` 或 `--discord-webhook-env <ENV>` 才啟用；`--dry-run` 不讀 webhook
 環境變數、不 POST、不寫 JSON。兩條 transport 共用封閉 schema：watch outcome enum、固定
-狀態摘要、開始／結束／耗時、退出碼，以及拿到答案、送出但沒答案、根本沒送出、沒有新畫面
+狀態摘要、開始／結束／耗時，以及拿到答案、送出但沒答案、根本沒送出、沒有新畫面
 可問四個計數。不得加入
 問題原文、畫面／OCR 文字、app、網址、檔案路徑、memory ID 或任意自由文字欄位。
 

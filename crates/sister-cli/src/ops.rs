@@ -9656,7 +9656,7 @@ pub mod watch {
                 if let Some(name) = &remote.discord_env_name {
                     writeln!(
                         out,
-                        "收尾會 POST 到 {DISCORD_REPORT_ORIGIN}（webhook 只從環境變數 {name} 讀取，不落盤）。只送 outcome、固定狀態摘要、開始／結束／耗時、退出碼與四個計數；不送問題、畫面文字、app、網址、路徑或記憶 ID。"
+                        "收尾會 POST 到 {DISCORD_REPORT_ORIGIN}（webhook 只從環境變數 {name} 讀取，不落盤）。只送 outcome、固定狀態摘要、開始／結束／耗時與四個計數；不送問題、畫面文字、app、網址、路徑或記憶 ID。"
                     )?;
                 }
             }
@@ -10073,7 +10073,6 @@ pub mod watch {
             outcome,
             started,
             ended,
-            0,
             WatchCounts {
                 answered: tally.answered,
                 unanswered: tally.unanswered,
@@ -12211,7 +12210,6 @@ pub mod watch {
                 let report = report_for(&end, 100, 900);
                 assert_eq!(report.outcome, expected);
                 assert_eq!(report.duration_ms, Some(800));
-                assert_eq!(report.exit_code, 0);
                 assert_eq!(report.counts.answered, 1);
                 let raw = serde_json::to_string(&report).unwrap();
                 assert!(!raw.contains("private-app-must-not-leave"), "{raw}");
@@ -12240,7 +12238,6 @@ pub mod watch {
                 sister_notify::WatchOutcome::Deadline,
                 100,
                 500,
-                0,
                 sister_notify::WatchCounts::default(),
             );
             let mut out = Vec::new();

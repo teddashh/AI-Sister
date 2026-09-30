@@ -313,7 +313,7 @@ AI-Sister 不提供或保證免費額度。見 [Azure Speech 定價](https://azu
 安全或由你主動開啟，也不證明 path、redirect 或站內內容可信。**
 
 `sister watch` 的收尾可以選擇追加本機 JSONL，或 POST 到該次命令明確給定的 Discord
-webhook。兩者都只含結果、固定摘要、開始／結束／耗時、退出碼與四個計數，不含問題、
+webhook。兩者都只含結果、固定摘要、開始／結束／耗時與四個計數，不含問題、
 畫面文字、app、網址、路徑或記憶 ID。webhook 放在環境變數，不要放進命令列；全停已觸發
 或狀態不明時不送 Discord。指定的 JSONL 不受 `forget`、`prune` 或記憶匯出管理：
 

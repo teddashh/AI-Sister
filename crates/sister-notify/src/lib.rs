@@ -1,7 +1,7 @@
 //! 遠端收尾通報的資料邊界。
 //!
 //! 這個 crate 刻意不知道 `watch` 的問題、畫面文字、app、網址、檔案路徑或記憶 ID。
-//! 呼叫端只能交進 typed outcome、計數、時間與退出碼，因此 transport 沒有一條 API
+//! 呼叫端只能交進 typed outcome、計數與時間，因此 transport 沒有一條 API
 //! 能把未授權文字順手塞進 payload。預設 feature 沒有 HTTP client；只有出貨 CLI
 //! 明確啟用 `discord` 才能建立 Discord POST。
 
@@ -57,6 +57,10 @@ pub struct WatchCounts {
 /// 繞過 [`WatchReport::new`] 直接寫 struct literal，用 `Box::leak` 把畫面文字塞進
 /// 一個 `&'static str`。私有之後 crate 外只剩 `new` 一個建構點，這件事由編譯器守。
 ///
+/// 沒有退出碼欄位。報告在 JSONL 與 Discord 送出之前就組好，那時還不知道這一趟
+/// 最後怎麼退出；寫進去的只會是 `0`，Discord 失敗、行程非零退出時，JSONL 那一列
+/// 仍說 `0`。會組出報告的收尾都是 watch 正常結束，結束方式由 `outcome` 說。
+///
 /// 下面兩段是一對。第一段必須編得過：它證明 `base` 那一行本身是對的。第二段
 /// 只多一個 `status_summary` 覆寫，必須編不過。stable rustdoc 不核對錯誤碼，
 /// 所以第二段若為了別的理由編不過也會照綠；用 `..base` 是為了之後加欄位時它不會
@@ -64,13 +68,13 @@ pub struct WatchCounts {
 ///
 /// ```
 /// use sister_notify::{WatchCounts, WatchOutcome, WatchReport};
-/// let base = WatchReport::new(WatchOutcome::Deadline, 0, 0, 0, WatchCounts::default());
+/// let base = WatchReport::new(WatchOutcome::Deadline, 0, 0, WatchCounts::default());
 /// assert_eq!(base.status_summary(), WatchOutcome::Deadline.status_summary());
 /// ```
 ///
 /// ```compile_fail
 /// use sister_notify::{WatchCounts, WatchOutcome, WatchReport};
-/// let base = WatchReport::new(WatchOutcome::Deadline, 0, 0, 0, WatchCounts::default());
+/// let base = WatchReport::new(WatchOutcome::Deadline, 0, 0, WatchCounts::default());
 /// let _ = WatchReport { status_summary: "畫面上的字", ..base };
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -83,7 +87,6 @@ pub struct WatchReport {
     pub ended_at_ms: i64,
     /// `None` 代表結束時鐘早於開始時鐘；不能拿 `0` 冒充量到零毫秒。
     pub duration_ms: Option<u64>,
-    pub exit_code: i32,
     pub counts: WatchCounts,
 }
 
@@ -98,7 +101,6 @@ impl WatchReport {
         outcome: WatchOutcome,
         started_at_ms: i64,
         ended_at_ms: i64,
-        exit_code: i32,
         counts: WatchCounts,
     ) -> Self {
         Self {
@@ -111,7 +113,6 @@ impl WatchReport {
             duration_ms: ended_at_ms
                 .checked_sub(started_at_ms)
                 .and_then(|span| u64::try_from(span).ok()),
-            exit_code,
             counts,
         }
     }
@@ -139,14 +140,13 @@ impl Serialize for DiscordContent<'_> {
     {
         let report = self.0;
         serializer.serialize_str(&format!(
-            "AI-Sister watch：{} outcome={:?} duration_ms={} exit_code={} answered={} unanswered={} not_sent={} no_new_screen_text={}",
+            "AI-Sister watch：{} outcome={:?} duration_ms={} answered={} unanswered={} not_sent={} no_new_screen_text={}",
             report.status_summary,
             report.outcome,
             report
                 .duration_ms
                 .map(|value| value.to_string())
                 .unwrap_or_else(|| "unknown".to_string()),
-            report.exit_code,
             report.counts.answered,
             report.counts.unanswered,
             report.counts.not_sent,
@@ -204,7 +204,6 @@ mod tests {
             WatchOutcome::ScreenQuiet,
             1_000,
             9_500,
-            0,
             WatchCounts {
                 answered: 2,
                 unanswered: 1,
@@ -228,7 +227,6 @@ mod tests {
                 "counts",
                 "duration_ms",
                 "ended_at_ms",
-                "exit_code",
                 "outcome",
                 "schema_version",
                 "source",
@@ -254,19 +252,14 @@ mod tests {
         let raw = serde_json::to_string(&report().discord_body()).unwrap();
         assert!(raw.contains(r#""allowed_mentions":{"parse":[]}"#), "{raw}");
         assert!(raw.contains("duration_ms=8500"), "{raw}");
+        assert!(!raw.contains("exit_code"), "{raw}");
         assert!(!raw.contains("@everyone"), "{raw}");
         assert!(!raw.contains("private-question"), "{raw}");
     }
 
     #[test]
     fn a_backwards_clock_is_unknown_duration_not_a_fake_zero() {
-        let report = WatchReport::new(
-            WatchOutcome::Deadline,
-            9_500,
-            1_000,
-            0,
-            WatchCounts::default(),
-        );
+        let report = WatchReport::new(WatchOutcome::Deadline, 9_500, 1_000, WatchCounts::default());
         assert_eq!(report.duration_ms, None);
         assert!(
             serde_json::to_string(&report.discord_body())

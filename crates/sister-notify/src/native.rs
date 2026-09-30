@@ -190,7 +190,7 @@ mod tests {
     }
 
     fn report() -> WatchReport {
-        WatchReport::new(WatchOutcome::Deadline, 100, 500, 0, WatchCounts::default())
+        WatchReport::new(WatchOutcome::Deadline, 100, 500, WatchCounts::default())
     }
 
     #[test]

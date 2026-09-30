@@ -391,8 +391,8 @@ endpoint 發一個 POST；設定啟用且 loopback 就緒後，經 `sister-tts/l
 `127.0.0.1:8231` 發 GET `/health` 與 POST `/tts`；以及設定明確開啟後，經
 `sister-usage/public-status` 對 LimitReset 固定 `status`／`latest` 發 GET。第五條由
 `sister.exe` 經 `sister-notify[discord]`，只在該次 `watch` 明確指定 webhook env 後，
-向 exact Discord webhook POST typed 收尾資料：outcome、固定摘要、開始／結束／耗時、
-退出碼與四個計數。沒有 question、畫面文字、app、URL、path 或 memory ID；webhook
+向 exact Discord webhook POST typed 收尾資料：outcome、固定摘要、開始／結束／耗時
+與四個計數。沒有 question、畫面文字、app、URL、path 或 memory ID；webhook
 secret 不進 argv、config、log、DB 或 JSON report。`--remote-json <JSONL>` 只把同一份
 typed report 追加到使用者指定的本機檔案，不是網路 transport；該檔不在 data dir 時，
 `forget`／`prune`／memory export 不會碰它，命令開始前會把這個後果直接印出來。

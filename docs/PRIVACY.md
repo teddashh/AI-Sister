@@ -20,7 +20,7 @@ alpha.110 預設關閉、簽獨立同意並明確啟用後，只替最新新答�
 以及預設關閉、設定頁明確開啟後，對 LimitReset 固定 `status`／`latest` 的公開重置看板 GET。
 第五條只在該次 `sister watch` 明確給 `--discord-webhook-env ENV` 時，由 `sister.exe`
 向 exact `https://discord.com/api/webhooks/<id>/<token>` POST 一份 typed 收尾報告。它只含
-結果 enum、固定摘要、開始／結束／耗時、退出碼與四個計數；不含問題、畫面文字、app、
+結果 enum、固定摘要、開始／結束／耗時與四個計數；不含問題、畫面文字、app、
 網址、路徑或 memory ID。webhook secret 只從該環境變數讀，不進 argv、設定、log、DB 或
 JSON 回報；不 redirect、不走 proxy、不 retry。全停在 POST 前 fail closed，且 admission
 活過完整 transport。這是該次命令的明確授權，不改寫或借用四張同意書。
