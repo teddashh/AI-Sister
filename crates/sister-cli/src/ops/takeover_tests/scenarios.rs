@@ -4,8 +4,8 @@
 //! 和上層那組迴路測試不同，這裡**桌面是真的**：畫面走 `sister replay` 那一條錄進
 //! 資料庫，承諾表由 `sister review` 呼叫一支假的大腦整理出來（兩個 pass、證據濾網、
 //! 下一步只准指清單裡的 fact），網址紀錄是一段合成的可信錄製。接手讀的是真的
-//! `Db`，每一步之後的畫面由手寫進同一顆資料庫。假的只有三樣：大腦的回答、手、
-//! 和他在鍵盤上打的「好」。
+//! `Db`，每一步之後的畫面由手寫進同一顆資料庫。假的只有四樣：大腦的回答、手、
+//! 他在鍵盤上打的「好」，和接手那一趟的時鐘（見 [`Clock`]）。
 //!
 //! 每一組都同時放一步**該做的**（對照組）：它真的交到手上，才證明這一趟整條路是
 //! 通的，被擋下來的那一步不是因為別的東西壞了才沒動。手收到的動作必須**剛好**是
@@ -500,6 +500,34 @@ fn now() -> i64 {
     sister_core::now_ms()
 }
 
+/// 接手那一趟的時鐘：從真的現在起跳，產品每問一次時間就往前走 1 毫秒。手寫下
+/// 「之後」那張畫面、拔手、按全停，讀的都是這一個。
+///
+/// 不用真時鐘：手把畫面寫在「收到動作那一刻 + 1 秒」，產品在那之後還要寫一列紀錄
+/// 才讀時鐘，拿它當「做完的那一刻」去找之後的畫面。機器一忙、中間超過一秒，那張
+/// 畫面就落在「做完」之前，第一步被讀成畫面沒對上，第二步輪不到——紅的是負載，
+/// 不是被擋的那一步。
+#[derive(Clone)]
+struct Clock(Rc<std::cell::Cell<i64>>);
+
+impl Clock {
+    fn starting_now() -> Self {
+        Self(Rc::new(std::cell::Cell::new(now())))
+    }
+
+    /// 產品問時間：往前走 1 毫秒再回答。
+    fn tick(&self) -> i64 {
+        let at = self.0.get() + 1;
+        self.0.set(at);
+        at
+    }
+
+    /// 手看時間：不往前走。
+    fn read(&self) -> i64 {
+        self.0.get()
+    }
+}
+
 fn sql(dir: &Path) -> rusqlite::Connection {
     rusqlite::Connection::open(Config::db_path(dir)).unwrap()
 }
@@ -776,10 +804,11 @@ struct Recorded {
     session: i64,
     calls: Vec<ActionSnapshot>,
     after_first_step: Option<After>,
+    clock: Clock,
 }
 
 impl Recorded {
-    fn new(dir: &Path, after_first_step: Option<After>) -> Self {
+    fn new(dir: &Path, after_first_step: Option<After>, clock: Clock) -> Self {
         let mut db = Db::open(&Config::db_path(dir)).unwrap();
         let session = db.start_session("test/hands", "test").unwrap();
         Self {
@@ -788,6 +817,7 @@ impl Recorded {
             session,
             calls: Vec::new(),
             after_first_step,
+            clock,
         }
     }
 
@@ -806,7 +836,7 @@ impl Recorded {
             .insert_frame(
                 self.session,
                 &FrameCapture {
-                    ts: now() + 1_000,
+                    ts: self.clock.read() + 1_000,
                     monitor: 0,
                     width: 1920,
                     height: 1080,
@@ -842,9 +872,11 @@ impl sister_hands::Executor for Recorded {
         self.show(&action, twist);
         match twist {
             Some(After::PullsHands) => {
-                sister_hands::kill_switch::pull(&self.dir, now()).unwrap();
+                sister_hands::kill_switch::pull(&self.dir, self.clock.read()).unwrap();
             }
-            Some(After::StopsAll) => sister_hands::master_stop::engage(&self.dir, now()).unwrap(),
+            Some(After::StopsAll) => {
+                sister_hands::master_stop::engage(&self.dir, self.clock.read()).unwrap()
+            }
             Some(After::Changes(change)) => change(&self.dir),
             Some(After::ShowsAnotherPage) | None => {}
         }
@@ -921,8 +953,9 @@ fn play(name: &str, scenario: Scenario) {
         })
         .collect();
 
-    sister_core::heartbeat::beat(&dir.0, now()).unwrap();
-    let mut hands = Recorded::new(&dir.0, scenario.after_first_step);
+    let clock = Clock::starting_now();
+    sister_core::heartbeat::beat(&dir.0, clock.read()).unwrap();
+    let mut hands = Recorded::new(&dir.0, scenario.after_first_step, clock.clone());
     let mut out = Vec::new();
     takeover::run_with_output(
         &dir.0,
@@ -934,7 +967,7 @@ fn play(name: &str, scenario: Scenario) {
         &db,
         &mut Typing::keys("好\n"),
         &mut hands,
-        &mut now,
+        &mut || clock.tick(),
         &mut |_| {},
         &mut out,
     )

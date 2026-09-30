@@ -173,6 +173,9 @@ impl StepSource for Desk {
     }
 }
 
+/// 某一步做完之後，對桌面做的改動。
+type Change = Box<dyn FnOnce(&World)>;
+
 /// 第幾次交到手上（從 1 算）的時候出什麼事。
 enum Twist {
     /// 那一端失敗了。
@@ -184,7 +187,7 @@ enum Twist {
     /// 做完了，畫面卻還停在原本那一頁。
     ScreenStays,
     /// 做完之後，桌面被改了。
-    Then(Box<dyn FnOnce(&World)>),
+    Then(Change),
 }
 
 struct Hands {
@@ -702,7 +705,7 @@ fn a_screen_that_does_not_show_the_step_stops_the_rest() {
 
 #[test]
 fn a_card_that_left_the_table_after_yes_stops_the_run_there() {
-    let changes: Vec<(&str, Box<dyn FnOnce(&World)>)> = vec![
+    let changes: Vec<(&str, Change)> = vec![
         (
             "整理掉",
             Box::new(|world: &World| world.cards.borrow_mut().retain(|card| card.id != 2)),
@@ -1054,7 +1057,8 @@ fn not_recording_means_no_offer_and_no_row() {
 
 #[test]
 fn a_stop_switch_means_no_offer_and_no_row() {
-    let stops: [(&str, fn(&Path)); 2] = [
+    type Stop = fn(&Path);
+    let stops: [(&str, Stop); 2] = [
         ("拔手", |dir: &Path| {
             sister_hands::kill_switch::pull(dir, T0 - 1).unwrap();
         }),
@@ -1103,9 +1107,8 @@ fn a_second_takeover_does_not_queue_behind_the_first() {
 #[test]
 fn a_pipe_is_refused_before_anything_is_written() {
     let dir = Tmp::new("takeover-pipe");
-    let error = takeover::run_with_stdin_kind(&dir.0, &opts(), false)
-        .err()
-        .expect("管子餵進來的「好」不算");
+    let error =
+        takeover::run_with_stdin_kind(&dir.0, &opts(), false).expect_err("管子餵進來的「好」不算");
     assert!(error.to_string().contains("stdin 不是終端機"), "{error}");
     assert_eq!(
         std::fs::read_dir(&dir.0).unwrap().count(),
