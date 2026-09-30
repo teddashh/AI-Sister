@@ -178,9 +178,13 @@ pub fn append_json_report(path: &Path, report: &WatchReport) -> Result<()> {
     }
     let mut row = serde_json::to_vec(report).context("序列化 JSON 回報失敗")?;
     row.push(b'\n');
+    // `read` 不是多餘的。Windows 的 `LockFileEx` 要 handle 有讀或寫資料的權限，
+    // 只開 `append` 的 handle 只有附加權限，上鎖會回 Access is denied（os error 5）；
+    // Linux 的 flock 不看開檔權限，所以只有 Windows 會紅。寫入照樣一律接在檔尾。
     let mut file = OpenOptions::new()
         .create(true)
         .append(true)
+        .read(true)
         .open(path)
         .with_context(|| format!("開啟 JSON 回報失敗：{}", path.display()))?;
     fs4::FileExt::lock(&file)
@@ -270,11 +274,9 @@ mod tests {
 
     #[test]
     fn json_report_appends_one_complete_line_per_run() {
-        let dir = std::env::temp_dir().join(format!(
-            "sister-notify-json-{}-{}",
-            std::process::id(),
-            std::thread::current().name().unwrap_or("test")
-        ));
+        // 不拿 thread 名稱組路徑：libtest 的 thread 名稱是 `tests::…`，Windows 的
+        // 路徑不收冒號。
+        let dir = std::env::temp_dir().join(format!("sister-notify-json-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let path = dir.join("reports.jsonl");
         append_json_report(&path, &report()).unwrap();
