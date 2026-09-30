@@ -1637,6 +1637,60 @@ Release 1.0 必做、使用者 opt-in 的產品面。主動性繼續用預算和
     這一條，和上面說它「兩格對它自己是對的」並不矛盾）。要數就照著收據數，
     別把兩個 51 當成同一個 51。
 
+2026-09-28 新增一條無人值守網址來源閘門：目標 URL 除了要在可採信的完整網址紀錄裡，
+還必須是**目標 fact 自己那張可信 Windows 錄製畫面的位址列**；只在畫面文字裡、
+位址列不同、沒量到，或來源是 replay／import 時，授權票不能替它按。比較 scheme、
+有效 port、host、path、query、fragment；Chromium 省略 scheme 的位址列只視為 HTTPS，
+也接受省略 www.。HTTP 或非預設 port 不能借 HTTPS 的來源票。端到端測試把注入網址
+放在被兩個 pass 引用的同張畫面，並另種可信完整網址紀錄；修前真的寫出 `executed`，
+修後由新閘門拒絕，良性網址仍執行一次；同網址 replay 畫面另有反向測試。
+後續修正保留 path 的 percent escape 和結尾 `/` 原形、query 的原始順序；
+`%2F` 不能借 `/`、反轉重複 query key 也不能借原去處；空 `?`／`#` 分隔符有無也逐一
+區分，不能借同一張 standing grant。20 條 injection 語料現在各走
+三種**本段且 reviewer 已接受的目標 fact**來源：可信畫面文字但位址列不同、可信畫面
+位址列未量到、replay 畫面位址列相同。每次都斷言 exact 拒絕原因；窗外 fact 另留單一
+定點測試。這只量到三條來源閘門，未證明所有 injection 變體在所有可執行情境都會被攔；
+Phase 6 的整體退場條件仍未打勾。
+
+後續擴大驗收時，網址身分改由正式 URL parser 解析完整 origin，userinfo 一律拒絕；
+保存的授權書另須列出 exact URL 目標，舊票沒有目標清單就拒絕無人值守 URL。
+20 條 injection 語料的擴大候選各跑九種來源／授權組合，共 180 例。末三種特別讓
+來源畫面、目標地址 fact 與保存的 grant 都指向同一去處（完整 URL、Chromium 縮寫、
+明寫預設 port）。獨立審查發現：原夾具替 19 條語料附加了注入網址，拒絕原因
+其實是正文裡的重複網址；只有指令而沒有網址時，模型挑到位址列 fact 仍可借票。
+修正後，每張無人值守 grant 都綁人當場選定的承諾 ID、原文、具體動作、目標 fact ID 與
+兩個 pass 同意的畫面清單；舊票沒有綁定就拒絕。`--save-grant` 對每種動作都
+要求先選承諾並當場核准；URL 候選另
+先驗網址政策、授權範圍、雙 pass 引用目標畫面、可信 Windows 位址列畫面與
+完整可信網址紀錄；缺目標 fact 或同意畫面的舊卡不列為候選。
+末三種案例保留原注入文字，不再附加網址，來源仍是可信同址位址列；grant 指向
+夾具建立並歸檔的另一張同址承諾，新的模型承諾以 `Commitment` 拒絕。
+其餘六種繼續驗來源與 URL 目標閘門。乾淨、當場選定的位址列對照可執行一次。
+`0fd196f6` 的本地可執行路徑獲獨立審查 PASS，重型 gate 53/53，
+staging feature hands 171+31、CLI 程序 5 與 feature Clippy 全綠；
+service verification 尚缺。這份收據不能用來
+替代 Ted 的真 Windows 任務日誌，也不把任意畫面指令分類器說成已達 100%。
+可重跑收據：`cargo test -p sister-cli --test injection_end_to_end --quiet` 的
+`all_twenty_injections_reach_executable_facts_across_source_variants` 逐例讀
+`action-log.jsonl`，斷言 exact `refused` 原因且沒有 `executed`；
+`benign_control_reaches_platform_execution_exactly_once` 斷言一列 `executed`；
+`legacy_unbound_grant_cannot_borrow_instruction_only_same_address_fact` 專驗審查找到的
+無網址指令缺口。
+
+不可逆動作的共用 dispatch 目前有獨立於保存 grant 的即時詢問、具體步驟綁定、
+30 秒期限、時鐘倒退與停止檢查；`sister-cli` 的 `staging-approval` feature 現在有
+可執行的 `--staging-irreversible` 入口，走同一個 dispatch，只能呼叫本機記憶體
+fixture，目標須為 `staging://`。程序層逐類測 approve／decline／expiry／replay
+及停止，且拒絕非 fixture 目標。期限計入提示期間真正流逝的單調時間，另有
+等待 31 秒的程序測試；腳本核准須明示測試旗標，收據標明輸入來源，同一資料夾
+連跑兩次仍可完整回放。正式產品尚無送出／付款／刪除等 executor，這一格的
+完整產品驗收仍未達成；不得把 fixture 執行冒充第三方實際動作。
+可重跑收據：`cargo test -p sister-hands --features staging-approval --quiet` 的
+`all_five_classes_use_live_dispatch_and_replay_is_read_only` 和
+`stop_and_clock_rollback_refuse_after_approval_before_dispatch`；私有票的
+缺席、換目標與極端時鐘測試在 `irreversible` 模組內；程序層另跑
+`cargo test -p sister-cli --features staging-approval --test staging_approval_cli`。
+
 **Exit criteria**
 - [ ] Injection 套件 100% 攔截（埋 20 種指令變體）。**（alpha.82 打勾過，收貨
       時撤回：20 條走同一個攔截點，而那個攔截點是「時間窗」不是「這是

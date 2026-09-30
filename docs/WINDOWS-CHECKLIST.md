@@ -2438,6 +2438,13 @@ alpha.70 把第一個接上去：`sister do`。
 alpha.77 起另有明確的 `--use-grant --unattended` 路徑；它不是把這些歷史步驟改寫成
 「當時也能自己跑」。目前無人值守 URL 的額外政策見第 15 節。
 
+**Phase 6 真機收據仍待完成：**Ted 在專用測試資料目錄中選 10 個不同的本機、可逆
+semi-action 任務（例如打開自有測試文件或聚焦測試視窗），逐步親手核准並確認 OS
+結果。每個任務都保存原始 `action-log.jsonl`、`sister hands log` 回放輸出、對應任務
+描述與結果；逐項核對 `proposed`、`approved`、`executed`、`step_finished`、`concluded`
+以及實際成功。測試執行器跑的 10 個受控演練只能驗證接線，不能充作 Ted 的 10 個
+真實任務；付款、刪除第三方資料與公開發文不在這份真機驗收內。
+
 - [ ] **先確認手上有東西可以做。** `sister.exe commitments` 要看到至少一張活著的
       承諾卡。一張都沒有的話先 `sister.exe review --force --last 24h` 跑一次 L3
       （要簽過第二張同意書，而且 `sister.exe doctor` 說得出你設定的那個 CLI）。
@@ -2812,24 +2819,26 @@ alpha.77 起另有明確的 `--use-grant --unattended` 路徑；它不是把這�
       `sister.exe --config .\url-policy-test.toml url-policy --set only-on-my-press`：
       只准改那份，預設設定與字母人的答案不可以跟著變。親手指定一個不存在的
       `--config` 要報找不到，不能偷偷建立一份預設檔。
-- [ ] **「等我在」只擋無人值守，不擋你眼前的按鍵。** 準備一張仍有效、包含 URL
-      next step 的 saved grant。選 `only-on-my-press` 後，先跑不帶 `--unattended` 的
+- [ ] **「等我在」只擋無人值守，不擋你眼前的按鍵。** 準備一張仍有效、明列該
+      next step 完整 URL（`--target-url`）的 saved grant。舊票缺目標清單時，無人值守
+      URL 一律拒絕。選 `only-on-my-press` 後，先跑不帶 `--unattended` 的
       `sister.exe do --task "<原任務>" --use-grant` 並親手核准：其他閘門通過時 URL
       仍應交給 Windows。再跑同一行並加 `--unattended`：要在碰 OS 前拒絕，理由要說
       是你選了等在場；不能說成「還沒問過」或「站不在紀錄」。
-- [ ] **「說得出來源」只信升級後真 recorder 看過的同一 host。** 選
+- [ ] **「說得出來源」只信升級後真 recorder 看過的同一去處。** 選
       `when-you-can-name-the-origin`。先拿一個只存在 alpha.99 舊 session 的 host 跑
       無人值守：必須拒絕；import corpus 與 scenario replay 種出的 URL 也都不能算。
-      再用 alpha.100 的 `sister record` 真錄一場，在 Chrome／Edge 導覽到該 host、
+      再用目前的 `sister record` 真錄一場，在 Chrome／Edge 導覽到該完整 URL、
       讓她留下 URL 後乾淨收工，再跑同一個有效 grant：其他閘門通過時才可放行。
       若目前沒有任何一列符合新的 trusted recorder identity，理由要明說**可採信的
       來源集合為空，舊版資料可能存在但不可信**；不能宣稱整顆 DB 一個 URL 都沒有。
       資料庫讀取失敗則要報查詢失敗，兩者也不能都叫「這個站不在紀錄」。
-- [ ] **host 邊界不能靠看起來像。** 用各自有合法 evidence／grant 的 next step 驗：
-      `https://www.example.com/a` 的紀錄可以替 `https://example.com/b` 背書；
+- [ ] **URL 邊界不能靠看起來像。** 用各自有合法 evidence／grant 的 next step 驗：
+      `https://www.example.com/a` 的完整紀錄不能替 `https://example.com/b` 背書；
       `sub.example.com`、`example.com.evil.com`、`example.com@evil.com` 與 IDN／ASCII
-      lookalike 都不可以借到 `example.com` 的票。前一格通過只證明政策刻意比到 host，
-      **不證明 path、安全性、使用者意圖、redirect，或那個 UIA Edit 一定是位址列。**
+      lookalike 也都不能借票。HTTP、非預設 port、不同 path／query／fragment、空
+      `?`／`#` 分隔符與 userinfo 都要分開；只有 recorder 的 Chromium 縮寫位址列
+      才容許省略 HTTPS／一層 `www.`。這仍**不證明網站安全、使用者意圖或 redirect**。
 - [ ] **位址列正在輸入時不留來源；COM error 那一臂沒實測就標沒實測。** 錄製中把
       焦點留在 Chrome／Edge 位址列，打一串帶點但不要送出的半截 host；那串不應進
       新 session 的 `focus_events.url`。`CurrentHasKeyboardFocus()` 真正回 error 很難

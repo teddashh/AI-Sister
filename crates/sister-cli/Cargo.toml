@@ -17,6 +17,7 @@ default = ["bundled-sqlite", "macos"]
 bundled-sqlite = ["sister-core/bundled-sqlite", "sister-capture/bundled-sqlite"]
 macos = ["sister-capture/macos"]
 macos-ci-spike = ["macos", "sister-capture/macos-ci-spike"]
+staging-approval = ["sister-hands/staging-approval"]
 
 [dependencies]
 sister-core.workspace = true

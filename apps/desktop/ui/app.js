@@ -6213,6 +6213,20 @@ function renderHits(
     );
   }
 
+  if (kind === "needs_subject") {
+    if (hits.length || facts.length || hasChapters || matchedReadings.length || synthesis || blind) {
+      throw new Error("沒有查找主題的回答不該帶出處或盲點");
+    }
+    const askForSubject = document.createElement("li");
+    askForSubject.className = "hits-empty";
+    askForSubject.textContent = "要找什麼？請把人名、文件名或關鍵字打出來。";
+    hitList.append(askForSubject);
+    showAnswerHits();
+    paintConversation();
+    showingAnswer = false;
+    return;
+  }
+
   if (closureNotice && !provisional) {
     const notice = document.createElement("li");
     notice.className = "hits-note";

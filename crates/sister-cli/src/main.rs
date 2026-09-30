@@ -11,6 +11,8 @@ mod fmt;
 mod macos_ci;
 mod ops;
 mod provider_bridge;
+#[cfg(feature = "staging-approval")]
+mod staging_approval_cli;
 
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
@@ -443,6 +445,9 @@ enum Command {
         /// 允許哪幾類動作（可重複）：open-url / open-file / focus-window。預設 open-url。
         #[arg(long = "allow")]
         allow: Vec<String>,
+        /// 無人值守可開的完整 URL（可重複）；仍須同時通過可信來源與來源畫面。
+        #[arg(long = "target-url", conflicts_with = "use_grant")]
+        target_urls: Vec<String>,
         /// 授權多久後失效（分鐘）。
         #[arg(long, default_value_t = 5)]
         minutes: u64,
@@ -455,8 +460,8 @@ enum Command {
         /// 把這一輪鑄出的授權書存到資料目錄，供之後的行程重用。
         #[arg(long, conflicts_with = "use_grant")]
         save_grant: bool,
-        /// 使用資料目錄裡已存的授權書；仍然每一步都要當場按「好」。
-        #[arg(long, conflicts_with_all = ["apps", "allow", "minutes", "steps"])]
+        /// 使用資料目錄裡已存的授權書；不加 --unattended 時仍逐步詢問。
+        #[arg(long, conflicts_with_all = ["apps", "allow", "target_urls", "minutes", "steps"])]
         use_grant: bool,
         /// 憑先前存好的授權書逐步執行，不在每一步等人按鍵。
         #[arg(long, requires = "use_grant", conflicts_with = "dry_run")]
@@ -467,7 +472,7 @@ enum Command {
         /// `--show-grant --save-grant` 會安靜地什麼都沒存——而他打了那個旗標，
         /// 回頭會以為存好了。alpha.71 的 `--notify` 就是被這樣吃掉的。與其讓
         /// 那句話沒人講，不如讓 clap 當場拒絕。
-        #[arg(long, conflicts_with_all = ["task", "apps", "allow", "minutes", "steps", "dry_run", "save_grant", "use_grant"])]
+        #[arg(long, conflicts_with_all = ["task", "apps", "allow", "target_urls", "minutes", "steps", "dry_run", "save_grant", "use_grant"])]
         show_grant: bool,
     },
 
@@ -674,6 +679,10 @@ fn main() -> Result<()> {
     // config／data dir、不建立產品 log。Windows 上面的 lifecycle guard 仍然
     // 活過 provider 完整呼叫，installer 不能和 bridge 同時換掉 executable。
     let early_args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+    #[cfg(feature = "staging-approval")]
+    if let Some(result) = staging_approval_cli::run_early(&early_args) {
+        return result;
+    }
     if let Some(request) = provider_bridge_request(&early_args) {
         let (provider, executable) = request.map_err(anyhow::Error::msg)?;
         return provider_bridge::run(provider, &executable);
@@ -864,6 +873,7 @@ fn main() -> Result<()> {
             task,
             apps,
             allow,
+            target_urls,
             minutes,
             steps,
             dry_run,
@@ -877,6 +887,7 @@ fn main() -> Result<()> {
                 task: task.unwrap_or_default(),
                 apps,
                 allow,
+                target_urls,
                 minutes,
                 steps,
                 dry_run,

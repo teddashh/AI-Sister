@@ -2047,6 +2047,43 @@ impl Db {
             }
         }
 
+        // 位址列本身也建立一筆有 frame 的 URL fact，和同張畫面 OCR 抽出的
+        // URL fact 保持不同 source_kind。無人值守只能選這筆；否則惡意網頁
+        // 把自己的位址再寫進正文時，OCR fact 會借同址來源票執行指令。
+        if let Some(target) = frame
+            .focus
+            .url
+            .as_deref()
+            .and_then(sister_hands::target_policy::recorded_address_target)
+        {
+            let id = insert_chunk_tx(
+                &tx,
+                session_id,
+                frame.ts,
+                SourceKind::Url,
+                Some(frame_id),
+                Some(frame_id),
+                &frame.focus,
+                &target,
+            )?;
+            fact_count += insert_facts_tx(
+                &tx,
+                session_id,
+                frame.ts,
+                id,
+                Some(frame_id),
+                SourceKind::Url,
+                &frame.focus,
+                &[ExtractedFact {
+                    kind: crate::facts::FactKind::Url,
+                    raw: target.clone(),
+                    normalized: target.clone(),
+                    byte_start: 0,
+                    byte_end: target.len(),
+                }],
+            )?;
+        }
+
         tx.commit()?;
         Ok((frame_id, chunk_id, fact_count))
     }
@@ -3408,15 +3445,15 @@ impl Db {
     ///
     /// 這支只服務授權票那一條路，不是一般瀏覽紀錄查詢。做完後畫面核對仍走
     /// [`sister_hands::target_policy::same_site`]（只比 host）。這裡比
-    /// [`sister_hands::target_policy::same_destination`]（host + path + query +
-    /// fragment），因為只比 host 會讓 `/collect` 或換掉的 query 借位址列裡的
-    /// `example.com/help` 過關。
+    /// [`sister_hands::target_policy::same_destination`]（scheme + 有效 port +
+    /// host + path + query + fragment），因為只比 host 會讓 `/collect` 或換掉的
+    /// query 借位址列裡的 `example.com/help` 過關。
     ///
     /// 「沒有」有四種，而它們要他做的事完全相反，所以這裡不回 `bool`：
     ///
     /// - [`UrlOrigin::NotInHerRecord`]：可採信的錄製來源裡有 URL，只是沒有這個站。
     /// - [`UrlOrigin::SameSiteDifferentPath`]：這個站去過，但紀錄裡沒有這一條路徑。
-    /// - [`UrlOrigin::SamePathDifferentDestination`]：路徑對得上，query／fragment 不是紀錄裡那一條。
+    /// - [`UrlOrigin::SamePathDifferentDestination`]：路徑對得上，但 scheme、port 或 query／fragment 不同。
     /// - [`UrlOrigin::NoTrustedRecordedUrls`]：沒有可排除「還在輸入」的錄製
     ///   URL。舊版 session 可能仍有 URL，但無法安全地拿來背書。
     ///
@@ -5340,6 +5377,71 @@ impl Db {
                 },
             },
         })
+    }
+
+    /// 無人值守開網址時，目標 fact 必須是同張畫面位址列衍生的 URL fact，
+    /// 不能是網頁正文 OCR 裡的一串相同網址；來源畫面還必須屬於可採信的
+    /// Windows 錄製。別張畫面或 replay 的同網址也不能借票。
+    /// Chromium 會省略 scheme／www.，比較去處而非逐字比較。讀不到畫面／
+    /// 位址列時明確保留「沒量到」。
+    pub fn target_address_on_source_frame(
+        &self,
+        id: i64,
+        expected_raw: &str,
+    ) -> Result<sister_hands::url_policy::TargetAddressOrigin> {
+        use sister_hands::url_policy::TargetAddressOrigin as Origin;
+        let Some(fact) = self.fact_by_id(id)? else {
+            return Ok(Origin::AddressUnmeasured);
+        };
+        if fact.raw != expected_raw {
+            return Ok(Origin::AddressUnmeasured);
+        }
+        let Some(frame_id) = fact.frame_id else {
+            return Ok(Origin::AddressUnmeasured);
+        };
+        let source: Option<(Option<String>, Option<String>)> = self
+            .conn
+            .query_row(
+                "SELECT f.url, s.platform
+                   FROM frames AS f
+                   LEFT JOIN sessions AS s ON s.id = f.session_id
+                  WHERE f.id = ?1",
+                [frame_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let origin = match source {
+            None => Origin::AddressUnmeasured,
+            Some((_, platform)) if platform.as_deref() != Some(TRUSTED_URL_ORIGIN_PLATFORM) => {
+                Origin::UntrustedSourceFrame
+            }
+            Some((None, _)) => Origin::AddressUnmeasured,
+            Some((Some(_), _)) if fact.source_kind != "url" => Origin::OtherScreenText,
+            Some((Some(url), _))
+                if sister_hands::target_policy::same_destination(&url, expected_raw) =>
+            {
+                Origin::SameFrameAddress
+            }
+            Some((Some(_), _)) => Origin::OtherScreenText,
+        };
+        if origin != Origin::SameFrameAddress {
+            return Ok(origin);
+        }
+        // 位址列本身雖然可信，網頁正文若也提供同一 URL，模型仍可能是
+        // 聽了正文的指令才挑中位址列 fact。不能讓重複出現的畫面文字
+        // 借到同址 grant；來源不明時交還給當場按鍵。
+        let mut stmt = self.conn.prepare(
+            "SELECT raw FROM facts
+              WHERE frame_id = ?1 AND kind = 'url'
+                AND source_kind IN ('ocr', 'assistive')",
+        )?;
+        let screen_urls = stmt.query_map([frame_id], |row| row.get::<_, String>(0))?;
+        for screen_url in screen_urls {
+            if sister_hands::target_policy::same_destination(&screen_url?, expected_raw) {
+                return Ok(Origin::OtherScreenText);
+            }
+        }
+        Ok(origin)
     }
 
     /// 在一個有界時間窗裡挑這一步的畫面憑據：**動作之後的優先，然後取最新的
@@ -9589,6 +9691,22 @@ mod tests {
                 .expect("查"),
             UrlOrigin::InHerRecord
         );
+        assert_eq!(
+            db.site_in_her_record("https://example.com:443/bill?id=7")
+                .expect("查"),
+            UrlOrigin::InHerRecord,
+            "Chromium 的省略 scheme 應視為 HTTPS 預設 port"
+        );
+        for target in [
+            "http://example.com/bill?id=7",
+            "https://example.com:8443/bill?id=7",
+        ] {
+            assert_eq!(
+                db.site_in_her_record(target).expect("查"),
+                UrlOrigin::SamePathDifferentDestination,
+                "不同 scheme 或 port 不能借完整來源票：{target}"
+            );
+        }
         // 同一個站的別條路徑不算——那是螢幕上埋 URL 借 host 過關的那一招。
         assert_eq!(
             db.site_in_her_record("https://example.com/other")
@@ -9619,6 +9737,164 @@ mod tests {
             db.site_in_her_record("javascript:alert(1)").expect("查"),
             UrlOrigin::NotAReadableSite
         );
+    }
+
+    #[test]
+    fn recorded_destination_keeps_encoded_path_and_query_order() {
+        let mut db = test_db();
+        let session = db
+            .start_session(TRUSTED_URL_ORIGIN_PLATFORM, "test")
+            .unwrap();
+        db.insert_focus(
+            session,
+            &FocusEvent {
+                ts: 1_100,
+                kind: FocusKind::UrlChange,
+                snapshot: FocusSnapshot {
+                    app_id: Some("chrome.exe".into()),
+                    url: Some("example.com/a%2Fb?next=trusted&next=evil".into()),
+                    ..FocusSnapshot::default()
+                },
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            db.site_in_her_record("https://example.com/a%2Fb?next=trusted&next=evil")
+                .unwrap(),
+            UrlOrigin::InHerRecord
+        );
+        assert_eq!(
+            db.site_in_her_record("https://example.com/a/b?next=trusted&next=evil")
+                .unwrap(),
+            UrlOrigin::SameSiteDifferentPath
+        );
+        assert_eq!(
+            db.site_in_her_record("https://example.com/a%2Fb?next=evil&next=trusted")
+                .unwrap(),
+            UrlOrigin::SamePathDifferentDestination
+        );
+    }
+
+    #[test]
+    fn empty_url_delimiters_cannot_borrow_recorded_or_source_frame_authorization() {
+        use sister_hands::url_policy::TargetAddressOrigin as FrameOrigin;
+
+        let forms = [
+            "https://example.com/a",
+            "https://example.com/a?",
+            "https://example.com/a#",
+            "https://example.com/a?#",
+        ];
+        for (recorded_index, recorded) in forms.into_iter().enumerate() {
+            let mut db = test_db();
+            let session = db
+                .start_session(TRUSTED_URL_ORIGIN_PLATFORM, "test")
+                .unwrap();
+            db.insert_focus(
+                session,
+                &FocusEvent {
+                    ts: 1_100,
+                    kind: FocusKind::UrlChange,
+                    snapshot: FocusSnapshot {
+                        app_id: Some("chrome.exe".into()),
+                        url: Some(recorded.into()),
+                        ..FocusSnapshot::default()
+                    },
+                },
+            )
+            .unwrap();
+            db.conn
+                .execute(
+                    "INSERT INTO frames(ts, session_id, monitor, width, height, dhash, url)
+                     VALUES(1, ?1, 0, 1, 1, 0, ?2)",
+                    params![session, recorded],
+                )
+                .unwrap();
+            let frame_id = db.conn.last_insert_rowid();
+
+            for (target_index, target) in forms.into_iter().enumerate() {
+                db.conn
+                    .execute(
+                        "INSERT INTO facts(ts, kind, raw, normalized, source_kind, frame_id)
+                         VALUES(1, 'url', ?1, ?1, 'url', ?2)",
+                        params![target, frame_id],
+                    )
+                    .unwrap();
+                let fact_id = db.conn.last_insert_rowid();
+                let matching = recorded_index == target_index;
+                assert_eq!(
+                    db.site_in_her_record(target).unwrap(),
+                    if matching {
+                        UrlOrigin::InHerRecord
+                    } else {
+                        UrlOrigin::SamePathDifferentDestination
+                    },
+                    "recorded={recorded:?}, target={target:?}"
+                );
+                assert_eq!(
+                    db.target_address_on_source_frame(fact_id, target).unwrap(),
+                    if matching {
+                        FrameOrigin::SameFrameAddress
+                    } else {
+                        FrameOrigin::OtherScreenText
+                    },
+                    "frame={recorded:?}, target={target:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn userinfo_cannot_seed_or_use_a_standing_url_grant() {
+        use sister_hands::url_policy::TargetAddressOrigin as FrameOrigin;
+
+        for recorded in [
+            "https://user:password@example.com/a",
+            "https://@example.com/a",
+        ] {
+            let mut db = test_db();
+            let session = db
+                .start_session(TRUSTED_URL_ORIGIN_PLATFORM, "test")
+                .unwrap();
+            db.insert_focus(
+                session,
+                &FocusEvent {
+                    ts: 1_100,
+                    kind: FocusKind::UrlChange,
+                    snapshot: FocusSnapshot {
+                        app_id: Some("chrome.exe".into()),
+                        url: Some(recorded.into()),
+                        ..FocusSnapshot::default()
+                    },
+                },
+            )
+            .unwrap();
+            db.conn
+                .execute(
+                    "INSERT INTO frames(ts, session_id, monitor, width, height, dhash, url)
+                     VALUES(1, ?1, 0, 1, 1, 0, ?2)",
+                    params![session, recorded],
+                )
+                .unwrap();
+            let frame_id = db.conn.last_insert_rowid();
+            db.conn
+                .execute(
+                    "INSERT INTO facts(ts, kind, raw, normalized, source_kind, frame_id)
+                     VALUES(1, 'url', ?1, ?1, 'url', ?2)",
+                    params![recorded, frame_id],
+                )
+                .unwrap();
+            let fact_id = db.conn.last_insert_rowid();
+            assert_ne!(
+                db.site_in_her_record(recorded).unwrap(),
+                UrlOrigin::InHerRecord
+            );
+            assert_eq!(
+                db.target_address_on_source_frame(fact_id, recorded)
+                    .unwrap(),
+                FrameOrigin::OtherScreenText
+            );
+        }
     }
 
     /// Replay 是測搜尋／抽取的輸入，不是「這台機器上被她看見過」的憑據。
@@ -9899,6 +10175,201 @@ mod tests {
                 app: "chrome.exe".into(),
                 origin: FactOrigin::ScreenTextWithoutFrame,
             }
+        );
+    }
+
+    #[test]
+    fn unattended_url_target_must_be_the_address_on_its_own_frame() {
+        use sister_hands::url_policy::TargetAddressOrigin as Origin;
+        let mut db = test_db();
+        let target = "https://www.example.com/collect?id=7#receipt";
+        let trusted = db
+            .start_session(TRUSTED_URL_ORIGIN_PLATFORM, "test")
+            .unwrap();
+        let replay = db
+            .start_session("untrusted/windows/replay", "test")
+            .unwrap();
+        assert_eq!(
+            db.target_address_on_source_frame(999, target).unwrap(),
+            Origin::AddressUnmeasured
+        );
+        for (session_id, frame_url, expected) in [
+            (Some(trusted), Some(target), Origin::SameFrameAddress),
+            (
+                Some(trusted),
+                Some("example.com/collect?id=7#receipt"),
+                Origin::SameFrameAddress,
+            ),
+            (
+                Some(trusted),
+                Some("https://www.example.com:443/collect?id=7#receipt"),
+                Origin::SameFrameAddress,
+            ),
+            (
+                Some(trusted),
+                // 明寫 scheme 的位址列保留完整 host；不能把 www. 當作省略。
+                Some("https://example.com:443/collect?id=7#receipt"),
+                Origin::OtherScreenText,
+            ),
+            (
+                Some(trusted),
+                Some("http://example.com/collect?id=7#receipt"),
+                Origin::OtherScreenText,
+            ),
+            (
+                Some(trusted),
+                Some("https://example.com:8443/collect?id=7#receipt"),
+                Origin::OtherScreenText,
+            ),
+            (
+                Some(trusted),
+                Some("example.com/collect?id=8#receipt"),
+                Origin::OtherScreenText,
+            ),
+            (
+                Some(trusted),
+                Some("example.com/%63ollect?id=7#receipt"),
+                Origin::OtherScreenText,
+            ),
+            (
+                Some(trusted),
+                Some("example.com/help?id=7#receipt"),
+                Origin::OtherScreenText,
+            ),
+            (Some(trusted), None, Origin::AddressUnmeasured),
+            (Some(replay), Some(target), Origin::UntrustedSourceFrame),
+            (None, Some(target), Origin::UntrustedSourceFrame),
+        ] {
+            db.conn
+                .execute(
+                    "INSERT INTO frames(ts, session_id, monitor, width, height, dhash, url)
+                     VALUES(1, ?1, 0, 1, 1, 0, ?2)",
+                    params![session_id, frame_url],
+                )
+                .unwrap();
+            let frame_id = db.conn.last_insert_rowid();
+            db.conn
+                .execute(
+                    "INSERT INTO facts(ts, kind, raw, normalized, source_kind, frame_id)
+                     VALUES(1, 'url', ?1, ?1, 'url', ?2)",
+                    params![target, frame_id],
+                )
+                .unwrap();
+            let fact_id = db.conn.last_insert_rowid();
+            assert_eq!(
+                db.target_address_on_source_frame(fact_id, target).unwrap(),
+                expected
+            );
+            assert_eq!(
+                db.target_address_on_source_frame(fact_id, "https://changed.example")
+                    .unwrap(),
+                Origin::AddressUnmeasured,
+                "an old fact id cannot authorize a different target"
+            );
+        }
+    }
+
+    #[test]
+    fn same_address_ocr_fact_cannot_borrow_the_address_fact_authority() {
+        use sister_hands::url_policy::TargetAddressOrigin as Origin;
+        let mut db = test_db();
+        let target = "https://example.com/collect";
+        let trusted = db
+            .start_session(TRUSTED_URL_ORIGIN_PLATFORM, "test")
+            .unwrap();
+        let mut frame = frame_with_text(1, "chrome.exe", "test", &[target]);
+        frame.focus.url = Some("example.com/collect".into());
+        let (frame_id, _, count) = db.insert_frame(trusted, &frame, None, 0).unwrap();
+        assert_eq!(count, 2, "address and OCR must be distinct URL facts");
+        let facts = db.facts_by_kind("url", 10).unwrap();
+        let address = facts
+            .iter()
+            .find(|fact| fact.frame_id == Some(frame_id) && fact.source_kind == "url")
+            .expect("writer must produce an address fact");
+        let screen = facts
+            .iter()
+            .find(|fact| fact.frame_id == Some(frame_id) && fact.source_kind == "ocr")
+            .expect("writer must retain screen text for retrieval");
+        assert_eq!(address.raw, target);
+        assert_eq!(screen.raw, target);
+        assert_eq!(
+            db.target_address_on_source_frame(address.id, target)
+                .unwrap(),
+            Origin::OtherScreenText,
+            "the address fact cannot borrow a grant while the page repeats it"
+        );
+        assert_eq!(
+            db.target_address_on_source_frame(screen.id, target)
+                .unwrap(),
+            Origin::OtherScreenText
+        );
+    }
+
+    #[test]
+    fn unattended_url_accepts_chromium_address_with_nested_query_url() {
+        use sister_hands::url_policy::TargetAddressOrigin as Origin;
+        let mut db = test_db();
+        let target = "https://www.example.com/help?next=https://dest.example/x";
+        let trusted = db
+            .start_session(TRUSTED_URL_ORIGIN_PLATFORM, "test")
+            .unwrap();
+        db.conn
+            .execute(
+                "INSERT INTO frames(ts, session_id, monitor, width, height, dhash, url)
+                 VALUES(1, ?1, 0, 1, 1, 0, ?2)",
+                params![trusted, "example.com/help?next=https://dest.example/x"],
+            )
+            .unwrap();
+        let frame_id = db.conn.last_insert_rowid();
+        db.conn
+            .execute(
+                "INSERT INTO facts(ts, kind, raw, normalized, source_kind, frame_id)
+                 VALUES(1, 'url', ?1, ?1, 'url', ?2)",
+                params![target, frame_id],
+            )
+            .unwrap();
+        let fact_id = db.conn.last_insert_rowid();
+        assert_eq!(
+            db.target_address_on_source_frame(fact_id, target).unwrap(),
+            Origin::SameFrameAddress
+        );
+        assert_eq!(
+            db.target_address_on_source_frame(
+                fact_id,
+                "https://www.example.com/help?next=https://other.example/x"
+            )
+            .unwrap(),
+            Origin::AddressUnmeasured
+        );
+    }
+
+    #[test]
+    fn unattended_url_compares_unicode_http_host_as_http_origin() {
+        use sister_hands::url_policy::TargetAddressOrigin as Origin;
+        let mut db = test_db();
+        let target = "http://xn--9ca.example/a";
+        let trusted = db
+            .start_session(TRUSTED_URL_ORIGIN_PLATFORM, "test")
+            .unwrap();
+        db.conn
+            .execute(
+                "INSERT INTO frames(ts, session_id, monitor, width, height, dhash, url)
+                 VALUES(1, ?1, 0, 1, 1, 0, ?2)",
+                params![trusted, "http://é.example/a"],
+            )
+            .unwrap();
+        let frame_id = db.conn.last_insert_rowid();
+        db.conn
+            .execute(
+                "INSERT INTO facts(ts, kind, raw, normalized, source_kind, frame_id)
+                 VALUES(1, 'url', ?1, ?1, 'url', ?2)",
+                params![target, frame_id],
+            )
+            .unwrap();
+        let fact_id = db.conn.last_insert_rowid();
+        assert_eq!(
+            db.target_address_on_source_frame(fact_id, target).unwrap(),
+            Origin::SameFrameAddress
         );
     }
 
@@ -10622,7 +11093,7 @@ mod tests {
         assert_eq!(report.events, 5);
         assert_eq!(report.frames, 1);
         assert_eq!(
-            report.facts, 6,
+            report.facts, 7,
             "frame、focus title、clipboard、位址列網址的 L1 都要算進回報：{report:?}"
         );
         assert_eq!(

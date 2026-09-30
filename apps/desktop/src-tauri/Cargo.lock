@@ -3565,10 +3565,12 @@ dependencies = [
  "chrono",
  "fs4",
  "global-hotkey",
+ "idna",
  "libc",
  "serde",
  "serde_json",
  "sha2 0.11.0",
+ "url",
  "windows 0.62.2",
 ]
 

@@ -17,11 +17,14 @@ use std::{
 };
 
 pub mod commitment_action;
+pub mod irreversible;
 pub mod kill_switch;
 pub mod master_stop;
 pub mod platform;
 pub mod replay_copy;
 pub mod semi_action;
+#[cfg(feature = "staging-approval")]
+pub mod staging_approval;
 pub mod target_policy;
 pub mod url_policy;
 
@@ -463,8 +466,14 @@ define_gaps! { UrlOriginGap {
     NotAReadableSite,
     /// 這個站去過，但紀錄裡沒有這一條路徑。同站不同頁不能借 host 當授權。
     PathNotInHerRecord,
-    /// 路徑對得上，但 query／fragment 不是紀錄裡那一條去處。
+    /// 路徑對得上，但 scheme、有效 port 或 query／fragment 不是紀錄裡那一條去處。
     DestinationNotTheRecordedOne,
+    /// 目標來自／重複出現在畫面文字，或位址列是另一網址。
+    TargetOnlyInScreenText,
+    /// 目標那張畫面的位址列沒量到，不能拿空值冒充相同。
+    TargetAddressUnmeasured,
+    /// 來源畫面不屬於可採信的 Windows 錄製，不能借另一場的紀錄授權。
+    TargetSourceUntrusted,
 }}
 
 impl UrlOriginGap {
@@ -523,7 +532,22 @@ impl UrlOriginGap {
             },
             Self::DestinationNotTheRecordedOne => {
                 "你說過我可以自己按網址，條件是我要說得出它從哪來。這一頁的路徑我記過，\
-                 但 query 或 fragment 不是紀錄裡那一條去處，所以票跑不動它。要開請你當場看過再按。"
+                 但協定、連接埠或網址後面的查詢／錨點不是紀錄裡同一條去處，所以票跑不動它。要開請你當場看過再按。"
+                    .to_string()
+            }
+            Self::TargetOnlyInScreenText => {
+                "來源畫面的文字也提供了這個網址，或位址列與目標不同。這一步可能是照畫面文字提出的，\
+                 無人值守先不開；要開請你當場看過再按。"
+                    .to_string()
+            }
+            Self::TargetAddressUnmeasured => {
+                "這一步的來源畫面沒有可確認的位址列網址，無法證明要開的正是當時瀏覽的頁面。\
+                 無人值守先不開；要開請你當場看過再按。"
+                    .to_string()
+            }
+            Self::TargetSourceUntrusted => {
+                "這一步的來源畫面不是可採信的 Windows 錄製，不能用另一場的網址紀錄替它授權。\
+                 無人值守先不開；要開請你當場看過再按。"
                     .to_string()
             }
         }
@@ -691,7 +715,10 @@ impl RefusalReason {
                 | UrlOriginGap::NoTrustedRecordedUrls
                 | UrlOriginGap::NotAReadableSite
                 | UrlOriginGap::PathNotInHerRecord
-                | UrlOriginGap::DestinationNotTheRecordedOne => RefusalBucket::UrlOriginUnknown,
+                | UrlOriginGap::DestinationNotTheRecordedOne
+                | UrlOriginGap::TargetOnlyInScreenText
+                | UrlOriginGap::TargetAddressUnmeasured
+                | UrlOriginGap::TargetSourceUntrusted => RefusalBucket::UrlOriginUnknown,
             },
             Self::NeverInherited { .. } => RefusalBucket::NeverInheritsTaskGrant,
             Self::NeedsLivePress { .. } => RefusalBucket::NeedsALivePressThisRun,
@@ -1359,7 +1386,10 @@ mod tests {
                     | UrlOriginGap::NoTrustedRecordedUrls
                     | UrlOriginGap::NotAReadableSite
                     | UrlOriginGap::PathNotInHerRecord
-                    | UrlOriginGap::DestinationNotTheRecordedOne => RefusalBucket::UrlOriginUnknown,
+                    | UrlOriginGap::DestinationNotTheRecordedOne
+                    | UrlOriginGap::TargetOnlyInScreenText
+                    | UrlOriginGap::TargetAddressUnmeasured
+                    | UrlOriginGap::TargetSourceUntrusted => RefusalBucket::UrlOriginUnknown,
                 },
             }
         }
@@ -1475,8 +1505,10 @@ mod tests {
         );
         let redirect = &msgs[UrlOriginGap::DestinationNotTheRecordedOne.index()];
         assert!(
-            redirect.contains("query") && redirect.contains("當場"),
-            "參數不是紀錄裡那一條去處時，要說得出票跑不動、當場按可以：{redirect}"
+            ["協定", "連接埠", "查詢", "錨點", "當場"]
+                .iter()
+                .all(|word| redirect.contains(word)),
+            "同路徑但去處不同時，要說得出可能差在哪、當場按可以：{redirect}"
         );
     }
 

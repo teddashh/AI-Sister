@@ -17,7 +17,9 @@
 
 use sister_core::db::Db;
 use sister_core::model::{FocusSnapshot, FrameCapture, OcrBlock};
-use sister_core::retrieval::{RetrievalProfile, SearchAdjustment};
+use sister_core::retrieval::{
+    RetrievalLimits, RetrievalProfile, SearchAdjustment, help_request_without_subject,
+};
 
 /// 用過一陣子的畫面上多半看過的句子。
 const BACKGROUND: &[&str] = &[
@@ -193,6 +195,75 @@ fn ask(db: &mut Db, q: &str) -> Seen {
 
 fn relaxed(x: &str) -> Option<SearchAdjustment> {
     Some(SearchAdjustment::Relaxed(x.into()))
+}
+
+/// 沒說要找什麼時，客氣話不能成為第二次查詢的主題。先確認背景確實看過「可以」；
+/// 否則這條測試即使沒有防線，也可能因索引空白而綠。
+#[test]
+fn a_request_for_help_without_a_subject_does_not_borrow_politeness_as_the_subject() {
+    let mut db = Db::open_in_memory().unwrap();
+    let session = db.start_session("test", "test").unwrap();
+    add(&mut db, session, 1_000, 1, "可以明天寄出");
+    add(&mut db, session, 2_000, 2, "麻煩你改地點");
+    assert!(!db.search("可以", 1).unwrap().is_empty());
+    assert!(!db.search("麻煩你", 1).unwrap().is_empty());
+    assert!(db.search("幫我", 1).unwrap().is_empty());
+
+    for q in [
+        "可以幫我嗎",
+        "可不可以幫我嗎",
+        "麻煩你幫我嗎",
+        "請你幫我嗎",
+        "可以幫我找一下嗎",
+        "麻煩你幫我查一下嗎",
+        "請你幫我看一下嗎",
+        "幫我翻一下嗎",
+    ] {
+        let got = ask(&mut db, q);
+        assert!(got.empty, "「{q}」不該拿客氣話找到畫面：{}", got.hits);
+        assert_eq!(got.searched, None, "「{q}」沒有主題，不應宣稱改用別的字");
+        assert!(help_request_without_subject(q), "「{q}」應要求補上主題");
+    }
+    assert!(!help_request_without_subject("可以幫我找月報連結嗎"));
+    assert!(!help_request_without_subject("可以幫我找一下月報連結嗎"));
+    assert!(!help_request_without_subject("幫我買咖啡嗎"));
+    let rewritten = RetrievalProfile::TextAndFacts
+        .retrieve_for_question_at(
+            &mut db,
+            "可以",
+            "可以幫我嗎",
+            RetrievalLimits::same(5),
+            4_000,
+        )
+        .unwrap();
+    assert!(
+        rewritten.hits.is_empty(),
+        "CLI 改寫不能把沒主題的原句變成『可以』"
+    );
+    assert!(rewritten.answers.is_empty());
+    assert_eq!(rewritten.searched, None);
+    assert!(rewritten.needs_subject);
+
+    // 真的看過原句，第一次的完整比對仍要回那張畫面。
+    add(&mut db, session, 3_000, 3, "可以幫我嗎");
+    let exact = ask(&mut db, "可以幫我嗎");
+    assert!(exact.hits.contains("可以幫我嗎"));
+    assert_eq!(exact.searched, None);
+    let exact_retrieval = RetrievalProfile::TextAndFacts
+        .retrieve(&mut db, "可以幫我嗎", 5)
+        .unwrap();
+    assert!(!exact_retrieval.needs_subject);
+    add(&mut db, session, 3_100, 4, "可以幫我找一下嗎");
+    let exact_look = RetrievalProfile::TextAndFacts
+        .retrieve(&mut db, "可以幫我找一下嗎", 5)
+        .unwrap();
+    assert!(
+        exact_look
+            .hits
+            .iter()
+            .any(|hit| hit.text == "可以幫我找一下嗎")
+    );
+    assert!(!exact_look.needs_subject);
 }
 
 fn both() -> [(&'static str, Db); 2] {

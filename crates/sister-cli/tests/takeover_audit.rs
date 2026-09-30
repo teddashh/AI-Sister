@@ -1,7 +1,7 @@
 use sister_hands::semi_action::{
-    ActionKind, AllowedActions, AllowedApps, App, Expiry, Grant, RunConclusionRecord, ScreenField,
-    SemiActionRun, StepEvidence, StepLimit, StepRequest, TargetOnScreen, Task,
-    execute_approved_step,
+    ActionKind, AllowedActions, AllowedApps, App, ApprovedCommitment, Expiry, Grant,
+    RunConclusionRecord, ScreenField, SemiActionRun, StepEvidence, StepLimit, StepRequest,
+    TargetOnScreen, Task, execute_approved_step,
 };
 use sister_hands::{
     ActionEvent, ActionLog, ActionSnapshot, ApprovedBy, Attached, ExecutionResult, Executor,
@@ -169,15 +169,33 @@ fn ten_scoped_tasks_are_executed_and_replayed_as_ten_distinct_runs() {
         let started = 10_000 + index as i64 * 1_000;
         let task = Task::new(format!("task-{index}"));
         let app = App::new("terminal.exe");
+        // 每一輪各綁一張人選定的承諾；網址另列 exact 目標。沒有這兩樣，
+        // 無人值守一律拒絕，這裡不繞過那道規則。
+        let commitment_id = 100 + index as i64;
+        let commitment_text = format!("完成第 {index} 件受控工作");
+        let url_targets = match action {
+            ActionSnapshot::OpenUrl { url } => vec![url.clone()],
+            _ => Vec::new(),
+        };
         let grant = Grant::new(
             task.clone(),
             AllowedApps::new([app.clone()]),
             AllowedActions::new([ActionKind::of(action)]),
             Expiry::after_issued(started, 500),
             StepLimit::new(1).unwrap(),
-        );
+        )
+        .with_url_targets(url_targets)
+        .unwrap()
+        .with_approved_commitment(ApprovedCommitment {
+            id: commitment_id,
+            text: commitment_text.clone(),
+            action: action.clone(),
+            target_fact_id: None,
+            agreed_evidence_json: None,
+        });
         let grant_id = grant.audit_id();
-        let step = StepRequest::new(task, app, action.clone());
+        let step = StepRequest::new(task, app, action.clone())
+            .from_commitment(commitment_id, &commitment_text);
         let url_policy = if matches!(action, ActionSnapshot::OpenUrl { .. }) {
             UrlOpenPolicy::Answered(UrlOpenAnswer::WhenYouCanNameTheOrigin)
         } else {

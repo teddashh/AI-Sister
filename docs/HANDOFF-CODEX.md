@@ -31,6 +31,103 @@ SHA-256 ID；`sister hands runs --json` 從既有 `action-log.jsonl` 算出開�
 四張同意書、no-keylogging 與 no-network 全綠。CI 不打真 Discord；正式 webhook 的 provider
 收件仍應在 Windows artifact 上做一次人工 smoke，但這不影響本機 JSON 與 transport 邊界測試。
 
+**2026-09-29 `cc0a889` 獨立審查後續修正：**該提交的重型 repo 收據 53/53，
+但審查發現 staging CLI 沒計入提示期間真實時間、腳本核准未標來源、同資料夾第二輪
+覆蓋第一輪收據；URL grant 的儲存清單也曾列出缺目標 fact／雙 pass 畫面的卡。
+修正後 staging CLI 以單調時間計期，真等 31 秒的程序測試證明過期；腳本輸入必須
+明示測試旗標，收據記 `scripted_fixture`／`human_terminal`，多輪以鎖定附加方式
+留下完整回放。保存 URL grant 前先檢查政策、grant 範圍、fact、雙 pass 畫面、
+可信位址列與完整網址紀錄，缺任一項就不說已保存。`0fd196f6` 對固定樹
+`e932d92695602111` 的重型 gate 53/53 通過；staging feature hands 171+31、
+CLI 程序 5 與 feature Clippy 全綠；新獨立審查對本段程式變更 PASS。
+Ted 的 10 項真任務日誌
+仍未提供；第三方不可逆動作沒有執行。
+
+**同輪擴及全部無人值守動作：**`open-url`、`open-file`、`focus-window` 都在共同
+`authorize_unattended` 入口核對當場選定的承諾與具體動作。`--save-grant` 對三種
+動作都列出符合授權範圍的承諾，須選編號並答「好」才存；沒有候選不存。
+定點測試驗無綁定的檔案／視窗 grant 拒絕、有綁定的放行，並驗 CLI 的檔案 grant
+拒絕保存／選定保存與讀回核對。正式 Phase 6 三條退場條件仍為 0/3：
+20×9 只證明這條 URL 授權路徑的 containment；產品沒有第三方不可逆 executor；
+Ted 的 10 筆真任務收據及 service verification 尚缺，不可提前打勾。
+
+**2026-09-29 Phase 6 審查退件後修正候選：**獨立審查指出上輪 20×9 夾具替 19 條
+注入文字附加網址，測到的是同張 OCR 重複網址拒絕；純指令仍能選可信位址列並借同址
+grant。現在無人值守 URL grant 必須另綁人當場選定的承諾 ID、原文、具體動作、
+目標 fact ID 與兩個 pass 同意的畫面清單；
+`--save-grant` 有 URL 目標時會列出候選、讀編號及當場「好」，舊的無綁定 grant
+不能開 URL。20×9 端到端後三種保留原注入文字、可信同址來源與涵蓋網址的 grant，
+但 grant 綁夾具建立的另一張已歸檔承諾；真正 `sister do --unattended` 因承諾不符拒絕。
+乾淨且綁定的控制組仍執行一次。staging-only `sister` 入口現在呼叫共用不可逆
+dispatch，五類權限從程序層測 approve／decline／expiry／replay，僅記本機 fixture。
+本輪 `cargo test --workspace`、workspace Clippy、staging feature 的 CLI 與 hands
+測試／Clippy、Windows 交叉編譯／Clippy、no-network 與 fmt 均通過。該候選後續
+取得重型 CI 腳本 53/53，獨立審查另指出上段三項缺口；service verification 仍待完成。
+正式產品沒有第三方不可逆 executor，Ted 的 10 項真 Windows／staging 任務日誌仍
+須由 Ted 提供。Phase 6 三格暫不勾。
+
+**2026-09-29 已被獨立審查退件的前一候選：**`insert_frame` 現在另存同張位址列衍生的 URL
+fact；無人值守不再接受 OCR 網址 fact 借同址票，位址列 fact 若被同張畫面的
+OCR／輔助文字重複提供同 URL 也拒絕。20 條 injection 語料 × 九種來源／授權
+組合（180 例）走 `sister do --unattended` 與 action log；其中三種同址、可信
+來源、grant 涵蓋的案例選位址列 fact，仍以 `target_only_in_screen_text` 拒絕，
+乾淨位址列控制組執行一次。共用不可逆 dispatch 新增逐次即時核准、30 秒期限、
+時鐘倒退、停止、具體步驟綁定與不可重播票；唯一 executor 是 feature-gated
+本機 staging fixture，五類權限均測 approve／decline／expiry／JSONL replay。
+正式產品仍沒有第三方不可逆 executor。workspace fmt／Clippy／test、staging feature
+test／Clippy、Windows 交叉編譯／Clippy、no-network gate 均通過；仍待 service
+verification 與獨立審查；後續審查指出純指令變體會繞過重複網址條件，見上段修正。
+Ted 的 10 項真實 Windows／staging 任務日誌仍未提供，
+絕不可用 fake executor 演練冒充。Phase 6 checkbox 目前保持未勾。
+
+**2026-09-28 Phase 6 擴大工作候選（Ted 已核准完整範圍）：**URL 授權改用 `url`
+parser 正規化 scheme／host／有效 port；userinfo 一律拒絕，path、query、fragment
+保留原始位元組與空分隔符。保存的 grant 新增 exact `url_targets[]`，舊票預設空集合。
+獨立審查找到 Chromium 縮寫位址列的 query 內含 `https://` 會被誤判成 scheme；已修
+並加上 `target_address_on_source_frame` 真路徑回歸測試。審查續查發現 `http://` 後
+緊接多位元組 Unicode host 時，八位元組探測會提前返回；現已改成獨立判斷並以
+Unicode／punycode 同址的比較與 DB 來源路徑測試鎖定。20 條注入語料目前走 6 種
+來源／授權組合，不能充作 100% injection 退場；staging 即時核准仍只在隔離的記憶體
+fixture，10 個 CLI 演練仍用 fake executor，兩者均未達正式驗收。最新 workspace
+fmt／Clippy／test、Windows 交叉編譯／Clippy、no-network 與 staging feature 測試通過。
+正式 Phase 6 仍是 0/3；下一步要把即時核准接到可執行路徑、補足 injection 在可執行
+可信來源的證據，並由 Ted 在 Windows 完成 10 個真實可逆任務及保留可回放日誌。不得
+以測試夾具執行第三方帳號、金流或公開發文的不可逆動作。新一輪獨立審查已給 URL
+授權程式 PASS、整體 Phase 6 REJECT／0/3；service verification 仍待完成。
+
+**2026-09-28 Phase 6 來源票空分隔符修復：**`same_destination` 現在保留空 `?`／`#`
+分隔符的有無；四種組合不能互借 standing grant。比較器及真實授權查詢
+`site_in_her_record`／`target_address_on_source_frame` 均有 4×4 回歸測試，Chromium
+省略 scheme／www. 的正例保留；既有 scheme／有效 port、path percent escape、尾端
+`/`、重複 query 順序測試仍通過。20 條 injection 語料 × 3 種來源的 CLI 端到端測試、
+workspace Cargo fmt／Clippy／test、no-network gate 通過。Phase 6 三項正式退場條件
+仍未勾：60 個來源案例只證明本段 URL 閘門；不可逆動作全路徑核准與 10 個真實任務
+不屬這輪 URL 修復。下一步須 Ted 決定是否擴大至完整 Phase 6 範圍並提供真實任務
+紀錄；候選仍待 service verification 與新一輪獨立審查。
+
+**2026-09-28 Phase 6 來源票第二輪修復：**`same_destination` 不再把 path 的每個
+percent escape 解成等價文字，也不再排序 query；`%2F`／`/`、重複參數反序與結尾
+`/` 都分開授權。20 條 injection 語料各走三種本段、已被 reviewer 接受的 URL fact
+來源，共 60 個來源案例；逐次核對拒絕原因，保留一條窗外 fact 測試及良性執行控制。
+scheme／有效 port 的前輪修復保留。格式、workspace Clippy／Cargo 測試與 no-network
+gate 通過。這仍是候選，需 service verification 與新的獨立審查；
+Phase 6 三項退場條件仍未完成。
+
+**2026-09-28 Phase 6 來源票再修：**`same_destination` 現在把 scheme 與有效 port
+列入去處身分；省略 scheme 的 Chromium 位址列只推定為 HTTPS，預設 port 與明寫
+`:443`／`:80` 各依協定等價。HTTP 和不同 port 不能借 HTTPS standing grant；
+`site_in_her_record` 與同張來源 frame 都有反向測試。workspace Cargo 測試、Clippy、
+格式與 no-network gate 通過。這是候選修復，尚待 service
+verification 與新一輪獨立審查；Phase 6 退場條件仍未打勾。
+
+**2026-09-28 Phase 6 候選修復：**無人值守開 URL 的來源畫面現在必須屬於
+`TRUSTED_URL_ORIGIN_PLATFORM` session；replay／無 session 的同網址畫面會以
+`target_source_untrusted` 拒絕。位址列改用既有 `same_destination` 比較，接受 Chromium
+省略 scheme／www. 的形式，仍拒絕不同 path、query、fragment。反向端到端測試涵蓋
+replay 畫面位址列恰好等於注入 URL、另有可信瀏覽紀錄的情境；良性控制仍執行一次。
+`cargo fmt --all -- --check`、workspace Clippy／測試、`check-no-network.sh` 通過。
+這只修候選的兩個退件點；Phase 6 三項退場條件仍未完成，下一步照 `PHASES.md` 收驗。
+
 **2026-09-21 交回 Claude 的紀錄在 [`HANDOFF-CLAUDE-2026-09-21.md`](HANDOFF-CLAUDE-2026-09-21.md)。**
 那份寫的是當天 Codex session `01a0c443` 與後續 Grok session 做到哪、main 在 `5cfd22c`、語音／用量已在 main、PDF UIA 與 diagnose 堆疊怎麼修、macOS probe 為何還沒上。下面這份仍是到 alpha.145 為止的長交接。
 

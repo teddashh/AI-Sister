@@ -3707,6 +3707,7 @@ fn answer_from_memory(
             let mut hit_batches = Vec::new();
             let mut facts_truncated = false;
             let mut truncated = false;
+            let mut needs_subject = true;
             for (index, retrieval_question) in retrieval_questions.iter().enumerate() {
                 let retrieval = sister_core::retrieval::RetrievalProfile::TextAndFacts
                     .retrieve_for_question_at(
@@ -3725,6 +3726,7 @@ fn answer_from_memory(
                 if let Some(terms) = retrieval.searched {
                     searched_terms.push(terms);
                 }
+                needs_subject &= retrieval.needs_subject;
                 facts_truncated |= retrieval.answers_truncated;
                 truncated |= retrieval.hits_truncated;
                 fact_batches.push(retrieval.answers);
@@ -3740,6 +3742,7 @@ fn answer_from_memory(
             truncated |= hits.len() > HITS;
             facts.truncate(FACTS);
             hits.truncate(HITS);
+            needs_subject &= facts.is_empty() && hits.is_empty();
             // 章節問的是**使用者原本那句話**有沒有時間範圍，不是 planner 最後回了
             // 幾條查詢。舊版只要 CLI 加一條同義詞，`昨天下午` 的整段章節就消失。
             let asked_chapters = if stage.is_brain() {
@@ -3748,6 +3751,7 @@ fn answer_from_memory(
                 db.chapters_for_question_read_only(question, now)
             }
             .map_err(|e| format!("{e:#}"))?;
+            needs_subject &= asked_chapters.is_none();
             // **她已經想過的那幾段，排在證據最前面。**
             //
             // 解釋層平常沒事就會自己醒過來，看著剛過去那一段寫一張卡。以前答題
@@ -3756,78 +3760,86 @@ fn answer_from_memory(
             //
             // 撈不到判讀不是失敗：那只是這一段她還沒想過（或者她根本沒被開起
             // 來）。空的照樣往下走，答案就是舊的那個形狀。
-            let (reading_rows, readings_truncated) = match asked_chapters.as_ref() {
-                // 時間問題要橫跨原問句的整個範圍，不能只從當天最後幾張、或第一批
-                // OCR 命中旁邊取樣。
-                Some((range, _)) => db
-                    .readings_spanning(
-                        range.from,
-                        range.to,
-                        sister_core::grounded_answer::MAX_READINGS,
-                    )
-                    .map_err(|e| format!("{e:#}"))?,
-                None => {
-                    // 關鍵字可能同時命中上週和今天。各自在最相關的幾筆原文附近找
-                    // 判讀，避免用最早到最晚的一個巨大窗口，把中間幾天無關的卡片
-                    // 誤塞進答案。
-                    const READING_ANCHORS: usize = 4;
-                    const READINGS_PER_ANCHOR: usize = 2;
-                    let mut anchors = Vec::with_capacity(READING_ANCHORS);
-                    let mut stamps = HashSet::new();
-                    let mut hit_stamps = hits.iter().map(|hit| hit.ts);
-                    let mut fact_stamps = facts.iter().map(|answer| answer.latest.ts);
-                    while anchors.len() < READING_ANCHORS {
-                        let mut advanced = false;
-                        if let Some(ts) = hit_stamps.next() {
-                            advanced = true;
-                            if stamps.insert(ts) {
-                                anchors.push(ts);
+            let (reading_rows, readings_truncated) = if needs_subject {
+                (Vec::new(), false)
+            } else {
+                match asked_chapters.as_ref() {
+                    // 時間問題要橫跨原問句的整個範圍，不能只從當天最後幾張、或第一批
+                    // OCR 命中旁邊取樣。
+                    Some((range, _)) => db
+                        .readings_spanning(
+                            range.from,
+                            range.to,
+                            sister_core::grounded_answer::MAX_READINGS,
+                        )
+                        .map_err(|e| format!("{e:#}"))?,
+                    None => {
+                        // 關鍵字可能同時命中上週和今天。各自在最相關的幾筆原文附近找
+                        // 判讀，避免用最早到最晚的一個巨大窗口，把中間幾天無關的卡片
+                        // 誤塞進答案。
+                        const READING_ANCHORS: usize = 4;
+                        const READINGS_PER_ANCHOR: usize = 2;
+                        let mut anchors = Vec::with_capacity(READING_ANCHORS);
+                        let mut stamps = HashSet::new();
+                        let mut hit_stamps = hits.iter().map(|hit| hit.ts);
+                        let mut fact_stamps = facts.iter().map(|answer| answer.latest.ts);
+                        while anchors.len() < READING_ANCHORS {
+                            let mut advanced = false;
+                            if let Some(ts) = hit_stamps.next() {
+                                advanced = true;
+                                if stamps.insert(ts) {
+                                    anchors.push(ts);
+                                }
+                            }
+                            if anchors.len() < READING_ANCHORS
+                                && let Some(ts) = fact_stamps.next()
+                            {
+                                advanced = true;
+                                if stamps.insert(ts) {
+                                    anchors.push(ts);
+                                }
+                            }
+                            if !advanced {
+                                break;
                             }
                         }
-                        if anchors.len() < READING_ANCHORS
-                            && let Some(ts) = fact_stamps.next()
-                        {
-                            advanced = true;
-                            if stamps.insert(ts) {
-                                anchors.push(ts);
+                        let mut rows = Vec::new();
+                        let mut card_ids = HashSet::new();
+                        let mut readings_truncated = false;
+                        for at in anchors {
+                            let (nearby, nearby_truncated) = db
+                                .readings_near(
+                                    at,
+                                    sister_core::grounded_answer::READING_SLACK_MS,
+                                    READINGS_PER_ANCHOR,
+                                )
+                                .map_err(|e| format!("{e:#}"))?;
+                            readings_truncated |= nearby_truncated;
+                            for row in nearby {
+                                if card_ids.insert(row.id) {
+                                    rows.push(row);
+                                }
                             }
                         }
-                        if !advanced {
-                            break;
-                        }
+                        rows.sort_by_key(|row| (row.segment_core_start, row.id));
+                        readings_truncated |=
+                            rows.len() > sister_core::grounded_answer::MAX_READINGS;
+                        rows.truncate(sister_core::grounded_answer::MAX_READINGS);
+                        (rows, readings_truncated)
                     }
-                    let mut rows = Vec::new();
-                    let mut card_ids = HashSet::new();
-                    let mut readings_truncated = false;
-                    for at in anchors {
-                        let (nearby, nearby_truncated) = db
-                            .readings_near(
-                                at,
-                                sister_core::grounded_answer::READING_SLACK_MS,
-                                READINGS_PER_ANCHOR,
-                            )
-                            .map_err(|e| format!("{e:#}"))?;
-                        readings_truncated |= nearby_truncated;
-                        for row in nearby {
-                            if card_ids.insert(row.id) {
-                                rows.push(row);
-                            }
-                        }
-                    }
-                    rows.sort_by_key(|row| (row.segment_core_start, row.id));
-                    readings_truncated |= rows.len() > sister_core::grounded_answer::MAX_READINGS;
-                    rows.truncate(sister_core::grounded_answer::MAX_READINGS);
-                    (rows, readings_truncated)
                 }
             };
-            let (mut readings, readings_truncated) =
+            let (mut readings, readings_truncated) = if needs_subject {
+                (Vec::new(), false)
+            } else {
                 sister_core::grounded_answer::match_answer_readings(
                     db,
                     &retrieval_questions,
                     reading_rows,
                     readings_truncated,
                 )
-                .map_err(|e| format!("{e:#}"))?;
+                .map_err(|e| format!("{e:#}"))?
+            };
             answer_readings::present_time_readings(
                 asked_chapters.as_ref(),
                 &facts,
@@ -3865,6 +3877,7 @@ fn answer_from_memory(
                 asked_chapters,
                 readings,
                 prepared,
+                needs_subject,
             ))
         };
         let retrieved = retrieve(db)?;
@@ -3880,6 +3893,7 @@ fn answer_from_memory(
             asked_chapters,
             readings,
             prepared,
+            needs_subject,
         ) = retrieved;
         let query_facts = QueryLogFacts {
             shape: shape.name(),
@@ -3888,7 +3902,8 @@ fn answer_from_memory(
         };
         // 有答案的話這幾個 COUNT 是白跑的——還有第二趟要來的時候也是。
         // thinking 空手時畫面不讀盲點，所以這裡也不算沒有人讀的值。
-        let blind = if needs_answer_blind_spots(&facts, &hits, &readings, &brain) {
+        let blind = if !needs_subject && needs_answer_blind_spots(&facts, &hits, &readings, &brain)
+        {
             // 比對用的是 `terms`，掃描界線也照 `terms` 判——理由和
             // `sister query` 那邊同一條。
             let asked = first_terms.as_deref().unwrap_or(&retrieval_questions[0]);
@@ -3922,7 +3937,11 @@ fn answer_from_memory(
         };
         let answer = Answer {
             presentation_id: None,
-            kind: shape.name(),
+            kind: if needs_subject {
+                "needs_subject"
+            } else {
+                shape.name()
+            },
             followup: None,
             closure_notice: None,
             searched,
@@ -3992,6 +4011,11 @@ fn ask_local(question: String, shell: tauri::State<'_, Shell>) -> Result<Answer,
         BrainPlan::Skip(b) => b,
         BrainPlan::Go { cli, .. } => BrainAnswer::new("thinking", Some(cli.label)),
     };
+    let brain = if sister_core::retrieval::help_request_without_subject(&question) {
+        BrainAnswer::new("needs_subject", None)
+    } else {
+        brain
+    };
     if sister_core::question::intent(&question) == sister_core::question::Intent::MemoryOverview {
         let mut answer = with_answer_db(&shell, &AskStage::Local, |db| {
             memory_overview_answer(db, std::time::Instant::now())
@@ -4043,7 +4067,11 @@ fn ask(question: String, shell: tauri::State<'_, Shell>) -> Result<Answer, Strin
     // 全停後來的新題連 retrieval 都不進。
     let master_stop_admission = admit_desktop_brain(shell.data_dir.as_deref(), "這一題")?;
     let (brain, planned_searches) =
-        plan_answer_searches(&shell, &question, answer_cli_claim.cancellation());
+        if sister_core::retrieval::help_request_without_subject(&question) {
+            (BrainAnswer::new("needs_subject", None), None)
+        } else {
+            plan_answer_searches(&shell, &question, answer_cli_claim.cancellation())
+        };
     // 題庫 latency 只量本機問答工作；CLI 查詢規劃已另記在
     // brain_outbound role=answer_search，不能把兩段時間混成一個數字。
     let started = std::time::Instant::now();
@@ -4059,41 +4087,48 @@ fn ask(question: String, shell: tauri::State<'_, Shell>) -> Result<Answer, Strin
         return Ok(answer);
     }
 
-    let (closure_notice, followup) = with_db_mut(&shell, |db| {
-        let now = sister_core::now_ms();
-        let close = sister_core::reviewer::close_from_message(db, &question, now)
-            .map_err(|e| format!("{e:#}"))?;
-        let closure_notice = match close {
-            sister_core::followup::CloseIntent::NotAClosure => None,
-            sister_core::followup::CloseIntent::Unrecognized => {
-                Some("我認不出你指哪一張記憶，所以沒有動任何一張。".to_string())
-            }
-            sister_core::followup::CloseIntent::Ambiguous { .. } => {
-                Some("這句話對得上不只一張記憶，所以沒有動任何一張。".to_string())
-            }
-            sister_core::followup::CloseIntent::Close { .. } => {
-                Some("這張記憶已結案，不會再提。".to_string())
-            }
-        };
-        let previous = sister_core::reviewer::followup_state(db).map_err(|e| format!("{e:#}"))?;
-        let followup = match sister_core::followup::decide(
-            &db.live_commitments().map_err(|e| format!("{e:#}"))?,
-            now,
-            previous.as_ref(),
-        ) {
-            sister_core::followup::FollowupDecision::Ask {
-                commitment_id,
-                text,
-            } => {
-                sister_core::reviewer::record_followup(db, commitment_id, now)
+    let (closure_notice, followup) =
+        if sister_core::retrieval::help_request_without_subject(&question) {
+            // 沒說主題的求助句不會結案，也不該在顯示追問時悄悄記下一次 follow-up。
+            (None, None)
+        } else {
+            with_db_mut(&shell, |db| {
+                let now = sister_core::now_ms();
+                let close = sister_core::reviewer::close_from_message(db, &question, now)
                     .map_err(|e| format!("{e:#}"))?;
-                Some(text)
-            }
-            sister_core::followup::FollowupDecision::NoEligibleCommitment
-            | sister_core::followup::FollowupDecision::CoolingDown { .. } => None,
+                let closure_notice = match close {
+                    sister_core::followup::CloseIntent::NotAClosure => None,
+                    sister_core::followup::CloseIntent::Unrecognized => {
+                        Some("我認不出你指哪一張記憶，所以沒有動任何一張。".to_string())
+                    }
+                    sister_core::followup::CloseIntent::Ambiguous { .. } => {
+                        Some("這句話對得上不只一張記憶，所以沒有動任何一張。".to_string())
+                    }
+                    sister_core::followup::CloseIntent::Close { .. } => {
+                        Some("這張記憶已結案，不會再提。".to_string())
+                    }
+                };
+                let previous =
+                    sister_core::reviewer::followup_state(db).map_err(|e| format!("{e:#}"))?;
+                let followup = match sister_core::followup::decide(
+                    &db.live_commitments().map_err(|e| format!("{e:#}"))?,
+                    now,
+                    previous.as_ref(),
+                ) {
+                    sister_core::followup::FollowupDecision::Ask {
+                        commitment_id,
+                        text,
+                    } => {
+                        sister_core::reviewer::record_followup(db, commitment_id, now)
+                            .map_err(|e| format!("{e:#}"))?;
+                        Some(text)
+                    }
+                    sister_core::followup::FollowupDecision::NoEligibleCommitment
+                    | sister_core::followup::FollowupDecision::CoolingDown { .. } => None,
+                };
+                Ok((closure_notice, followup))
+            })?
         };
-        Ok((closure_notice, followup))
-    })?;
     let (mut answer, prepared, query_facts) = answer_from_memory(
         &shell,
         &question,

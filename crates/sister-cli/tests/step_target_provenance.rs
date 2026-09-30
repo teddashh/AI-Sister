@@ -3,7 +3,8 @@ use sister_core::config::Config;
 use sister_core::db::{Db, L2Author, L2Insert};
 use sister_core::model::{FocusEvent, FocusKind, FocusSnapshot, InputMetrics};
 use sister_hands::semi_action::{
-    ActionKind, AllowedActions, AllowedApps, App, Expiry, Grant, StepLimit, Task, grant_path,
+    ActionKind, AllowedActions, AllowedApps, App, ApprovedCommitment, Expiry, Grant, StepLimit,
+    Task, grant_path,
 };
 use sister_hands::{ActionEvent, ActionLog, ActionSnapshot, ExecutionResult};
 use std::path::{Path, PathBuf};
@@ -13,13 +14,45 @@ const TASK: &str = "執行這個下一步";
 const OTHER_APP_URL: &str = "https://from-another-app.example.com/collect";
 const WORK_URL: &str = "https://work.example.test/task";
 
-fn seed_real_url_origin(db: &mut Db, ts: i64) {
+fn grant_for_reviewed_card(dir: &Path) -> Grant {
+    let card = Db::open(&Config::db_path(dir))
+        .unwrap()
+        .live_commitments()
+        .unwrap()
+        .into_iter()
+        .next()
+        .expect("reviewed card");
+    let action = match sister_hands::commitment_action::parse_allowed_next_step(
+        card.allowed_next_step.as_deref(),
+    ) {
+        sister_hands::commitment_action::AllowedNextStep::Suggestion(button) => button.snapshot(),
+        other => panic!("reviewed card must contain action: {other:?}"),
+    };
+    Grant::new(
+        Task::new(TASK),
+        AllowedApps::new([App::new("chrome.exe")]),
+        AllowedActions::new([ActionKind::OpenUrl]),
+        Expiry::after_issued(sister_core::now_ms(), 300_000),
+        StepLimit::new(1).unwrap(),
+    )
+    .with_url_targets([OTHER_APP_URL.to_owned(), WORK_URL.to_owned()])
+    .unwrap()
+    .with_approved_commitment(ApprovedCommitment {
+        id: card.id,
+        text: card.text,
+        action,
+        target_fact_id: card.allowed_next_step_fact,
+        agreed_evidence_json: card.agreed_evidence_json,
+    })
+}
+
+fn seed_synthetic_trusted_url_origin(db: &mut Db, ts: i64) -> i64 {
     // Scenario 是 replay，不能替日後的 unattended URL 種來源票。這套測的是
-    // target frame/app，另種一場明確的 Windows 真 recorder provenance 才能
+    // target frame/app，另種一場標成可信 Windows recorder 的合成 session 才能
     // 讓 #42 的網址政策保持中立。
     let session = db
         .start_session(sister_core::db::TRUSTED_URL_ORIGIN_PLATFORM, "test")
-        .expect("real capture provenance session");
+        .expect("synthetic trusted capture session");
     db.insert_focus(
         session,
         &FocusEvent {
@@ -34,7 +67,25 @@ fn seed_real_url_origin(db: &mut Db, ts: i64) {
             },
         },
     )
-    .expect("seed real URL provenance");
+    .expect("seed synthetic trusted URL provenance");
+    session
+}
+
+fn mark_target_frame_as_synthetic_trusted(dir: &Path, frame_id: i64, session: i64) {
+    // 只把目標畫面及其 OCR 行轉成合成 recorder 輸出；引用／app 測試要保留
+    // 正反控制組，不能讓 replay 身分先替它們決定結果。
+    let conn = rusqlite::Connection::open(Config::db_path(dir)).unwrap();
+    for (table, id_column) in [
+        ("frames", "id"),
+        ("text_chunks", "frame_id"),
+        ("facts", "frame_id"),
+    ] {
+        conn.execute(
+            &format!("UPDATE {table} SET session_id = ?1 WHERE {id_column} = ?2"),
+            rusqlite::params![session, frame_id],
+        )
+        .unwrap();
+    }
 }
 
 fn tmp(label: &str) -> PathBuf {
@@ -138,7 +189,7 @@ fn run_case_ex(
     );
 
     let mut db = Db::open(&Config::db_path(&dir)).unwrap();
-    seed_real_url_origin(&mut db, 10_000_000);
+    let trusted_session = seed_synthetic_trusted_url_origin(&mut db, 10_000_000);
     let chunks = db.recent(100).unwrap();
     let evidence = chunks
         .iter()
@@ -205,6 +256,11 @@ fn run_case_ex(
         .iter()
         .find(|f| f.raw == OTHER_APP_URL)
         .expect("slack url became a fact");
+    mark_target_frame_as_synthetic_trusted(
+        &dir,
+        target.frame_id.expect("target frame"),
+        trusted_session,
+    );
 
     // 假大腦：承諾的證據指 chrome 的 frame，下一步指另一格 fact。
     let mut evidence_refs = vec![format!("frame:{frame_id}")];
@@ -256,13 +312,7 @@ fn run_case_ex(
     );
 
     // 授權書只列 chrome.exe。
-    let grant = Grant::new(
-        Task::new(TASK),
-        AllowedApps::new([App::new("chrome.exe")]),
-        AllowedActions::new([ActionKind::OpenUrl]),
-        Expiry::after_issued(sister_core::now_ms(), 300_000),
-        StepLimit::new(1).unwrap(),
-    );
+    let grant = grant_for_reviewed_card(&dir);
     std::fs::write(grant_path(&dir), serde_json::to_vec_pretty(&grant).unwrap()).unwrap();
 
     // 這個整合 helper 只能驗 unattended：attended 在 stdin 不是 TTY 時會先被
@@ -381,13 +431,7 @@ fn schema_13_commitment_is_refused_with_missing_target_provenance() {
     assert_eq!(commitment.allowed_next_step_fact, None);
     drop(db);
 
-    let grant = Grant::new(
-        Task::new(TASK),
-        AllowedApps::new([App::new("chrome.exe")]),
-        AllowedActions::new([ActionKind::OpenUrl]),
-        Expiry::after_issued(sister_core::now_ms(), 300_000),
-        StepLimit::new(1).unwrap(),
-    );
+    let grant = grant_for_reviewed_card(&dir);
     std::fs::write(grant_path(&dir), serde_json::to_vec_pretty(&grant).unwrap()).unwrap();
     std::fs::remove_file(dir.join("action-log.jsonl")).unwrap();
     let action = sister(
@@ -633,7 +677,7 @@ fn run_agreed_unattended(label: &str, pass_b_cites_target: bool) -> (PathBuf, St
     );
 
     let mut db = Db::open(&Config::db_path(&dir)).unwrap();
-    seed_real_url_origin(&mut db, 10_000_000);
+    let trusted_session = seed_synthetic_trusted_url_origin(&mut db, 10_000_000);
     let chunks = db.recent(100).unwrap();
     let evidence = chunks
         .iter()
@@ -665,6 +709,7 @@ fn run_agreed_unattended(label: &str, pass_b_cites_target: bool) -> (PathBuf, St
         .find(|f| f.raw == OTHER_APP_URL)
         .expect("target fact");
     let target_frame = target.frame_id.expect("target frame");
+    mark_target_frame_as_synthetic_trusted(&dir, target_frame, trusted_session);
     db.insert_l2_card(&L2Insert {
         segment_core_start: core,
         segment_ref: &format!("segment:{core}"),
@@ -732,13 +777,7 @@ fn run_agreed_unattended(label: &str, pass_b_cites_target: bool) -> (PathBuf, St
     );
     sister(&dir, Some(&config), &["review", "--last", "2h", "--force"]);
 
-    let grant = Grant::new(
-        Task::new(TASK),
-        AllowedApps::new([App::new("chrome.exe")]),
-        AllowedActions::new([ActionKind::OpenUrl]),
-        Expiry::after_issued(sister_core::now_ms(), 300_000),
-        StepLimit::new(1).unwrap(),
-    );
+    let grant = grant_for_reviewed_card(&dir);
     std::fs::write(grant_path(&dir), serde_json::to_vec_pretty(&grant).unwrap()).unwrap();
     let action = sister(
         &dir,
@@ -817,13 +856,7 @@ fn unattended_refuses_old_commitment_recorded_before_agreed_evidence() {
     assert_eq!(commitment.agreed_evidence_json, None);
     drop(db);
 
-    let grant = Grant::new(
-        Task::new(TASK),
-        AllowedApps::new([App::new("chrome.exe")]),
-        AllowedActions::new([ActionKind::OpenUrl]),
-        Expiry::after_issued(sister_core::now_ms(), 300_000),
-        StepLimit::new(1).unwrap(),
-    );
+    let grant = grant_for_reviewed_card(&dir);
     std::fs::write(grant_path(&dir), serde_json::to_vec_pretty(&grant).unwrap()).unwrap();
     let _ = std::fs::remove_file(dir.join("action-log.jsonl"));
     let action = sister(
@@ -868,13 +901,7 @@ fn unattended_empty_agreed_evidence_is_not_the_null_sentence() {
         )
         .unwrap();
     }
-    let grant = Grant::new(
-        Task::new(TASK),
-        AllowedApps::new([App::new("chrome.exe")]),
-        AllowedActions::new([ActionKind::OpenUrl]),
-        Expiry::after_issued(sister_core::now_ms(), 300_000),
-        StepLimit::new(1).unwrap(),
-    );
+    let grant = grant_for_reviewed_card(&dir);
     std::fs::write(grant_path(&dir), serde_json::to_vec_pretty(&grant).unwrap()).unwrap();
     let _ = std::fs::remove_file(dir.join("action-log.jsonl"));
     let action = sister(

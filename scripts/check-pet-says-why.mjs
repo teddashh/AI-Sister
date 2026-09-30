@@ -927,6 +927,32 @@ const ADJUSTMENT_SAID = new Map([...(RETRIEVAL_SOURCE.split("pub fn message(&sel
   .map(m => [snakeKind(m[1]), m[2]]));
 const adjustmentSaid = (a) => ADJUSTMENT_SAID.get(a.kind)?.replaceAll("{x}", a.terms);
 
+// 沒說主題的求助句：她請他補上查找對象，已記下的完整原句仍可點回出處。
+{
+  const native = read(MAIN);
+  const retrieval = native.split("fn answer_from_memory(")[1]?.split("fn ask_local(")[0] ?? "";
+  const formal = native.split("fn ask(question:")[1]?.split("/// 時間軸上的一天")[0] ?? "";
+  check("沒主題狀態由 core 送到 native 終局，盲點不搶話",
+    retrieval.includes("needs_subject &= retrieval.needs_subject") &&
+    retrieval.includes("needs_subject &= asked_chapters.is_none()") &&
+    /let \(mut readings, readings_truncated\) = if needs_subject \{\s*\(Vec::new\(\), false\)/u.test(retrieval) &&
+    /kind: if needs_subject \{\s*"needs_subject"\s*\} else \{\s*shape\.name\(\)\s*\}/u.test(retrieval) &&
+    retrieval.includes("!needs_subject && needs_answer_blind_spots"), retrieval.slice(-1200));
+  check("沒主題時正式問答不啟動 CLI 查詢規劃",
+    formal.includes("help_request_without_subject(&question)") &&
+    formal.includes('(BrainAnswer::new("needs_subject", None), None)'), formal.slice(0, 1300));
+  const needsSubject = answer({ kind: "needs_subject", brain: { state: "needs_subject", provider: null } });
+  const p = await open({ ask_local: needsSubject, ask: needsSubject });
+  await p.type("可以幫我嗎");
+  check("沒有查找主題時只要求補上主題",
+    JSON.stringify(p.hitTexts()) === JSON.stringify(["要找什麼？請把人名、文件名或關鍵字打出來。"])
+      && p.localReadButton() === null && p.azureButton() === null,
+    p.hitTexts());
+  const exact = await open({ ask: answer({ hits: [hit({ text: "可以幫我嗎", snippet: "[可以幫我嗎]" })] }) });
+  await exact.type("可以幫我嗎");
+  check("真的看過原句仍顯示出處", exact.hitTexts().join(" ").includes("可以幫我嗎") &&
+    !exact.hitTexts().join(" ").includes("要找什麼？"), exact.hitTexts());
+}
 // A155：核心檢索的比對字一路進 native 回條，再由真 renderer 畫出來。
 {
   const native = read(MAIN).split("fn answer_from_memory(")[1]?.split("fn ")[0] ?? "";

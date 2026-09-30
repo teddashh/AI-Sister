@@ -6,9 +6,10 @@
 //! 仍然沒有覆蓋，CLI 呼叫端也得再抄一份。搬到 `sister-hands`，根 workspace 在
 //! Linux 和 Windows 兩邊都會跑它，而且兩個產品入口只認同一份判斷。
 //!
-//! 判斷全部是字串比對，不碰檔案系統，所以在哪個平台跑結果都一樣。
+//! URL 由正式 parser 解析，不碰檔案系統，所以在哪個平台跑結果都一樣。
 
 use std::path::Path;
+use url::{Position, Url};
 
 use crate::Suggestion;
 
@@ -26,10 +27,8 @@ pub fn validate_url(url: &str) -> Result<(), String> {
     if url.chars().any(char::is_whitespace) || url.chars().any(char::is_control) {
         return Err("不會開啟：網址含空白或控制字元".into());
     }
-    // WHATWG 的 http(s) parser 會把反斜線當成斜線，手寫的 authority
-    // parser 卻不會。例如 `https://evil.example\@example.com/` 在這裡若照
-    // `@` 切會讀成 `example.com`，瀏覽器實際開的卻是 `evil.example`。
-    // 這裡不嘗試重寫整套瀏覽器 parser；有歧義就不交給它。
+    // WHATWG 的 http(s) parser 會把反斜線當成斜線；錄製的原字節沒有
+    // 這個歧義才准拿來授權。
     if url.contains('\\') {
         return Err("不會開啟：網址含反斜線，瀏覽器對它的解讀不唯一".into());
     }
@@ -37,7 +36,13 @@ pub fn validate_url(url: &str) -> Result<(), String> {
         return Err("不會開啟：網址沒有 scheme".into());
     };
     match scheme.to_ascii_lowercase().as_str() {
-        "http" | "https" if rest.starts_with("//") && host_of(url).is_some() => Ok(()),
+        "http" | "https" if rest.starts_with("//") => match parse_web_url(url) {
+            Some(parsed) if has_userinfo(&parsed) || raw_authority_has_userinfo(url) => {
+                Err("不會開啟：網址不能含 userinfo".into())
+            }
+            Some(_) => Ok(()),
+            None => Err("不會開啟：網址沒有可驗證的主機名稱".into()),
+        },
         "http" | "https" => Err("不會開啟：網址沒有主機名稱".into()),
         // 白名單。`file:` `javascript:` `vbscript:` `data:` `shell:` `ms-…:`
         // 全部走這一條，不另外列一份看起來很兇、其實和這一行做同一件事的黑名單。
@@ -131,128 +136,108 @@ pub fn validate_window_title(title: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// 方括號裡的 IPv6 literal。刻意不碰 `std::net`：產品的結構性承諾是出貨樹與
-/// 原始碼都沒有 socket API，`check-no-network.sh` 會把那個 namespace 也視為
-/// 越界。這裡只需要解析，不需要網路；IPv4-mapped 與 zone id 先 fail-closed。
-fn valid_ipv6_literal(value: &str) -> bool {
-    if value.is_empty()
-        || value.contains(":::")
-        || value.chars().any(|c| c != ':' && !c.is_ascii_hexdigit())
+/// 只用正式 URL parser 解析 authority。錄製位址列可省略 scheme；在這一種
+/// Chromium 顯示形式下才補 HTTPS。userinfo 不可從錄製縮寫猜出來。
+fn explicit_http_scheme_len(value: &str) -> Option<usize> {
+    if value
+        .get(..8)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("https://"))
     {
-        return false;
-    }
-    let compressed = value.match_indices("::").count();
-    if compressed > 1 {
-        return false;
-    }
-    let groups: Vec<&str> = value.split(':').filter(|group| !group.is_empty()).collect();
-    if groups.iter().any(|group| group.len() > 4) {
-        return false;
-    }
-    match compressed {
-        0 => groups.len() == 8 && !value.starts_with(':') && !value.ends_with(':'),
-        1 => groups.len() < 8,
-        _ => false,
+        Some(8)
+    } else if value
+        .get(..7)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("http://"))
+    {
+        Some(7)
+    } else {
+        None
     }
 }
 
-/// 從一個網址解析出 **host**，並統一 ASCII 大小寫。它不在這裡剝 `www.`；
-/// Chromium 可能省略一層的等價規則只寫在 [`same_site`]，才不會不小心剝兩層。
-///
-/// 為什麼是 host 而不是整條網址：`focus_events.url` 那一欄的來源是 Chromium
-/// 的位址列，而位址列給的是**給人看的縮寫**——`kFormatUrlOmitHTTPS` 與
-/// `kFormatUrlOmitTrivialSubdomains` 會把 `https://www.example.com/a?b=c`
-/// 顯示成 `example.com/a?b=c`（見 `sister-capture` 的 `windows/uia.rs` 開頭）。
-/// 逐字比對兩邊永遠不會相等，而且**不會有人發現**：它只會安靜地一個都不放行。
-///
-/// **這裡不可以用子字串比對。** `evil.com/?next=example.com` 含著
-/// `example.com`，`example.com.evil.com` 也含著。所以先切出 authority，
-/// 再整段相等比對。切的順序有三個容易錯的地方，三個都有測試釘著：
-///
-/// - **userinfo**：`https://example.com@evil.com/` 的 host 是 `evil.com`，
-///   要取**最後**一個 `@` 之後。
-/// - **IPv6**：`[::1]:8080` 的 host 是 `[::1]`，不能看到 `:` 就砍。
-/// - **path/query/fragment**：三個都可能先出現，取最早的那一個。
-///
-/// 回 `None` 表示「這個字串講不出一個 host」——呼叫端必須把它當成
-/// **不放行**，不是當成「沒有限制」。
-pub fn host_of(url: &str) -> Option<String> {
-    let v = url.trim();
-    if v.is_empty()
-        || v.chars().any(char::is_whitespace)
-        || v.chars().any(char::is_control)
-        || v.contains('\\')
+fn parse_web_url(value: &str) -> Option<Url> {
+    if value.is_empty()
+        || value.chars().any(char::is_whitespace)
+        || value.chars().any(char::is_control)
+        || value.contains('\\')
+        || percent_decode(value).is_none()
     {
         return None;
     }
-    // scheme 是選配的：她記下來的那一份被砍掉了 scheme，模型讀來的那一份通常有。
-    let (rest, had_scheme) = match v.split_once("://") {
-        Some((scheme, rest)) => {
-            // **只有 http/https 講得出「站」。** `chrome://settings` 有 `://`
-            // 卻不是一個網站，早一版這裡把 `settings` 當成 host 回出去了。
-            // 這一行和 `validate_url` 的白名單是同一個決定，兩邊要一起讀。
-            if !scheme.eq_ignore_ascii_case("http") && !scheme.eq_ignore_ascii_case("https") {
-                return None;
-            }
-            (rest, true)
-        }
-        None => {
-            // 沒有 `://` 卻有 `:` 在第一個 `/` 之前，可能是 `about:blank`
-            // 這種；也可能是 `example.com:8080/x`。用「冒號後面是不是全數字」
-            // 分辨——是就當 port，不是就當 scheme 而且沒有 authority。
-            let head = v.split(['/', '?', '#']).next().unwrap_or(v);
-            if let Some((before, after)) = head.split_once(':')
-                && !before.is_empty()
-                && !after.is_empty()
-                && !after.chars().all(|c| c.is_ascii_digit())
-                && !before.starts_with('[')
-            {
-                return None;
-            }
-            (v, false)
-        }
-    };
-    let authority = rest.split(['/', '?', '#']).next().unwrap_or(rest);
-    // Chromium 會省略 scheme，但 scheme-less 的 `name@company.com` 更常是位址列
-    // 裡拿來搜尋的 email，不是一個帶 userinfo 的已完成 URL。完整 http(s) URL
-    // 仍按最後一個 `@` 解析；沒有 scheme 的歧義字串不拿來替網址背書。
-    if !had_scheme && authority.contains('@') {
-        return None;
-    }
-    // userinfo：取最後一個 `@` 之後。
-    let authority = match authority.rsplit_once('@') {
-        Some((_, host)) => host,
-        None => authority,
-    };
-    let host = if authority.starts_with('[') {
-        let end = authority.find(']')?;
-        if !valid_ipv6_literal(&authority[1..end]) {
+    let (to_parse, abbreviated) = if let Some(prefix_len) = explicit_http_scheme_len(value) {
+        let rest = &value[prefix_len..];
+        if rest.is_empty() || rest.starts_with('/') {
             return None;
         }
-        let after = &authority[end + 1..];
-        if !after.is_empty() {
-            match after.strip_prefix(':') {
-                Some(port) if port.parse::<u16>().is_ok() => {}
-                _ => return None,
-            }
-        }
-        // IPv6 字面值：連方括號一起留著，`[::1]` 和 `::1` 不要變成兩個答案。
-        &authority[..=end]
+        (value.to_owned(), false)
     } else {
-        if authority.contains(['[', ']']) {
+        // `://` in a path or query is data, not a leading scheme. An actual
+        // unsupported scheme at the beginning remains invalid.
+        if value.split_once("://").is_some_and(|(prefix, _)| {
+            prefix
+                .as_bytes()
+                .first()
+                .is_some_and(u8::is_ascii_alphabetic)
+                && prefix
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'-' | b'.'))
+        }) {
             return None;
         }
-        match authority.split_once(':') {
-            Some((host, port)) if port.parse::<u16>().is_ok() => host,
-            Some(_) => return None,
-            None => authority,
+        if value.starts_with('/') {
+            return None;
         }
+        (format!("https://{value}"), true)
     };
-    let host = host.trim().to_ascii_lowercase();
-    if host.is_empty() {
+    let parsed = Url::parse(&to_parse).ok()?;
+    if !matches!(parsed.scheme(), "http" | "https") || parsed.host().is_none() {
         return None;
     }
-    Some(host)
+    let userinfo = &parsed[Position::BeforeUsername..Position::BeforeHost];
+    if abbreviated && (userinfo.contains('@') || raw_authority_has_userinfo(value)) {
+        return None;
+    }
+    Some(parsed)
+}
+
+/// 將可信 recorder 位址列轉成可供開啟的完整 URL fact。Chromium 省略的
+/// scheme 只補 HTTPS；其餘原始 path/query/fragment 與空分隔符照錄。
+/// 此值仍須連同原始 `frames.url` 和可信 session 驗證，不能單獨充當授權。
+pub fn recorded_address_target(value: &str) -> Option<String> {
+    let target = if explicit_http_scheme_len(value).is_some() {
+        value.to_owned()
+    } else {
+        format!("https://{value}")
+    };
+    validate_url(&target).ok()?;
+    same_destination(value, &target).then_some(target)
+}
+
+fn has_userinfo(parsed: &Url) -> bool {
+    parsed[Position::BeforeUsername..Position::BeforeHost].contains('@')
+}
+
+// URL parser 會把 `https://@host/` 的空 userinfo 正規化掉。授權仍必須
+// 看見原字節裡的 @；只掃 authority，不把 path 裡的 @ 當成 credentials。
+fn raw_authority_has_userinfo(value: &str) -> bool {
+    let rest = explicit_http_scheme_len(value).map_or(value, |len| &value[len..]);
+    rest.split(['/', '?', '#'])
+        .next()
+        .is_some_and(|authority| authority.contains('@'))
+}
+
+/// parser 正規化的 host。完整 URL 即使含 userinfo 仍會回傳真正的 host；
+/// standing grant 在 [`same_destination`] 額外拒絕整類 userinfo。
+pub fn host_of(url: &str) -> Option<String> {
+    let parsed = parse_web_url(url)?;
+    if let Some(domain) = parsed.domain() {
+        let (shown, status) = idna::domain_to_unicode(domain);
+        return Some(if status.is_ok() {
+            shown
+        } else {
+            domain.to_owned()
+        });
+    }
+    Some(parsed[Position::BeforeHost..Position::AfterHost].to_owned())
 }
 
 /// 她記下來的那條網址，跟她正要打開的那條，是不是同一個站。
@@ -264,17 +249,21 @@ pub fn host_of(url: &str) -> Option<String> {
 /// 落地後路徑可能被站方改掉，那一格是憑據不是攔截。無人值守要開之前的來源
 /// 票另走 [`same_destination`]：同站不同去處不能借已記錄的 host 當授權。
 pub fn same_site(recorded: &str, target: &str) -> bool {
+    match (parse_web_url(recorded), parse_web_url(target)) {
+        (Some(a), Some(b)) => same_host(
+            &a[Position::BeforeHost..Position::AfterHost],
+            &b[Position::BeforeHost..Position::AfterHost],
+        ),
+        _ => false,
+    }
+}
+
+fn same_host(a: &str, b: &str) -> bool {
     fn without_one_www(host: &str) -> &str {
         host.strip_prefix("www.").unwrap_or(host)
     }
-    match (host_of(recorded), host_of(target)) {
-        (Some(a), Some(b)) => {
-            // Chromium 可能把位址列最外面一層 trivial `www.` 省掉。只允許**一邊
-            // 少一層**，不反覆剝：`www.www.evil` 和 `evil` 仍是兩個站。
-            a == b || without_one_www(&a) == b || a == without_one_www(&b)
-        }
-        _ => false,
-    }
+    // Chromium 只可能省略最外層一個 trivial www.。
+    a == b || without_one_www(a) == b || a == without_one_www(b)
 }
 
 fn hex_digit(byte: u8) -> Option<u8> {
@@ -313,10 +302,7 @@ fn percent_decode(value: &str) -> Option<String> {
 fn tail_after_authority(url: &str) -> Option<&str> {
     let _ = host_of(url)?;
     let v = url.trim();
-    let rest = match v.split_once("://") {
-        Some((_, rest)) => rest,
-        None => v,
-    };
+    let rest = explicit_http_scheme_len(v).map_or(v, |len| &v[len..]);
     match rest.find(['/', '?', '#']) {
         Some(i) => Some(&rest[i..]),
         None => Some(""),
@@ -325,10 +311,11 @@ fn tail_after_authority(url: &str) -> Option<&str> {
 
 /// 從一個網址解析出 **path**。講不出 host 的字串這裡也講不出 path。
 ///
-/// 空路徑和 `/` 都回 `"/"`。結尾的 `/` 會去掉（根路徑除外），因為位址列
-/// 有時省、有時留。percent-decode 一次之後若出現 `.` / `..` 段，回 `None`：
-/// 解了會讓 `/help/../collect` 變成已記錄的 `/collect`。
+/// 空路徑和 `/` 都回 `"/"`。其餘保留原始 path，包含 percent escape 與結尾的
+/// `/`：伺服器可以把 `%2F` 和 `/`、`%62` 和 `b` 當成不同路徑。
+/// 仍解碼一份**只供驗證**；壞 escape 或解碼後的 `.` / `..` 段都拒絕。
 pub fn path_of(url: &str) -> Option<String> {
+    let parsed = parse_web_url(url)?;
     let tail = tail_after_authority(url)?;
     let raw = tail.split(['?', '#']).next().unwrap_or("");
     let decoded = percent_decode(raw)?;
@@ -338,11 +325,10 @@ pub fn path_of(url: &str) -> Option<String> {
     {
         return None;
     }
-    if decoded.is_empty() || decoded == "/" {
-        Some("/".into())
-    } else {
-        Some(decoded.trim_end_matches('/').to_string())
-    }
+    let raw = if raw.is_empty() { "/" } else { raw };
+    // URL parser 會消去 dot segments。授權不能讓不同的原始 path 在這步
+    // 合併；只收 parser 沒改過 path 位元組的輸入。
+    (parsed.path() == raw).then(|| raw.to_string())
 }
 
 /// 兩邊 path 是否相同。任何一邊講不出 path 就是 `false`。
@@ -355,73 +341,83 @@ pub fn same_path(recorded: &str, target: &str) -> bool {
     }
 }
 
-fn query_and_fragment(url: &str) -> Option<(&str, &str)> {
+fn query_and_fragment(url: &str) -> Option<(Option<String>, Option<String>)> {
+    let parsed = parse_web_url(url)?;
     let tail = tail_after_authority(url)?;
-    let (path_and_query, fragment) = match tail.split_once('#') {
-        Some((before, frag)) => (before, frag),
-        None => (tail, ""),
+    let (before_fragment, raw_fragment) = match tail.split_once('#') {
+        Some((before, fragment)) => (before, Some(fragment)),
+        None => (tail, None),
     };
-    let query = match path_and_query.split_once('?') {
-        Some((_, q)) => q,
-        None => "",
-    };
-    Some((query, fragment))
-}
-
-fn percent_decode_query_component(value: &str) -> Option<String> {
-    percent_decode(&value.replace('+', " "))
-}
-
-fn canonical_query(query: &str) -> Option<Vec<(String, String)>> {
-    let mut pairs = Vec::new();
-    if query.is_empty() {
-        return Some(pairs);
+    let raw_query = before_fragment.split_once('?').map(|(_, query)| query);
+    // parser 會替非 ASCII 等字元做序列化。來源票必須保留 query/fragment
+    // 的原始寫法與空分隔符，不能用正規化後的值借票。
+    if parsed.query() != raw_query || parsed.fragment() != raw_fragment {
+        return None;
     }
-    for part in query.split('&') {
-        if part.is_empty() {
-            continue;
-        }
-        let (key, value) = part.split_once('=').unwrap_or((part, ""));
-        pairs.push((
-            percent_decode_query_component(key)?,
-            percent_decode_query_component(value)?,
-        ));
-    }
-    pairs.sort();
-    Some(pairs)
+    Some((
+        parsed.query().map(str::to_owned),
+        parsed.fragment().map(str::to_owned),
+    ))
 }
 
-/// query（排序後的鍵值）與 fragment 是否相同。解不開的編碼是 `false`。
+/// query 與 fragment 的原文字節及分隔符是否相同。重複 key 的先後、空欄與 escape
+/// 都可能改變伺服器或頁面收到的去處；壞掉的 percent escape 仍拒絕。
 pub fn same_query_and_fragment(recorded: &str, target: &str) -> bool {
     match (query_and_fragment(recorded), query_and_fragment(target)) {
-        (Some((q1, f1)), Some((q2, f2))) => {
-            let Some(a) = canonical_query(q1) else {
-                return false;
-            };
-            let Some(b) = canonical_query(q2) else {
-                return false;
-            };
-            let Some(fa) = percent_decode(f1) else {
-                return false;
-            };
-            let Some(fb) = percent_decode(f2) else {
-                return false;
-            };
-            a == b && fa == fb
-        }
+        (Some(a), Some(b)) => a == b,
         _ => false,
     }
 }
 
-/// 無人值守 standing grant 的去處：同一站、同一條 path、同一組 query／fragment。
+/// 無人值守 standing grant 的去處：同一 scheme、有效 port、站、path、query／fragment。
 ///
 /// 只比 host 會讓 `/collect` 借 `example.com/help` 過關；只比 path 會讓
-/// `?id=7` 的紀錄去開 `?id=8` 或 `?next=https://evil.example`。參數解讀不出來
-/// 時是 `false`，不是「當作沒有參數」。當場按不走這支。
+/// `?id=7` 的紀錄去開 `?id=8` 或 `?next=https://evil.example`。漏掉 scheme／port
+/// 會讓 HTTP 或另一個服務借 HTTPS 的來源票。任何一欄讀不出來都拒絕；當場按不走這支。
 pub fn same_destination(recorded: &str, target: &str) -> bool {
-    same_site(recorded, target)
+    let (Some(recorded_url), Some(target_url)) = (parse_web_url(recorded), parse_web_url(target))
+    else {
+        return false;
+    };
+    // userinfo 是完整 origin 身分的一部分；錄製縮寫不保證它仍可見，
+    // 因此任何一端帶 userinfo 都不准使用 standing grant。
+    if has_userinfo(&recorded_url)
+        || has_userinfo(&target_url)
+        || raw_authority_has_userinfo(recorded)
+        || raw_authority_has_userinfo(target)
+    {
+        return false;
+    }
+    let recorded_host = &recorded_url[Position::BeforeHost..Position::AfterHost];
+    let target_host = &target_url[Position::BeforeHost..Position::AfterHost];
+    let host_matches = if explicit_http_scheme_len(recorded).is_some() {
+        recorded_host == target_host
+    } else {
+        same_host(recorded_host, target_host)
+    };
+    recorded_url.scheme() == target_url.scheme()
+        && recorded_url.port_or_known_default() == target_url.port_or_known_default()
+        && host_matches
         && same_path(recorded, target)
         && same_query_and_fragment(recorded, target)
+}
+
+/// 保存的授權書寫的是完整 URL，不是 Chromium 縮寫；host 不得借 `www.`
+/// 相容規則。其餘 component 與 [`same_destination`] 使用同一套嚴格比較。
+pub fn same_explicit_destination(granted: &str, target: &str) -> bool {
+    if explicit_http_scheme_len(granted).is_none()
+        || explicit_http_scheme_len(target).is_none()
+        || !same_destination(granted, target)
+    {
+        return false;
+    }
+    match (parse_web_url(granted), parse_web_url(target)) {
+        (Some(a), Some(b)) => {
+            a[Position::BeforeHost..Position::AfterHost]
+                == b[Position::BeforeHost..Position::AfterHost]
+        }
+        _ => false,
+    }
 }
 
 #[cfg(test)]
@@ -531,13 +527,13 @@ mod tests {
             "https://www.example.com/bill?id=7"
         ));
         assert!(same_path("example.com", "https://example.com/"));
-        assert!(same_path("example.com/a/", "https://example.com/a"));
+        assert!(!same_path("example.com/a/", "https://example.com/a"));
         assert_eq!(path_of("http://[::1]:8080/x").as_deref(), Some("/x"));
         assert!(same_path(
             "example.com/bill",
             "https://example.com:443/bill"
         ));
-        assert!(same_path(
+        assert!(!same_path(
             "example.com/bill",
             "https://example.com/%62%69%6C%6C"
         ));
@@ -562,6 +558,26 @@ mod tests {
         assert!(!same_path("example.com/a", "javascript:alert(1)"));
     }
 
+    #[test]
+    fn encoded_path_bytes_cannot_borrow_a_literal_path_ticket() {
+        for (recorded, target) in [
+            ("example.com/a%2Fb", "https://example.com/a/b"),
+            ("example.com/%62ill", "https://example.com/bill"),
+            ("example.com/a%2fb", "https://example.com/a%2Fb"),
+            ("example.com/a/", "https://example.com/a"),
+        ] {
+            assert!(
+                !same_destination(recorded, target),
+                "{recorded} vs {target}"
+            );
+        }
+        assert!(same_destination(
+            "example.com/a%2Fb",
+            "https://example.com/a%2Fb"
+        ));
+        assert_eq!(path_of("https://example.com/%2e%2e/collect"), None);
+    }
+
     /// path 裡的 `@` 不是 userinfo。整串 `rsplit('@')` 會把 `/user@inbox` 切錯。
     #[test]
     fn at_sign_in_the_path_is_not_userinfo() {
@@ -583,7 +599,7 @@ mod tests {
     #[test]
     fn malformed_percent_encoding_is_not_the_recorded_destination() {
         let weird = "https://example.com/bill?id=%漢";
-        assert!(path_of(weird).is_some());
+        assert!(path_of(weird).is_none());
         assert!(!same_query_and_fragment("example.com/bill?id=7", weird));
         assert!(!same_destination("example.com/bill?id=7", weird));
         assert_eq!(percent_decode("%漢"), None);
@@ -591,14 +607,14 @@ mod tests {
         assert_eq!(percent_decode("%2"), None);
     }
 
-    /// 記過的去處包含 query／fragment。同 path 換參數不是同一張票。
+    /// 記過的去處包含 query／fragment，參數的順序也是來源票的一部分。
     #[test]
     fn standing_grant_destination_includes_query_and_fragment() {
         assert!(same_destination(
             "example.com/bill?id=7",
             "https://www.example.com/bill?id=7"
         ));
-        assert!(same_destination(
+        assert!(!same_destination(
             "example.com/a?b=c&id=7",
             "https://example.com/a?id=7&b=c"
         ));
@@ -626,6 +642,175 @@ mod tests {
             "example.com/help",
             "https://example.com/help?next=https://evil.example/collect"
         ));
+    }
+
+    #[test]
+    fn nested_url_in_query_does_not_supply_a_scheme_for_chromium_address() {
+        let recorded = "example.com/help?next=https://dest.example/x";
+        let target = "https://www.example.com/help?next=https://dest.example/x";
+        assert_eq!(host_of(recorded).as_deref(), Some("example.com"));
+        assert!(same_destination(recorded, target));
+        assert!(!same_explicit_destination(recorded, target));
+        assert!(!same_destination(
+            recorded,
+            "http://www.example.com/help?next=https://dest.example/x"
+        ));
+        assert!(!same_destination(
+            recorded,
+            "https://www.example.com/help?next=https://other.example/x"
+        ));
+        assert_eq!(host_of("ftp://example.com/help"), None);
+    }
+
+    #[test]
+    fn http_scheme_is_recognized_before_multibyte_host_character() {
+        let unicode = "http://é.example/a";
+        let punycode = "http://xn--9ca.example/a";
+        assert!(validate_url(unicode).is_ok());
+        assert_eq!(host_of(unicode).as_deref(), Some("é.example"));
+        assert!(same_destination(unicode, punycode));
+        assert!(!same_destination(unicode, "https://xn--9ca.example/a"));
+    }
+
+    #[test]
+    fn recorded_address_target_preserves_exact_tail_and_rejects_credentials() {
+        assert_eq!(
+            recorded_address_target("example.com/a%2Fb?x=1&x=2?#"),
+            Some("https://example.com/a%2Fb?x=1&x=2?#".into())
+        );
+        assert_eq!(
+            recorded_address_target("http://é.example/a"),
+            Some("http://é.example/a".into())
+        );
+        assert_eq!(recorded_address_target("example.com@evil.test/a"), None);
+        assert_eq!(recorded_address_target("ftp://example.com/a"), None);
+    }
+
+    #[test]
+    fn query_order_cannot_reverse_duplicate_authorization_values() {
+        for (recorded, target) in [
+            (
+                "example.com/pay?next=trusted&next=evil",
+                "https://example.com/pay?next=evil&next=trusted",
+            ),
+            (
+                "example.com/pay?role=user&mode=read&role=admin",
+                "https://example.com/pay?role=admin&mode=read&role=user",
+            ),
+            ("example.com/pay?a=1&b=2", "https://example.com/pay?b=2&a=1"),
+        ] {
+            assert!(
+                !same_destination(recorded, target),
+                "{recorded} vs {target}"
+            );
+        }
+        assert!(same_destination(
+            "example.com/pay?next=trusted&next=evil",
+            "https://example.com/pay?next=trusted&next=evil"
+        ));
+    }
+
+    #[test]
+    fn empty_query_and_fragment_delimiters_are_distinct_destinations() {
+        let forms = [
+            "https://example.com/a",
+            "https://example.com/a?",
+            "https://example.com/a#",
+            "https://example.com/a?#",
+        ];
+        for (recorded_index, recorded) in forms.into_iter().enumerate() {
+            for (target_index, target) in forms.into_iter().enumerate() {
+                assert_eq!(
+                    same_destination(recorded, target),
+                    recorded_index == target_index,
+                    "recorded={recorded:?}, target={target:?}"
+                );
+            }
+        }
+        assert!(same_destination(
+            "example.com/a?#",
+            "https://www.example.com/a?#"
+        ));
+    }
+
+    #[test]
+    fn parsed_origin_never_grants_a_url_with_userinfo() {
+        for url in [
+            "https://user@example.com/a",
+            "https://user:secret@example.com/a",
+            "https://@example.com/a",
+            "https://example.com@evil.example/a",
+        ] {
+            assert!(!same_destination(url, url), "{url}");
+            assert!(!same_destination("https://example.com/a", url), "{url}");
+            assert!(validate_url(url).is_err(), "{url}");
+        }
+        assert!(same_destination(
+            "https://bücher.example/a",
+            "https://xn--bcher-kva.example/a"
+        ));
+        assert!(!same_destination(
+            "https://example.com/a?q=é",
+            "https://example.com/a?q=%C3%A9"
+        ));
+        assert!(!same_destination(
+            "https://example.com/a#é",
+            "https://example.com/a#%C3%A9"
+        ));
+    }
+
+    #[test]
+    fn explicit_grant_does_not_lend_its_host_to_www() {
+        assert!(!same_destination(
+            "https://example.com/a",
+            "https://www.example.com/a"
+        ));
+        assert!(!same_explicit_destination(
+            "https://example.com/a",
+            "https://www.example.com/a"
+        ));
+        assert!(same_explicit_destination(
+            "https://EXAMPLE.com:443/a",
+            "https://example.com/a"
+        ));
+    }
+
+    /// 縮寫位址列只代表 HTTPS；scheme 與有效 port 都是授權去處的一部分。
+    #[test]
+    fn standing_grant_destination_includes_scheme_and_effective_port() {
+        for (recorded, target, expected) in [
+            ("example.com/pay", "https://www.example.com/pay", true),
+            ("example.com/pay", "https://example.com:443/pay", true),
+            ("example.com:8443/pay", "https://example.com:8443/pay", true),
+            (
+                "https://example.com:443/pay",
+                "https://example.com/pay",
+                true,
+            ),
+            ("http://example.com:80/pay", "http://example.com/pay", true),
+            ("example.com/pay", "http://example.com/pay", false),
+            ("https://example.com/pay", "http://example.com/pay", false),
+            ("http://example.com/pay", "https://example.com/pay", false),
+            (
+                "https://example.com/pay",
+                "https://example.com:8443/pay",
+                false,
+            ),
+            ("example.com:8443/pay", "https://example.com/pay", false),
+            (
+                "https://example.com:80/pay",
+                "http://example.com:80/pay",
+                false,
+            ),
+            ("[::1]/pay", "https://[::1]:443/pay", true),
+            ("https://[::1]:8443/pay", "https://[::1]/pay", false),
+        ] {
+            assert_eq!(
+                same_destination(recorded, target),
+                expected,
+                "recorded={recorded:?}, target={target:?}"
+            );
+        }
     }
 
     /// IPv6 字面值不可以被冒號切成兩半。開發時整天看的 `localhost:3000` 也一樣。
