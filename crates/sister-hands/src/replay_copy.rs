@@ -464,7 +464,11 @@ pub fn recent_replay_lines(replay: &Replay, shown: usize) -> Vec<String> {
 /// 這份邏輯刻意放在 `sister-hands`，不放 `apps/desktop`：desktop workspace 的
 /// CI 不會執行那裡的單元測試，run 邊界、批准來源和收尾文案若只在那裡測，綠燈
 /// 並沒有證明這份稽核報告真的分得對輪。CLI 只負責讀檔和印出這裡的結果。
-pub fn recent_run_report_lines(replay: &Replay, shown: usize) -> Vec<String> {
+///
+/// `status_cmd` 是讀接手狀態的那一行指令，由呼叫端組好：這裡不知道資料目錄，
+/// 自己寫一行 `sister takeover --status` 的話，在 `--data-dir` 的場次裡會指到
+/// 預設目錄去。
+pub fn recent_run_report_lines(replay: &Replay, shown: usize, status_cmd: &str) -> Vec<String> {
     let runs = split_runs(&replay.events);
     let hidden = runs.len().saturating_sub(shown);
     let mut lines = Vec::new();
@@ -475,7 +479,11 @@ pub fn recent_run_report_lines(replay: &Replay, shown: usize) -> Vec<String> {
         if !lines.is_empty() {
             lines.push(String::new());
         }
-        lines.extend(run_report_lines(hidden + visible_index + 1, &run));
+        lines.extend(run_report_lines(
+            hidden + visible_index + 1,
+            &run,
+            status_cmd,
+        ));
     }
     if !replay.unreadable.is_empty() {
         if !lines.is_empty() {
@@ -486,7 +494,7 @@ pub fn recent_run_report_lines(replay: &Replay, shown: usize) -> Vec<String> {
     lines
 }
 
-fn run_report_lines(run_number: usize, events: &[&ActionEvent]) -> Vec<String> {
+fn run_report_lines(run_number: usize, events: &[&ActionEvent], status_cmd: &str) -> Vec<String> {
     let mut lines = vec![format!("── 第 {run_number} 輪 ──")];
     let offered_grant = match events.first() {
         Some(ActionEvent::HandoffOffered { grant, .. }) => Some(grant),
@@ -695,10 +703,9 @@ fn run_report_lines(run_number: usize, events: &[&ActionEvent]) -> Vec<String> {
         // 提議端出去了、沒有回答那一列：可能還有一個行程在等他回答，也可能那個
         // 行程在他回答之前就結束了。紀錄上分不出來；`sister takeover --status`
         // 看得到接手鎖，分得出來。
-        Some(ActionEvent::HandoffOffered { .. }) => lines.push(
-            "收尾：提議之後沒有回答那一列——可能還在等他回答，也可能那個行程在他回答之前就結束了；`sister takeover --status` 分得出是哪一種。"
-                .to_string(),
-        ),
+        Some(ActionEvent::HandoffOffered { .. }) => lines.push(format!(
+            "收尾：提議之後沒有回答那一列——可能還在等他回答，也可能那個行程在他回答之前就結束了；`{status_cmd}` 分得出是哪一種。"
+        )),
         _ => lines.push("收尾：這一輪的紀錄到這裡就沒有了。".to_string()),
     }
     lines
@@ -848,16 +855,24 @@ fn split_runs(events: &[ActionEvent]) -> Vec<Vec<&ActionEvent>> {
 fn run_audit_report(events: Vec<&ActionEvent>) -> RunAuditReport {
     use crate::semi_action::{StepEvidence, TargetOnScreen};
     // 接手那幾輪的 `granted` 不在第一列（前面是提議與回答），所以用找的。
-    let (run_id, grant_id) = events
-        .iter()
-        .find_map(|event| match event {
-            ActionEvent::Granted {
-                run_id, grant_id, ..
-            } => Some((run_id.clone(), grant_id.clone())),
-            _ => None,
-        })
-        .unwrap_or((None, None));
-    let started_at_ms = events.first().map(|first| first.at_ms());
+    let granted = events.iter().find_map(|event| match event {
+        ActionEvent::Granted {
+            at_ms,
+            run_id,
+            grant_id,
+            ..
+        } => Some((*at_ms, run_id.clone(), grant_id.clone())),
+        _ => None,
+    });
+    // 開始＝這一輪拿到授權書的那一刻，和文字報告上那一行「開始：」是同一個時間；
+    // 提議與回答的時間在 `handoff` 裡。沒有 `granted` 的組（舊版的紀錄、沒答應的
+    // 提議）才拿第一列。
+    let started_at_ms = granted
+        .as_ref()
+        .map(|(at_ms, ..)| *at_ms)
+        .or_else(|| events.first().map(|first| first.at_ms()));
+    let (run_id, grant_id) =
+        granted.map_or((None, None), |(_, run_id, grant_id)| (run_id, grant_id));
     let handoff = handoff_audit(&events);
     let complete = events.last().is_some_and(|last| closes_a_group(last));
     let ended_at_ms = complete.then(|| events.last().expect("complete run has an end").at_ms());
@@ -1437,6 +1452,7 @@ mod tests {
                 unreadable: vec![],
             },
             limit,
+            "sister takeover --status",
         )
         .join("\n")
     }

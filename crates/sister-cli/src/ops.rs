@@ -4392,7 +4392,11 @@ pub mod act {
             return Ok(());
         }
         writeln!(out, "每一輪的動作報告（{}）\n", log.path().display())?;
-        for line in sister_hands::replay_copy::recent_run_report_lines(&replay, limit) {
+        for line in sister_hands::replay_copy::recent_run_report_lines(
+            &replay,
+            limit,
+            &cmd(data_dir, "takeover --status"),
+        ) {
             writeln!(out, "{line}")?;
         }
         if !replay.unreadable.is_empty() {

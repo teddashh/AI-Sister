@@ -1234,3 +1234,116 @@ fn an_interrupted_run_is_not_resumed_and_its_done_step_is_left_out() {
         Some(ActionEvent::Concluded { .. })
     ));
 }
+
+/// `sister hands runs`：一次接手在報告上是一組——提議、回答和底下那一輪留在一起。
+/// 沒答應的提議自己收成一組：不會被下一次提議吞掉，也不會被讀成「紀錄斷了」。
+/// 提議之後就沒有下文的那一組，指路要指到**這一個**資料目錄的 `--status`。
+#[test]
+fn the_run_report_keeps_each_offer_with_its_answer_and_its_run() {
+    let dir = Tmp::new("takeover-report");
+    recording(&dir.0);
+    let desk = desk(vec![card(1, &open_url(A)), card(2, &open_url(B))]);
+    take_over(&dir.0, &desk, "不要\n");
+    let took = take_over(&dir.0, &desk, "好\n");
+    let (answered_at, run_id) = took
+        .events
+        .iter()
+        .find_map(|event| match event {
+            ActionEvent::HandoffAnswered {
+                at_ms,
+                answer: HandoffAnswer::Accepted { run_id },
+                ..
+            } => Some((*at_ms, run_id.clone())),
+            _ => None,
+        })
+        .expect("第二次他說好");
+    // 第三次：提議端出來了，行程在他回答之前就結束了——紀錄上只剩提議那一列。
+    let other = Tmp::new("takeover-report-unanswered");
+    recording(&other.0);
+    take_over(&other.0, &desk, "不要\n");
+    let offered_only = std::fs::read_to_string(ActionLog::in_data_dir(&other.0).path())
+        .unwrap()
+        .lines()
+        .next()
+        .unwrap()
+        .to_owned();
+    let path = ActionLog::in_data_dir(&dir.0).path().to_owned();
+    let mut log = std::fs::read_to_string(&path).unwrap();
+    log.push_str(&offered_only);
+    log.push('\n');
+    std::fs::write(&path, log).unwrap();
+
+    let mut text = Vec::new();
+    super::act::runs_to(&dir.0, 20, false, &mut text).unwrap();
+    let text = String::from_utf8(text).unwrap();
+    let groups: Vec<&str> = text.split("── 第 ").skip(1).collect();
+    let [declined, accepted, unanswered] = groups.as_slice() else {
+        panic!("應該是三組：{text}");
+    };
+    assert!(declined.contains("接手提議："), "{declined}");
+    assert!(declined.contains("他說不要；什麼都沒做"), "{declined}");
+    assert!(
+        !declined.contains("收尾："),
+        "說不要就收完了，不是紀錄斷了：{declined}"
+    );
+    assert!(accepted.contains("接手提議："), "{accepted}");
+    assert!(
+        accepted.contains(&format!("他說好；這一輪是 {run_id}")),
+        "{accepted}"
+    );
+    assert!(
+        accepted.contains("授權書就是上面提議的那一張"),
+        "{accepted}"
+    );
+    assert!(
+        accepted.contains(&format!("審計 ID：run={run_id}；")),
+        "{accepted}"
+    );
+    assert!(accepted.contains("第 2 步："), "{accepted}");
+    assert!(
+        !accepted.contains("這一輪的紀錄到這裡就沒有了"),
+        "{accepted}"
+    );
+    let status_cmd = super::cmd(&dir.0, "takeover --status");
+    assert!(status_cmd.contains("--data-dir"), "前提：這不是預設目錄");
+    assert!(
+        unanswered.contains(&format!(
+            "收尾：提議之後沒有回答那一列——可能還在等他回答，也可能那個行程在他回答之前就結束了；`{status_cmd}` 分得出是哪一種。"
+        )),
+        "{unanswered}"
+    );
+
+    let mut json = Vec::new();
+    super::act::runs_to(&dir.0, 20, true, &mut json).unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&json).unwrap();
+    let runs = json["runs"].as_array().unwrap();
+    assert_eq!(runs.len(), 3, "{json:#}");
+    let (declined, accepted, unanswered) = (&runs[0], &runs[1], &runs[2]);
+    assert_eq!(declined["handoff"]["answer"]["answer"], "declined");
+    assert_eq!(declined["complete"], true);
+    assert_eq!(declined["run_id"], serde_json::Value::Null);
+    assert_eq!(declined["summary"]["steps"], 0);
+    assert_eq!(accepted["handoff"]["answer"]["answer"], "accepted");
+    assert_eq!(accepted["handoff"]["answer"]["run_id"], run_id.as_str());
+    assert_eq!(accepted["run_id"], run_id.as_str());
+    assert_eq!(accepted["complete"], true);
+    assert_eq!(accepted["summary"]["steps"], 2);
+    assert_eq!(accepted["summary"]["succeeded"], 2);
+    assert_eq!(accepted["summary"]["approved_by_grant"], 2);
+    assert_eq!(accepted["handoff"]["left_out"], 0);
+    assert_ne!(
+        accepted["handoff"]["offered_at_ms"], answered_at,
+        "前提：提議和回答不是同一刻"
+    );
+    assert_eq!(
+        accepted["started_at_ms"], answered_at,
+        "開始是拿到授權書那一刻，和文字報告的「開始：」同一個時間"
+    );
+    assert_eq!(unanswered["complete"], false);
+    assert_eq!(unanswered["handoff"]["answer"], serde_json::Value::Null);
+    assert_eq!(
+        unanswered["handoff"]["answered_at_ms"],
+        serde_json::Value::Null
+    );
+    assert_eq!(unanswered["handoff"]["left_out"], 0);
+}
