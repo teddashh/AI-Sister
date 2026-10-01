@@ -806,7 +806,7 @@ alpha.113-aware desktop／CLI 也繼續在產品狀態前做 mutex → product e
 
 - [ ] 先各讓 alpha.113-aware installed desktop／recorder 穩定存活，再跑 silent／interactive
       Setup；silent 應在 mutation 前 exit 32，interactive 應顯示「重試／取消」並保留原 PID、
-      install root 與安裝登錄。從系統匣選「結束（記錄也會停）」（沒在記錄時只寫「結束」）
+      install root 與安裝登錄。從系統匣選「結束」開頭的那一項（正在記錄時寫成「結束（記錄也會停）」）
       或回終端機停掉 recorder，等它收工後在同一個 dialog 按 Retry，Setup 才應原地完成；
       Cancel 則釋放 mutex、保留舊安裝。
       recorder 活著時另跑 direct uninstaller，確認頁之後仍須拒絕。畫面不可出現 Tauri stock

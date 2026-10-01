@@ -789,8 +789,8 @@ expected_install_lock_unknown_copy = {
     "English": "AI-Sister could not establish or verify its installer safety lock. This operation stopped before changing AI-Sister program files or install registry entries; verify the current state and try again.",
 }
 expected_product_lifecycle_busy_copy = {
-    "TradChinese": "AI-Sister 仍在執行。若是桌面版，請從系統匣 AI-Sister 圖示的右鍵選單按「結束（記錄也會停）」（沒在記錄時這一項只寫「結束」）；若是在終端機啟動 AI-Sister 指令，請回原視窗停止。等它收工後按「重試」。這次操作尚未變更程式檔或安裝設定。",
-    "English": "AI-Sister is still running. Exit it from the AI-Sister system-tray menu with 「結束（記錄也會停）」 (Quit, recording stops too), which reads just 「結束」 when nothing is recording; if you started an AI-Sister command in a terminal, stop that command there. Wait for it to finish, then click Retry. This operation has not changed program files or install settings.",
+    "TradChinese": "AI-Sister 仍在執行。若是桌面版，請從系統匣 AI-Sister 圖示的右鍵選單按「結束」開頭的那一項（正在記錄時寫成「結束（記錄也會停）」）；若是在終端機啟動 AI-Sister 指令，請回原視窗停止。等它收工後按「重試」。這次操作尚未變更程式檔或安裝設定。",
+    "English": "AI-Sister is still running. Exit it from the AI-Sister system-tray menu with the item that starts with 「結束」 (Quit); while recording it reads 「結束（記錄也會停）」 (Quit, recording stops too); if you started an AI-Sister command in a terminal, stop that command there. Wait for it to finish, then click Retry. This operation has not changed program files or install settings.",
 }
 expected_separate_uninstall_copy = {
     "TradChinese": "Setup 不會在自己持有安裝安全鎖時巢狀執行另一支移除程式。請關閉 Setup，再從 Windows「已安裝的應用程式」移除目前版本；安裝較新版不必先移除，直接執行較新版 Setup 就會原地更新。",
