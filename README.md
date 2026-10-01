@@ -1,5 +1,7 @@
 # AI-Sister
 
+**繁體中文** · [English](README.en.md)
+
 > 一個站在桌面角落的姊妹。她一直都在，看得見你的一天，記得住細節，
 > 95% 的時間安靜，該說話的時候才說話——說的每一句都能點開證據。
 >
@@ -10,7 +12,9 @@
 > separate, default-off Azure TTS option can send only each newly completed
 > answer body after its own consent; manual replay sends it again. Local speech remains the default.
 
-**Status: v0.1.0-alpha.143**
+**專案介紹頁：** https://teddashh.github.io/AI-Sister/ · 英文版 https://teddashh.github.io/AI-Sister/en/
+
+**Status: v0.1.0-alpha.170**
 
 AI-Sister 已完成本機記錄、OCR、L0–L3 記憶、本機 RAG、逐句可點出處，以及 Claude Code、
 Codex、Gemini CLI、Grok CLI 四種大腦登入。四姊妹與 13 位閨密共 17 位；角色圖、

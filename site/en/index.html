@@ -1,0 +1,329 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="AI-Sister is local-first desktop memory. Windows and Ubuntu 24.04 X11 have public installers; the native macOS 14+ build has no public installer yet."
+    />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; style-src 'self'; script-src 'self'; img-src 'self'; connect-src 'none'; font-src 'none'; media-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+    />
+    <meta name="theme-color" content="#f4eadb" />
+    <title>AI-Sister: remembers what you were doing yesterday</title>
+    <link rel="canonical" href="https://teddashh.github.io/AI-Sister/en/" />
+    <link rel="alternate" hreflang="zh-Hant" href="https://teddashh.github.io/AI-Sister/" />
+    <link rel="alternate" hreflang="en" href="https://teddashh.github.io/AI-Sister/en/" />
+    <link rel="alternate" hreflang="x-default" href="https://teddashh.github.io/AI-Sister/en/" />
+    <link rel="stylesheet" href="../styles.css" />
+    <script src="../site.js" defer></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#main">Skip to main content</a>
+
+    <header class="topbar">
+      <a class="wordmark" href="#top" aria-label="AI-Sister home">
+        <span class="wordmark-mark" aria-hidden="true">AI·S</span>
+        <span>AI-Sister</span>
+      </a>
+      <nav aria-label="Main">
+        <a href="#memory">Memory</a>
+        <a href="#personas">Characters</a>
+        <a href="#privacy">Privacy</a>
+        <a href="#skills">Agent Skills</a>
+        <a class="nav-download" href="#download">Download</a>
+      </nav>
+      <nav class="lang-switch" aria-label="Language">
+        <a href="../" hreflang="zh-Hant" lang="zh-Hant" rel="alternate" title="繁體中文">繁中</a>
+        <span aria-current="true">EN</span>
+      </nav>
+    </header>
+
+    <main id="main">
+      <section class="hero" id="top">
+        <div class="hero-copy">
+          <p class="eyebrow"><span></span> Windows + Linux X11 · no macOS 14+ installer yet</p>
+          <h1>What were you doing yesterday?<br /><em>Ask her.</em></h1>
+          <p class="hero-lede">
+            AI-Sister quietly watches you work and keeps the details on your screen on this computer.
+            When you need a phone number, an amount, a URL, or the spot where you got stuck yesterday,
+            she answers in seconds, and every sentence opens to its evidence.
+          </p>
+          <div class="hero-actions">
+            <a class="button button-primary" href="__WINDOWS_DOWNLOAD_URL__">
+              <span>Download for Windows</span>
+              <span aria-hidden="true">↓</span>
+            </a>
+            <a class="button button-quiet" href="__LINUX_DOWNLOAD_URL__">
+              Linux X11 .deb <span aria-hidden="true">↓</span>
+            </a>
+            <a class="button button-quiet" href="#platforms">
+              macOS status <span aria-hidden="true">→</span>
+            </a>
+            <a class="button button-quiet" href="https://github.com/teddashh/AI-Sister">
+              View source <span aria-hidden="true">↗</span>
+            </a>
+          </div>
+          <p class="release-line">__TAG__ · Windows 10+ · Ubuntu 24.04 X11 · macOS 14+: no public installer yet · Apache-2.0 · Interface in Traditional Chinese, voices in Mandarin</p>
+        </div>
+
+        <div class="hero-product" aria-label="AI-Sister interface preview">
+          <div class="orbit orbit-one" aria-hidden="true"></div>
+          <div class="orbit orbit-two" aria-hidden="true"></div>
+          <article class="desktop-card">
+            <header class="desktop-chrome">
+              <span>AI-Sister</span>
+              <span class="chrome-status"><i></i> Listening</span>
+              <span aria-hidden="true">−　×</span>
+            </header>
+            <div class="desktop-body">
+              <figure class="hero-persona">
+                <img
+                  data-hero-persona
+                  data-hero-alt="Full-body art of {name}"
+                  src="../assets/personas/chatgpt.webp"
+                  alt="Full-body art of ChatGPT"
+                  width="640"
+                  height="640"
+                />
+                <figcaption data-hero-persona-name>ChatGPT</figcaption>
+              </figure>
+              <div class="memory-answer">
+                <p class="question">Where did I leave the checkout page yesterday?</p>
+                <div class="answer-card">
+                  <span class="answer-kicker">She remembers</span>
+                  <p>You got webhook retries working. The last screen shows the tests passing; next up is the refund case.</p>
+                  <div class="evidence-list">
+                    <span>Yesterday 16:08 · VS Code</span>
+                    <span>Yesterday 16:21 · Terminal</span>
+                  </div>
+                </div>
+                <div class="ask-preview">
+                  <span>Ask something else…</span><b aria-hidden="true">→</b>
+                </div>
+              </div>
+            </div>
+          </article>
+          <aside class="proof-note proof-note-top" aria-hidden="true">
+            <b>Every sentence has a source</b><span>not a guess</span>
+          </aside>
+          <aside class="proof-note proof-note-bottom" aria-hidden="true">
+            <b>95% quiet</b><span>speaks only<br />when needed</span>
+          </aside>
+        </div>
+      </section>
+
+      <section class="trust-strip" aria-label="Key facts">
+        <p><b>0</b><span>screenshots sent to the cloud</span></p>
+        <p><b>&lt;100ms</b><span>local recall target</span></p>
+        <p><b>17</b><span>offline characters</span></p>
+        <p><b>544</b><span>bundled everyday voice lines</span></p>
+      </section>
+
+      <section class="section memory-section" id="memory">
+        <div class="section-heading">
+          <p class="eyebrow"><span></span> Not another chat window</p>
+          <h2>She doesn't make you ask twice.<br />She <span>remembers for you.</span></h2>
+          <p>No model rewrites the raw evidence. Her understanding can be corrected and a memory can be closed out; the screen you open is the final word.</p>
+        </div>
+
+        <div class="memory-grid">
+          <article class="feature-card feature-evidence">
+            <span class="feature-index">01</span>
+            <div class="mini-timeline" aria-hidden="true">
+              <span><i></i><b>14:06</b> Support line 0800-…</span>
+              <span><i></i><b>15:32</b> Invoice total NT$ 4,280</span>
+              <span><i></i><b>16:21</b> webhook tests passed</span>
+            </div>
+            <h3>Evidence first, understanding second</h3>
+            <p>OCR text, phone numbers, amounts, URLs, and times stay in SQLite; answers link to the local screen they came from.</p>
+          </article>
+
+          <article class="feature-card feature-brain">
+            <span class="feature-index">02</span>
+            <div class="brain-switch" aria-label="Supported CLI brains">
+              <span>Claude Code</span><span>Codex</span><span>Gemini</span><span>Grok</span>
+            </div>
+            <h3>The brain is a CLI you already have</h3>
+            <p>AI-Sister isn't tied to one model vendor. Every typed question goes first to the CLI you picked last; it decides how to search, and AI-Sister runs the search locally.</p>
+          </article>
+
+          <article class="feature-card feature-quiet">
+            <span class="feature-index">03</span>
+            <div class="quiet-meter" aria-hidden="true">
+              <span class="quiet-block active"></span><span></span><span></span><span></span><span></span>
+              <span></span><span></span><span></span><span></span><span></span><b>95% quiet</b>
+            </div>
+            <h3>Silence is a feature</h3>
+            <p>She speaks up only with evidence, when the interruption is worth it, and within budget. The rest of the time she stays in the corner of your desktop.</p>
+          </article>
+        </div>
+      </section>
+
+      <section class="section persona-section" id="personas">
+        <div class="persona-copy">
+          <p class="eyebrow"><span></span> Four sisters + 13 friends</p>
+          <h2>Same memory,<br /><span>pick who shows up.</span></h2>
+          <p>
+            17 transparent full-body workplace rigs, 17 fallback images, and 32 everyday voice lines per character
+            all install with the app. Switching characters changes neither the facts in an answer nor the evidence.
+          </p>
+          <div class="persona-counts"><b>8</b> base <i>+</i> <b>24</b> expansion <i>×</i> <b>17</b> characters</div>
+        </div>
+
+        <div class="persona-picker" aria-label="Choose a character to preview">
+          <p>Tap one to preview</p>
+          <div class="persona-buttons">
+            <button class="selected" type="button" data-persona="chatgpt" data-name="ChatGPT" aria-pressed="true"><img src="../assets/personas/chatgpt.webp" alt="ChatGPT" width="640" height="640" /></button>
+            <button type="button" data-persona="claude" data-name="Claude" aria-pressed="false"><img src="../assets/personas/claude.webp" alt="Claude" width="640" height="640" /></button>
+            <button type="button" data-persona="gemini" data-name="Gemini" aria-pressed="false"><img src="../assets/personas/gemini.webp" alt="Gemini" width="640" height="640" /></button>
+            <button type="button" data-persona="grok" data-name="Grok" aria-pressed="false"><img src="../assets/personas/grok.webp" alt="Grok" width="640" height="640" /></button>
+            <button type="button" data-persona="deepseek" data-name="DeepSeek" aria-pressed="false"><img src="../assets/personas/deepseek.webp" alt="DeepSeek" width="640" height="640" /></button>
+            <button type="button" data-persona="qwen" data-name="Qwen" aria-pressed="false"><img src="../assets/personas/qwen.webp" alt="Qwen" width="640" height="640" /></button>
+            <button type="button" data-persona="mistral" data-name="Mistral" aria-pressed="false"><img src="../assets/personas/mistral.webp" alt="Mistral" width="640" height="640" /></button>
+            <button type="button" data-persona="venice" data-name="Llama" aria-pressed="false"><img src="../assets/personas/venice.webp" alt="Llama" width="640" height="640" /></button>
+            <button type="button" data-persona="sakana" data-name="Sakana" aria-pressed="false"><img src="../assets/personas/sakana.webp" alt="Sakana" width="640" height="640" /></button>
+            <button type="button" data-persona="perplexity" data-name="Perplexity" aria-pressed="false"><img src="../assets/personas/perplexity.webp" alt="Perplexity" width="640" height="640" /></button>
+            <button type="button" data-persona="glm" data-name="GLM" aria-pressed="false"><img src="../assets/personas/glm.webp" alt="GLM" width="640" height="640" /></button>
+            <button type="button" data-persona="kimi" data-name="Kimi" aria-pressed="false"><img src="../assets/personas/kimi.webp" alt="Kimi" width="640" height="640" /></button>
+            <button type="button" data-persona="hunyuan" data-name="Hunyuan" aria-pressed="false"><img src="../assets/personas/hunyuan.webp" alt="Hunyuan" width="640" height="640" /></button>
+            <button type="button" data-persona="minimax" data-name="MiniMax" aria-pressed="false"><img src="../assets/personas/minimax.webp" alt="MiniMax" width="640" height="640" /></button>
+            <button type="button" data-persona="nemotron" data-name="Nemotron" aria-pressed="false"><img src="../assets/personas/nemotron.webp" alt="Nemotron" width="640" height="640" /></button>
+            <button type="button" data-persona="cohere" data-name="Cohere" aria-pressed="false"><img src="../assets/personas/cohere.webp" alt="Cohere" width="640" height="640" /></button>
+            <button type="button" data-persona="mimo" data-name="MiMo" aria-pressed="false"><img src="../assets/personas/mimo.webp" alt="MiMo" width="640" height="640" /></button>
+          </div>
+          <p class="picker-note"><span data-picker-name>ChatGPT</span> · art and fixed voice lines stay on this machine</p>
+        </div>
+      </section>
+
+      <section class="section privacy-section" id="privacy">
+        <div class="section-heading privacy-heading">
+          <p class="eyebrow light"><span></span> Boundaries you can see</p>
+          <h2>Memory stays on this computer.<br />Each door <span>opens on its own and closes anytime.</span></h2>
+        </div>
+
+        <div class="privacy-flow">
+          <article>
+            <span class="flow-number">1</span>
+            <h3>Eyes</h3>
+            <p>Screens, OCR text, times, and window context stay on this machine.</p>
+            <b>Local data</b>
+          </article>
+          <i aria-hidden="true">→</i>
+          <article>
+            <span class="flow-number">2</span>
+            <h3>Memory</h3>
+            <p>SQLite stays local; the CLI can only ask for natural-language searches.</p>
+            <b>Searched locally</b>
+          </article>
+          <i aria-hidden="true">→</i>
+          <article>
+            <span class="flow-number">3</span>
+            <h3>Brain</h3>
+            <p>Only after you explicitly agree do your question and the matching original text go to the CLI you chose.</p>
+            <b>Your own CLI</b>
+          </article>
+          <i aria-hidden="true">→</i>
+          <article>
+            <span class="flow-number">4</span>
+            <h3>Voice</h3>
+            <p>Character voices work offline; Azure read-aloud for new answers has its own separate switch.</p>
+            <b>No fallback either way</b>
+          </article>
+        </div>
+
+        <div class="consent-line">
+          <span>Local recording</span><span>CLI reading</span><span>Frame storage</span><span>Azure read-aloud</span>
+          <p>Four consents, four separate boundaries.</p>
+        </div>
+      </section>
+
+      <section class="section skills-section" id="skills">
+        <div class="section-heading">
+          <p class="eyebrow"><span></span> Claude Code + Codex</p>
+          <h2>Ask from your coding agent,<br />and the <span>sources come back too.</span></h2>
+          <p>
+            Both entry points call <code>sister query --json</code> on your computer and bring the matching text, time,
+            app, window title, and frame number back into the current conversation.
+          </p>
+        </div>
+
+        <div class="skill-grid">
+          <article class="skill-card">
+            <span class="skill-agent">Anthropic</span>
+            <h3>Claude Code Skill</h3>
+            <p>After installing, type <code>/ai-sister-memory</code>, then say which memory you're looking for.</p>
+            <code class="skill-path">~/.claude/skills/ai-sister-memory/</code>
+            <a class="button button-primary" href="https://github.com/teddashh/AI-Sister/tree/__TAG__/.claude/skills/ai-sister-memory">
+              Claude Code skill <span aria-hidden="true">↗</span>
+            </a>
+          </article>
+          <article class="skill-card">
+            <span class="skill-agent">OpenAI</span>
+            <h3>Codex Skill</h3>
+            <p>After installing, type <code>$ai-sister-memory</code>, then say which memory you're looking for.</p>
+            <code class="skill-path">~/.agents/skills/ai-sister-memory/</code>
+            <a class="button button-primary" href="https://github.com/teddashh/AI-Sister/tree/__TAG__/.agents/skills/ai-sister-memory">
+              Codex skill <span aria-hidden="true">↗</span>
+            </a>
+          </article>
+        </div>
+        <p class="skill-boundary">
+          The skill runs only when you explicitly ask it to search your AI-Sister memory. It won't sign consents,
+          start recording, delete anything, or operate your computer. The text and source fields a query returns
+          enter the current agent conversation; screenshot bytes don't.
+        </p>
+      </section>
+
+      <section class="section start-section" id="download">
+        <div class="start-copy">
+          <p class="eyebrow"><span></span> Three steps</p>
+          <h2>Install, consent, <span>then ask her.</span></h2>
+        </div>
+        <ol class="steps">
+          <li><span>01</span><div><b>Download the installer</b><p>Setup for Windows, the .deb for Ubuntu 24.04 X11. macOS has no public installer yet. The app itself is in Traditional Chinese.</p></div></li>
+          <li><span>02</span><div><b>Choose your consents</b><p>Turn on local recording first; decide on frame storage and CLI reading separately.</p></div></li>
+          <li><span>03</span><div><b>Start asking</b><p>Ask what you were doing yesterday. Every fact comes with its source.</p></div></li>
+        </ol>
+        <div class="platform-grid" id="platforms" aria-label="Download status by platform">
+          <article class="platform-card">
+            <div><h3>Windows 10+</h3><span class="platform-ready">Available</span></div>
+            <p>Setup includes the desktop app, the CLI, and the WebView2 offline installer.</p>
+          </article>
+          <article class="platform-card">
+            <div><h3>Ubuntu 24.04 X11</h3><span class="platform-ready">Available</span></div>
+            <p>The .deb installs the desktop app, the CLI, AT-SPI, and local Tesseract.</p>
+          </article>
+          <article class="platform-card platform-macos">
+            <div><h3>macOS 14+</h3><span>No public installer yet</span></div>
+            <p>The native build joins a release only after it passes Developer ID notarization and on-device permission and memory acceptance tests.</p>
+          </article>
+        </div>
+        <div class="download-panel">
+          <div><span>Current version</span><b>__VERSION__</b></div>
+          <div class="download-actions">
+            <a class="button button-primary" href="__WINDOWS_DOWNLOAD_URL__">Windows <span aria-hidden="true">↓</span></a>
+            <a class="button button-quiet" href="__LINUX_DOWNLOAD_URL__">Linux X11 <span aria-hidden="true">↓</span></a>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <footer>
+      <div class="footer-brand">
+        <span class="wordmark-mark" aria-hidden="true">AI·S</span>
+        <div><b>AI-Sister</b><p>A desktop sister who remembers, finds it again, and stops when told.</p></div>
+      </div>
+      <div class="footer-links">
+        <a href="https://github.com/teddashh/AI-Sister">GitHub</a>
+        <a href="https://github.com/teddashh/AI-Sister/releases">Releases</a>
+        <a href="https://github.com/teddashh/AI-Sister/blob/main/docs/PRIVACY.md">Privacy boundaries</a>
+        <a href="https://github.com/teddashh/AI-Sister/blob/main/docs/WINDOWS-CODE-SIGNING.md">Code signing</a>
+        <a href="../assets/personas/NOTICE.md">Character assets</a>
+      </div>
+      <p class="footer-meta">Open source · Local-first · Windows + Linux X11 · macOS 14+ status</p>
+    </footer>
+  </body>
+</html>

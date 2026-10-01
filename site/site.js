@@ -10,11 +10,14 @@
     return;
   }
 
+  // 中文頁與 en/ 共用這一支：替代文字的句型由各頁的 data-hero-alt 提供。
+  const altTemplate = hero.dataset.heroAlt || "{name}";
+
   for (const button of buttons) {
     button.addEventListener("click", () => {
-      const id = button.dataset.persona;
       const name = button.dataset.name;
-      if (!id || !name) return;
+      const image = button.querySelector("img");
+      if (!name || !(image instanceof HTMLImageElement)) return;
 
       for (const candidate of buttons) {
         const selected = candidate === button;
@@ -22,8 +25,9 @@
         candidate.setAttribute("aria-pressed", String(selected));
       }
 
-      hero.src = `./assets/personas/${id}.webp`;
-      hero.alt = `${name} 角色全身圖`;
+      // 用按鈕裡那張圖已解析好的網址，不自己拼 ./assets/…：en/ 底下的相對路徑不同。
+      hero.src = image.src;
+      hero.alt = altTemplate.replace("{name}", name);
       heroName.textContent = name;
       pickerName.textContent = name;
     });
