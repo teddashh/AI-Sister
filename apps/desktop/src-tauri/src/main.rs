@@ -242,6 +242,23 @@ const AZURE_TTS_NO_ACTIVE_GENERATION: u64 = u64::MAX;
 // JavaScript Number 能無損表示的最大整數；跨 IPC 的 generation 永遠留在這個範圍。
 const AZURE_TTS_MAX_GENERATION: u64 = 9_007_199_254_740_991;
 
+/// 把 generation 原子地推進一格，下一格由 `next` 依目前的值決定。
+/// 等同 `fetch_update(AcqRel, Acquire, |current| Some(next(current)))`。Rust 1.99
+/// 起 `fetch_update` 標成 deprecated（改名 `try_update`），但 `rust-version` 宣告的
+/// 1.88 還沒有 `try_update`，所以直接寫同一個 compare-exchange 迴圈，新舊兩版都
+/// 不用關 lint。
+fn advance_generation(generation: &AtomicU64, next: impl Fn(u64) -> u64) {
+    let mut current = generation.load(Ordering::Acquire);
+    while let Err(actual) = generation.compare_exchange_weak(
+        current,
+        next(current),
+        Ordering::AcqRel,
+        Ordering::Acquire,
+    ) {
+        current = actual;
+    }
+}
+
 impl Shell {
     fn persist(&self) {
         let snapshot = *self.state.lock().expect("pet state");
@@ -5581,11 +5598,7 @@ fn next_azure_tts_generation(current: u64) -> u64 {
 fn stop_azure_tts_intent(app: &tauri::AppHandle, shell: &Shell) {
     {
         let _transition = azure_tts_transition(shell);
-        let _ = shell.azure_tts_generation.fetch_update(
-            Ordering::AcqRel,
-            Ordering::Acquire,
-            |current| Some(next_azure_tts_generation(current)),
-        );
+        advance_generation(&shell.azure_tts_generation, next_azure_tts_generation);
     }
     let _ = app.emit("azure-tts-stop", ());
 }
@@ -6020,6 +6033,15 @@ mod azure_tts_mapping_tests {
             &active,
         ));
         assert_eq!(generation.load(Ordering::Acquire), 1);
+    }
+
+    #[test]
+    fn stop_intent_advances_one_step_and_wraps_inside_the_renderer_safe_range() {
+        let generation = AtomicU64::new(AZURE_TTS_MAX_GENERATION - 1);
+        advance_generation(&generation, next_azure_tts_generation);
+        assert_eq!(generation.load(Ordering::Acquire), AZURE_TTS_MAX_GENERATION);
+        advance_generation(&generation, next_azure_tts_generation);
+        assert_eq!(generation.load(Ordering::Acquire), 0);
     }
 
     #[test]

@@ -61,11 +61,7 @@ pub fn stop_intent(runtime: &Runtime) {
         .transition
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let _ = runtime
-        .generation
-        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
-            Some(next_generation(current))
-        });
+    crate::advance_generation(&runtime.generation, next_generation);
 }
 
 pub fn read_view(runtime: &Runtime, data_dir: Option<&Path>, stopped: bool) -> UsageStatusView {

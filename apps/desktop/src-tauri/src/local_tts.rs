@@ -4,7 +4,7 @@
 
 use crate::{
     AZURE_TTS_MAX_GENERATION, AZURE_TTS_NO_ACTIVE_GENERATION, Shell, admit_desktop_brain,
-    config_path, hold_presentation,
+    advance_generation, config_path, hold_presentation,
 };
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
@@ -171,11 +171,7 @@ fn stop_intent(app: &tauri::AppHandle, shell: &Shell) {
     {
         let _transition = transition(shell);
         cancel_clients(shell);
-        let _ = shell.local_tts.generation.fetch_update(
-            Ordering::AcqRel,
-            Ordering::Acquire,
-            |current| Some(next_generation(current)),
-        );
+        advance_generation(&shell.local_tts.generation, next_generation);
     }
     let _ = app.emit("local-tts-stop", ());
 }
