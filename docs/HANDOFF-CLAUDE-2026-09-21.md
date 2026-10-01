@@ -3540,3 +3540,17 @@ Ted 要 Phase 7 往下推。37.7 留下的兩格退場條件都還沒開工；�
 - 白名單 #2（文件整理類）：需要會搬動檔案的動作，要做就連 scope 與驗收整條一起做。
 - `run_with_stdin_kind` 在終端機那一側接上真的 stdin 與 `PlatformExecutor`，沒有測試走到；
   和 `sister do` 同一個形狀。沒在 Windows 真機跑過 `sister takeover`。
+
+### 38.5 alpha.170 的出貨收據
+
+- 閘門：`/home/ted-h/tmp-tests/gates-all.sh` 在 detached `a3cbc7e0` 上 51/53，紅的是 clippy 與
+  `check-windows.sh`（38.3 那三條 lint）；修完之後在 detached `cb340280` 上 53/53 綠
+  （樹 `709c9cce2747eec8`）。
+- main 的 CI（run 36787100207，`cb340280`）六個 job 全綠，Release 與 Website 只在 tag 上跑。
+  Windows job 上接手測試 45 條（迴路 24、情境 20、表格 1）都真的跑到而且綠。
+- tag：`v0.1.0-alpha.170` 打在 `cb340280`，等 main 那趟 CI 全綠之後才打。tag 那趟 CI
+  （run 36853955009）八個 job 全綠，含 Release 與 Website；2026-10-01T12:07:22Z 發布為
+  prerelease。四個 asset 和 alpha.169 同一組：`AI-Sister-Setup.exe`、`sister.exe`、
+  `sister-desktop.exe`、`AI-Sister-Linux-X11-amd64.deb`。release body 的前綴和
+  `./scripts/release-notes.sh v0.1.0-alpha.170` 的輸出逐字相同，後面只接了 GitHub 自動加的
+  Full Changelog。
