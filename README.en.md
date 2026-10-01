@@ -162,8 +162,9 @@ diagnostic fallback files:
 
 The installer has no built-in auto-update. To upgrade, you download the new `AI-Sister-Setup.exe` and
 install it in place. If a desktop app or recorder from alpha.113 or later is still running, the GUI
-Setup stops at Retry/Cancel and tells you to quit AI-Sister from the system tray or stop the command
-in its terminal. Once the process has exited, pressing Retry measures the product lock again, so you
+Setup stops at Retry/Cancel and tells you to choose 「結束（記錄也會停）」 ("Quit (recording stops too)")
+in the system tray menu (it reads just 「結束」 when nothing is recording) or to stop the command in
+its terminal. Once the process has exited, pressing Retry measures the product lock again, so you
 don't need to close and reopen Setup, and it never force-kills the recorder; silent `/S` still exits
 with 32. alpha.115 uses a pinned tauri-bundler 2.9.4 custom NSIS template; Setup never runs the
 installed NSIS uninstaller nested inside itself. For a same-version repair or an upgrade from an older

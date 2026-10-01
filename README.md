@@ -120,7 +120,7 @@ WAL 工作檔當成每天永久長大，所以**不拿來作 Phase 0 判決**；
 
 installer 沒有內建自動更新。升級時由使用者下載新 `AI-Sister-Setup.exe` 原地安裝；若
 alpha.113 之後的 desktop 或 recorder 還活著，GUI Setup 會停在「重試／取消」，直接指出從系統匣選
-「結束 AI-Sister」或回終端機停止指令。等程序收工後按「重試」就會重新量產品鎖，不必關掉
+「結束（記錄也會停）」（沒在記錄時只寫「結束」）或回終端機停止指令。等程序收工後按「重試」就會重新量產品鎖，不必關掉
 再重開 Setup，也不會強殺 recorder；silent `/S` 維持 exit 32。alpha.115 使用 pinned tauri-bundler 2.9.4 custom
 NSIS template；Setup 絕不巢狀執行已安裝的 NSIS uninstaller。同版 repair 或舊版升新版時，
 它在 `.onInit` 取得 lifecycle mutex，綁定 current-user 產品鍵所記的 exact root，
