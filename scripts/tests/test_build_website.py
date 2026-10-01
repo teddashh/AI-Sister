@@ -7,6 +7,7 @@ import importlib.util
 import json
 import re
 import pathlib
+import shutil
 import tempfile
 import unittest
 
@@ -17,6 +18,15 @@ assert SPEC is not None and SPEC.loader is not None
 MODULE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MODULE)
 
+PAGES_URL = "https://teddashh.github.io/AI-Sister/"
+
+
+def one(pattern: str, html: str) -> str:
+    found = re.findall(pattern, html)
+    if len(found) != 1:
+        raise AssertionError(f"{pattern!r} 應恰好出現一次，實際 {len(found)} 次")
+    return found[0]
+
 
 class WebsiteBuildTests(unittest.TestCase):
     def test_build_binds_current_release_and_all_personas(self) -> None:
@@ -25,24 +35,31 @@ class WebsiteBuildTests(unittest.TestCase):
             MODULE.build(output)
 
             version = MODULE.product_version()
-            html = (output / "index.html").read_text(encoding="utf-8")
-            self.assertIn(f"v{version}", html)
-            self.assertIn(
-                f"/releases/download/v{version}/AI-Sister-Setup.exe", html
-            )
-            self.assertIn(
-                f"/releases/download/v{version}/AI-Sister-Linux-X11-amd64.deb",
-                html,
-            )
-            self.assertIn("macOS 14+", html)
-            self.assertIn("尚無公開安裝檔", html)
-            self.assertIn(
-                f"/tree/v{version}/.claude/skills/ai-sister-memory", html
-            )
-            self.assertIn(
-                f"/tree/v{version}/.agents/skills/ai-sister-memory", html
-            )
-            self.assertFalse(any(token in html for token in MODULE.TOKENS))
+            self.assertEqual(sorted(MODULE.PAGES), ["en/index.html", "index.html"])
+            pages = {
+                page: (output / page).read_text(encoding="utf-8")
+                for page in MODULE.PAGES
+            }
+            for page, html in pages.items():
+                with self.subTest(page=page):
+                    self.assertIn(f"v{version}", html)
+                    self.assertIn(
+                        f"/releases/download/v{version}/AI-Sister-Setup.exe", html
+                    )
+                    self.assertIn(
+                        f"/releases/download/v{version}/AI-Sister-Linux-X11-amd64.deb",
+                        html,
+                    )
+                    self.assertIn("macOS 14+", html)
+                    self.assertIn(
+                        f"/tree/v{version}/.claude/skills/ai-sister-memory", html
+                    )
+                    self.assertIn(
+                        f"/tree/v{version}/.agents/skills/ai-sister-memory", html
+                    )
+                    self.assertFalse(any(token in html for token in MODULE.TOKENS))
+            self.assertIn("尚無公開安裝檔", pages["index.html"])
+            self.assertIn("No public installer yet", pages["en/index.html"])
 
             claude_skill = (
                 MODULE.ROOT / ".claude/skills/ai-sister-memory/SKILL.md"
@@ -108,6 +125,106 @@ class WebsiteBuildTests(unittest.TestCase):
                 sorted([*listed, "NOTICE.md", "manifest.json"]),
                 "NOTICE 說這裡只有那些檔案，而公開的資料夾裡不是",
             )
+
+    def test_both_languages_point_at_each_other_and_share_one_page(self) -> None:
+        """英文頁是中文頁的翻譯，不是另一個網站：同一組 CSP、同一組段落與角色、
+        同樣多的下載連結，hreflang 與頁首的 繁中／EN 互相指到對方。"""
+        with tempfile.TemporaryDirectory() as directory:
+            output = pathlib.Path(directory) / "site"
+            MODULE.build(output)
+            zh = (output / "index.html").read_text(encoding="utf-8")
+            en = (output / "en/index.html").read_text(encoding="utf-8")
+
+            self.assertEqual(one(r'<html lang="([^"]+)"', zh), "zh-Hant")
+            self.assertEqual(one(r'<html lang="([^"]+)"', en), "en")
+
+            csp = r'http-equiv="Content-Security-Policy"\s+content="([^"]+)"'
+            self.assertEqual(one(csp, en), one(csp, zh))
+            self.assertIn("script-src 'self'", one(csp, zh))
+
+            alternates = r'<link rel="alternate" hreflang="([^"]+)" href="([^"]+)"'
+            expected = {
+                "zh-Hant": PAGES_URL,
+                "en": f"{PAGES_URL}en/",
+                "x-default": f"{PAGES_URL}en/",
+            }
+            for html in (zh, en):
+                pairs = re.findall(alternates, html)
+                self.assertEqual(len(pairs), len(expected))
+                self.assertEqual(dict(pairs), expected)
+            self.assertEqual(one(r'<link rel="canonical" href="([^"]+)"', zh), PAGES_URL)
+            self.assertEqual(
+                one(r'<link rel="canonical" href="([^"]+)"', en), f"{PAGES_URL}en/"
+            )
+
+            switch = r'<nav class="lang-switch"[^>]*>(.*?)</nav>'
+            zh_switch = one(switch, zh.replace("\n", " "))
+            en_switch = one(switch, en.replace("\n", " "))
+            self.assertIn('<span aria-current="true">繁中</span>', zh_switch)
+            self.assertIn('<a href="./en/" hreflang="en"', zh_switch)
+            self.assertIn('<span aria-current="true">EN</span>', en_switch)
+            self.assertIn('<a href="../" hreflang="zh-Hant"', en_switch)
+
+            for pattern in (
+                r'<section[^>]*\bid="([^"]+)"',
+                r'(?<![\w-])id="([^"]+)"',
+                r'data-persona="([a-z0-9]+)"',
+                r'href="(#[^"]+)"',
+            ):
+                with self.subTest(pattern=pattern):
+                    self.assertEqual(re.findall(pattern, en), re.findall(pattern, zh))
+            for url in ("AI-Sister-Setup.exe", "AI-Sister-Linux-X11-amd64.deb"):
+                self.assertEqual(en.count(url), zh.count(url))
+
+            for html in (zh, en):
+                self.assertIn('href="https://github.com/teddashh/AI-Sister/releases"', html)
+            self.assertIn('src="../assets/personas/chatgpt.webp"', en)
+            self.assertIn('href="../styles.css"', en)
+            self.assertIn('src="../site.js"', en)
+
+    def test_every_page_gets_the_same_build_guarantees(self) -> None:
+        """每一條只對 index.html 成立的檢查，對 en/index.html 也要紅得起來。"""
+
+        def drop_linux_link(html: str) -> str:
+            return html.replace("__LINUX_DOWNLOAD_URL__", "#download")
+
+        def drop_one_persona(html: str) -> str:
+            return re.sub(r'\s*<button[^>]*data-persona="mimo".*?</button>', "", html, flags=re.S)
+
+        def point_at_a_missing_file(html: str) -> str:
+            return html.replace('href="../styles.css"', 'href="../style.css"')
+
+        def break_an_anchor(html: str) -> str:
+            return html.replace('href="#privacy"', 'href="#boundaries"')
+
+        cases = [
+            ("缺少 __LINUX_DOWNLOAD_URL__", drop_linux_link),
+            ("picker 與 persona manifest 不符", drop_one_persona),
+            ("output 裡沒有的檔案：../style.css", point_at_a_missing_file),
+            ("#boundaries 在同一頁找不到 id", break_an_anchor),
+        ]
+        for message, mutate in cases:
+            with self.subTest(message=message), tempfile.TemporaryDirectory() as raw:
+                source = pathlib.Path(raw) / "source"
+                shutil.copytree(MODULE.SOURCE, source)
+                page = source / "en/index.html"
+                before = page.read_text(encoding="utf-8")
+                after = mutate(before)
+                self.assertNotEqual(after, before, "這一刀沒有切到東西")
+                page.write_text(after, encoding="utf-8")
+                with self.assertRaisesRegex(ValueError, re.escape(message)):
+                    MODULE.build(pathlib.Path(raw) / "site", source=source)
+
+        for stray in ("fr/index.html", "en/draft.html"):
+            with self.subTest(stray=stray), tempfile.TemporaryDirectory() as raw:
+                source = pathlib.Path(raw) / "source"
+                shutil.copytree(MODULE.SOURCE, source)
+                (source / stray).parent.mkdir(parents=True, exist_ok=True)
+                (source / stray).write_text("<!doctype html>", encoding="utf-8")
+                output = pathlib.Path(raw) / "site"
+                with self.assertRaisesRegex(ValueError, "發布白名單不符"):
+                    MODULE.build(output, source=source)
+                self.assertFalse(output.exists())
 
     def test_existing_output_is_never_overwritten(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

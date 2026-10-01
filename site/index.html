@@ -12,7 +12,11 @@
       content="default-src 'none'; style-src 'self'; script-src 'self'; img-src 'self'; connect-src 'none'; font-src 'none'; media-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
     />
     <meta name="theme-color" content="#f4eadb" />
-    <title>AI-Sister — 記得你昨天在做什麼</title>
+    <title>AI-Sister：記得你昨天在做什麼</title>
+    <link rel="canonical" href="https://teddashh.github.io/AI-Sister/" />
+    <link rel="alternate" hreflang="zh-Hant" href="https://teddashh.github.io/AI-Sister/" />
+    <link rel="alternate" hreflang="en" href="https://teddashh.github.io/AI-Sister/en/" />
+    <link rel="alternate" hreflang="x-default" href="https://teddashh.github.io/AI-Sister/en/" />
     <link rel="stylesheet" href="./styles.css" />
     <script src="./site.js" defer></script>
   </head>
@@ -30,6 +34,10 @@
         <a href="#privacy">本機邊界</a>
         <a href="#skills">Agent Skills</a>
         <a class="nav-download" href="#download">下載</a>
+      </nav>
+      <nav class="lang-switch" aria-label="語言">
+        <span aria-current="true">繁中</span>
+        <a href="./en/" hreflang="en" lang="en" rel="alternate" title="English">EN</a>
       </nav>
     </header>
 
@@ -67,12 +75,13 @@
             <header class="desktop-chrome">
               <span>AI-Sister</span>
               <span class="chrome-status"><i></i> 在聽</span>
-              <span aria-hidden="true">—　×</span>
+              <span aria-hidden="true">−　×</span>
             </header>
             <div class="desktop-body">
               <figure class="hero-persona">
                 <img
                   data-hero-persona
+                  data-hero-alt="{name} 角色全身圖"
                   src="./assets/personas/chatgpt.webp"
                   alt="ChatGPT 角色全身圖"
                   width="640"

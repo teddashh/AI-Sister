@@ -64,6 +64,7 @@ button {
   background: rgb(244 234 219 / 86%);
   border-bottom: 1px solid rgb(46 33 64 / 8%);
   display: flex;
+  gap: 22px;
   height: 76px;
   justify-content: space-between;
   left: 0;
@@ -81,6 +82,7 @@ button {
   font-weight: 750;
   gap: 11px;
   letter-spacing: -0.02em;
+  margin-right: auto;
 }
 
 .wordmark-mark {
@@ -89,6 +91,7 @@ button {
   border-radius: 11px;
   color: var(--cream);
   display: inline-flex;
+  flex: none;
   font-size: 11px;
   font-weight: 800;
   height: 34px;
@@ -120,6 +123,42 @@ nav a:focus-visible {
   border-radius: 999px;
   color: var(--cream);
   padding: 9px 18px;
+}
+
+/* 繁中／EN：目前語言是 span，另一邊是連結；手機版也不收起來。 */
+.lang-switch {
+  align-items: center;
+  background: rgb(255 250 242 / 48%);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  display: flex;
+  flex: none;
+  font-size: 12px;
+  font-weight: 750;
+  gap: 2px;
+  padding: 3px;
+}
+
+.topbar .lang-switch > * {
+  border-radius: 999px;
+  display: inline-flex;
+  line-height: 1;
+  padding: 8px 11px;
+}
+
+.topbar .lang-switch a {
+  color: var(--ink-soft);
+}
+
+.topbar .lang-switch a:hover,
+.topbar .lang-switch a:focus-visible {
+  color: var(--berry-dark);
+}
+
+.lang-switch [aria-current] {
+  background: var(--cream);
+  box-shadow: 0 1px 5px rgb(46 33 64 / 12%);
+  color: var(--ink);
 }
 
 .hero {
@@ -1060,6 +1099,11 @@ footer {
 }
 
 @media (max-width: 1050px) {
+  /* 英文選單字比較長：窄桌面收緊間距，加上 繁中／EN 也不會擠成兩行。 */
+  html[lang="en"] nav:not(.lang-switch) {
+    gap: 16px;
+  }
+
   .hero {
     gap: 20px;
     grid-template-columns: minmax(0, 0.9fr) minmax(480px, 1.1fr);
@@ -1115,6 +1159,7 @@ footer {
 
 @media (max-width: 760px) {
   .topbar {
+    gap: 8px;
     height: 66px;
     padding: 0 18px;
   }
@@ -1129,6 +1174,10 @@ footer {
 
   nav a:not(.nav-download) {
     display: none;
+  }
+
+  .topbar .lang-switch > * {
+    padding: 8px 9px;
   }
 
   .hero {
@@ -1276,6 +1325,13 @@ footer {
 
   .footer-links {
     justify-content: flex-start;
+  }
+}
+
+/* 最窄的手機：頁首只留 AI·S 標誌，名字的位置讓給 繁中／EN。 */
+@media (max-width: 374px) {
+  .topbar .wordmark > span:last-child {
+    display: none;
   }
 }
 
