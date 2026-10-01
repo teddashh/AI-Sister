@@ -285,14 +285,19 @@ console.log("③ 一次只准一個 POST；cancel/關閉/換區域/刪 key/撤�
       !/abort|terminate|kill/.test(cancel),
     cancel,
   );
+  const advance = section(MAIN, "fn advance_generation(", "\n}\n");
   check(
     "設定／金鑰變更共用 stop intent 並通知 renderer",
     ordered(stopIntent, [
       "let _transition = azure_tts_transition(shell)",
-      ".azure_tts_generation",
-      ".fetch_update(",
+      "advance_generation(&shell.azure_tts_generation, next_azure_tts_generation)",
     ]).ok &&
-      stopIntent.includes("next_azure_tts_generation(current)") &&
+      ordered(advance, [
+        "generation.load(Ordering::Acquire)",
+        ".compare_exchange_weak(",
+        "next(current)",
+        "Ordering::AcqRel",
+      ]).ok &&
       stopIntent.includes('emit("azure-tts-stop"') &&
       (backend.match(/stop_azure_tts_intent\(&app, &shell\)/g) ?? []).length >= 3,
   );
