@@ -18,7 +18,9 @@
     <link rel="alternate" hreflang="en" href="https://teddashh.github.io/AI-Sister/en/" />
     <link rel="alternate" hreflang="x-default" href="https://teddashh.github.io/AI-Sister/en/" />
     <link rel="stylesheet" href="../styles.css" />
+    <link rel="stylesheet" href="../flow.css" />
     <script src="../site.js" defer></script>
+    <script src="../flow.js" defer></script>
   </head>
   <body>
     <a class="skip-link" href="#main">Skip to main content</a>
@@ -160,6 +162,60 @@
             <p>She speaks up only with evidence, when the interruption is worth it, and within budget. The rest of the time she stays in the corner of your desktop.</p>
           </article>
         </div>
+        <div class="fd-story">
+          <h3>How a look is saved</h3>
+          <p>While local recording is on, she looks, copies the text, and writes a row. Then she does it again.</p>
+          <figure class="fd" data-fd="{&quot;columns&quot;:[[0],[1],[2]],&quot;core&quot;:1,&quot;loop&quot;:true}">
+            <ol class="fd-legend">
+            <li class="fd-node" data-step="0" data-tone="neutral" data-icon="eye"><span class="fd-head"><span class="fd-chip"></span><span class="fd-step" aria-hidden="true">01</span></span><p class="fd-title">Look again</p><p class="fd-note">The next look waits at least 400 ms, and an idle screen can wait up to 5 seconds.</p><span class="fd-link" aria-hidden="true"></span></li>
+            <li class="fd-node" data-step="1" data-tone="accent" data-icon="search"><span class="fd-head"><span class="fd-chip"></span><span class="fd-step" aria-hidden="true">02</span></span><p class="fd-title">Copy the text</p><p class="fd-note">On-device OCR and local rules copy phones, amounts, and URLs, and this step calls no model.</p><span class="fd-link" aria-hidden="true"></span></li>
+            <li class="fd-node" data-step="2" data-tone="info" data-icon="database"><span class="fd-head"><span class="fd-chip"></span><span class="fd-step" aria-hidden="true">03</span></span><p class="fd-title">Write SQLite</p><p class="fd-note">The words go into SQLite, and a changed frame is kept only when frame storage is signed.</p></li>
+            </ol>
+            <ul class="fd-ticks"><li>next look waits 400 ms</li><li>idle blind cap is 5 seconds</li><li>images need frame storage</li></ul>
+            <figcaption>While local recording is on, each beat looks, copies words with on-device OCR, and writes SQLite, then starts again. An idle screen can skip a look, but not for longer than 5 seconds. A changed frame image is kept only when frame storage is signed.</figcaption>
+          </figure>
+        </div>
+        <div class="fd-story">
+          <h3>How a question is answered</h3>
+          <p>After CLI reading is signed, the CLI you chose plans the search. AI-Sister runs it on this computer, then the same CLI writes the sentences.</p>
+          <figure class="fd" data-fd="{&quot;columns&quot;:[[0],[1],[2],[3]],&quot;core&quot;:2,&quot;sinks&quot;:[4]}">
+            <ol class="fd-legend">
+            <li class="fd-node" data-step="0" data-tone="neutral" data-icon="chat"><span class="fd-head"><span class="fd-chip"></span><span class="fd-step" aria-hidden="true">01</span></span><p class="fd-title">Ask</p><p class="fd-note">You type one question, and a copy sent outward is capped at 2 KiB.</p><span class="fd-link" aria-hidden="true"></span></li>
+            <li class="fd-node" data-step="1" data-tone="info" data-icon="route"><span class="fd-head"><span class="fd-chip"></span><span class="fd-step" aria-hidden="true">02</span></span><p class="fd-title">Plan queries</p><p class="fd-note">The chosen CLI returns 1 to 3 natural language queries.</p><span class="fd-link" aria-hidden="true"></span></li>
+            <li class="fd-node" data-step="2" data-tone="accent" data-icon="database"><span class="fd-head"><span class="fd-chip"></span><span class="fd-step" aria-hidden="true">03</span></span><p class="fd-title">Search locally</p><p class="fd-note">AI-Sister runs those queries in SQLite and may send back at most 18 hits.</p><span class="fd-link" aria-hidden="true"></span></li>
+            <li class="fd-node" data-step="3" data-tone="info" data-icon="spark"><span class="fd-head"><span class="fd-chip"></span><span class="fd-step" aria-hidden="true">04</span></span><p class="fd-title">Write sentences</p><p class="fd-note">The same CLI may return 1 to 6 sentences, and no hits or one bad sentence drops the reply.</p><span class="fd-link" aria-hidden="true"></span></li>
+            <li class="fd-node" data-step="4" data-tone="neutral" data-icon="doc"><span class="fd-head"><span class="fd-chip"></span><span class="fd-step" aria-hidden="true">05</span></span><p class="fd-title">Cite a source</p><p class="fd-note">Each kept sentence cites a fact, chunk, or card from this search, and that evidence stays here.</p></li>
+            </ol>
+            <ul class="fd-ticks"><li>plan is 1 to 3 queries</li><li>at most 18 hits come back</li><li>each kept line cites one</li></ul>
+            <figcaption>A question with CLI reading signed is planned by the chosen CLI as 1 to 3 queries. AI-Sister runs them in local SQLite, sends back at most 18 hits, and keeps the fenced payload at or under 24 KiB. The same CLI then writes 1 to 6 sentences, and each kept sentence cites a fact, chunk, or card from this search. The CLI does not receive the database path, SQL, or a picture file.</figcaption>
+          </figure>
+        </div>
+        <div class="fd-story">
+          <h3>Which CLI gets the question</h3>
+          <p>Settings list four CLIs. Each question uses the last one you finished setting up, and the others are not called.</p>
+          <figure class="fd" data-fd="{&quot;columns&quot;:[[0],[1]],&quot;core&quot;:1,&quot;lanes&quot;:[&quot;Claude Code&quot;,&quot;Codex CLI&quot;,&quot;Gemini CLI&quot;,&quot;Grok CLI&quot;],&quot;selectedLane&quot;:0}">
+            <ol class="fd-legend">
+            <li class="fd-node" data-step="0" data-tone="neutral" data-icon="chat"><span class="fd-head"><span class="fd-chip"></span><span class="fd-step" aria-hidden="true">01</span></span><p class="fd-title">Type a question</p><p class="fd-note">This question reads the last CLI you saved, and nothing here picks a vendor for you.</p><span class="fd-link" aria-hidden="true"></span></li>
+            <li class="fd-node" data-step="1" data-tone="accent" data-icon="route"><span class="fd-head"><span class="fd-chip"></span><span class="fd-step" aria-hidden="true">02</span></span><p class="fd-title">Use last CLI</p><p class="fd-note">The bright pill is that last CLI, and Claude Code is lit here only as the example.</p></li>
+            </ol>
+            <ul class="fd-ticks"><li>settings list four CLIs</li><li>the last finished one runs</li><li>the others are not called</li></ul>
+            <figcaption>Settings can connect Claude Code, Codex CLI, Gemini CLI, or Grok CLI. A typed question goes only to the last one you finished setting up. The bright pill marks that choice, and Claude Code is lit here only as the example.</figcaption>
+          </figure>
+        </div>
+        <div class="fd-story">
+          <h3>When she may speak up</h3>
+          <p>A spontaneous line has to clear the gatekeeper. The bar on the wide box is the day&#x27;s point budget.</p>
+          <figure class="fd" data-fd="{&quot;columns&quot;:[[0,1,2],[3]],&quot;core&quot;:3,&quot;meter&quot;:true}">
+            <ol class="fd-legend">
+            <li class="fd-node" data-step="0" data-tone="neutral" data-icon="eye"><span class="fd-head"><span class="fd-chip"></span><span class="fd-step" aria-hidden="true">01</span></span><p class="fd-title">Has evidence</p><p class="fd-note">A candidate needs an evidence ref, and without one she does not speak.</p><span class="fd-link" aria-hidden="true"></span></li>
+            <li class="fd-node" data-step="1" data-tone="info" data-icon="check"><span class="fd-head"><span class="fd-chip"></span><span class="fd-step" aria-hidden="true">02</span></span><p class="fd-title">Clears score</p><p class="fd-note">The default minimum score is 0.25, and a lower score is held.</p><span class="fd-link" aria-hidden="true"></span></li>
+            <li class="fd-node" data-step="2" data-tone="warn" data-icon="wallet"><span class="fd-head"><span class="fd-chip"></span><span class="fd-step" aria-hidden="true">03</span></span><p class="fd-title">Inside budget</p><p class="fd-note">The default day budget is 5 points: a card costs 2, one line costs 1, and a glimmer costs 0.</p><span class="fd-link" aria-hidden="true"></span></li>
+            <li class="fd-node" data-step="3" data-tone="accent" data-icon="bell"><span class="fd-head"><span class="fd-chip"></span><span class="fd-step" aria-hidden="true">04</span></span><p class="fd-title">Gatekeeper</p><p class="fd-note">She speaks only while recording is live and quiet hours allow it.</p></li>
+            </ol>
+            <ul class="fd-ticks"><li>an evidence ref is required</li><li>default score floor is 0.25</li><li>default day budget is 5</li></ul>
+            <figcaption>Gatekeeper holds a line with no evidence ref, a score under the default 0.25, or a cost the default 5 point day budget cannot pay. A card costs 2 points, one line costs 1, and a glimmer costs 0. Recording must be live. The default quiet hours are 22:00 to 08:00, most categories stay held for 14 days after the first recording, and the same category has a default 120 minute cooldown.</figcaption>
+          </figure>
+        </div>
       </section>
 
       <section class="section persona-section" id="personas">
@@ -240,6 +296,25 @@
         </div>
       </section>
 
+      <div class="section">
+        <div class="fd-story">
+          <h3>What may leave this computer</h3>
+          <p>The screen and the database stay on this computer. Two later doors can send text, and each door has its own consent.</p>
+          <figure class="fd" data-fd="{&quot;columns&quot;:[[0,1],[2],[3,4]],&quot;core&quot;:2,&quot;boundaryAfter&quot;:1}">
+            <ol class="fd-legend">
+            <li class="fd-node" data-step="0" data-tone="neutral" data-icon="window"><span class="fd-head"><span class="fd-chip"></span><span class="fd-step" aria-hidden="true">01</span></span><p class="fd-title">Keep the screen</p><p class="fd-note">Screenshots and OCR text are written only on this computer, and no pixel is uploaded.</p><span class="fd-link" aria-hidden="true"></span></li>
+            <li class="fd-node" data-step="1" data-tone="neutral" data-icon="database"><span class="fd-head"><span class="fd-chip"></span><span class="fd-step" aria-hidden="true">02</span></span><p class="fd-title">Keep the rows</p><p class="fd-note">SQLite and the facts stay local, and a search does not send the database file.</p><span class="fd-link" aria-hidden="true"></span></li>
+            <li class="fd-node" data-step="2" data-tone="warn" data-icon="shield"><span class="fd-head"><span class="fd-chip"></span><span class="fd-step" aria-hidden="true">03</span></span><p class="fd-title">Check consent</p><p class="fd-note">CLI reading and Azure read-aloud are separate signatures, and unreadable means unsigned.</p><span class="fd-link" aria-hidden="true"></span></li>
+            <li class="fd-node" data-step="3" data-tone="info" data-icon="terminal"><span class="fd-head"><span class="fd-chip"></span><span class="fd-step" aria-hidden="true">04</span></span><p class="fd-title">CLI text door</p><p class="fd-note">With CLI reading signed, the question and the hit text may go to the chosen CLI.</p><span class="fd-link" aria-hidden="true"></span></li>
+            <li class="fd-node" data-step="4" data-tone="info" data-icon="music"><span class="fd-head"><span class="fd-chip"></span><span class="fd-step" aria-hidden="true">05</span></span><p class="fd-title">Azure speech</p><p class="fd-note">With Azure read-aloud signed and turned on, only the new answer body is sent.</p></li>
+            </ol>
+            <ul class="fd-ticks"><li>pixels stay on this computer</li><li>two consents open two doors</li><li>unreadable means unsigned</li></ul>
+          <ul class="fd-zones"><li>this computer</li><li>consent line</li><li>outside</li></ul>
+            <figcaption>Screenshots, OCR text, and SQLite stay on this computer. With CLI reading signed, the question and hit text may go to the chosen CLI. With Azure read-aloud signed and turned on, only the new answer body goes to Azure. If either signature cannot be read, that door stays shut. Picture files do not use either door.</figcaption>
+          </figure>
+        </div>
+      </div>
+
       <section class="section skills-section" id="skills">
         <div class="section-heading">
           <p class="eyebrow"><span></span> Claude Code + Codex</p>
@@ -275,6 +350,19 @@
           start recording, delete anything, or operate your computer. The text and source fields a query returns
           enter the current agent conversation; screenshot bytes don't.
         </p>
+        <div class="fd-story">
+          <h3>How an agent asks her</h3>
+          <p>Claude Code and Codex call the same local command. The reply is text and source fields, not a screenshot.</p>
+          <figure class="fd" data-fd="{&quot;columns&quot;:[[0],[1],[2]],&quot;core&quot;:1}">
+            <ol class="fd-legend">
+            <li class="fd-node" data-step="0" data-tone="neutral" data-icon="terminal"><span class="fd-head"><span class="fd-chip"></span><span class="fd-step" aria-hidden="true">01</span></span><p class="fd-title">Ask the skill</p><p class="fd-note">You type /ai-sister-memory or $ai-sister-memory, then say what to find.</p><span class="fd-link" aria-hidden="true"></span></li>
+            <li class="fd-node" data-step="1" data-tone="accent" data-icon="search"><span class="fd-head"><span class="fd-chip"></span><span class="fd-step" aria-hidden="true">02</span></span><p class="fd-title">Query locally</p><p class="fd-note">The first call is sister query --limit 10 --json, and a truncated result may be asked once more.</p><span class="fd-link" aria-hidden="true"></span></li>
+            <li class="fd-node" data-step="2" data-tone="info" data-icon="doc"><span class="fd-head"><span class="fd-chip"></span><span class="fd-step" aria-hidden="true">03</span></span><p class="fd-title">Return text</p><p class="fd-note">Time, app, window title, and a frame or chunk id come back, without screenshot bytes.</p></li>
+            </ol>
+            <ul class="fd-ticks"><li>first call asks for 10</li><li>text and source fields return</li><li>screenshot bytes stay out</li></ul>
+            <figcaption>When you ask Claude Code or Codex to search your own AI-Sister memory, the skill runs sister query --limit 10 --json on this computer. The reply can include text, time, app, window title, and a frame or chunk id, and it does not include screenshot bytes. The skill does not grant consent, start recording, delete memory, or operate the computer. If the query log is on, the question is also saved on this computer.</figcaption>
+          </figure>
+        </div>
       </section>
 
       <section class="section start-section" id="download">
