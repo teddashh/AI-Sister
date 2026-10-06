@@ -19,7 +19,7 @@ REPOSITORY = "https://github.com/teddashh/AI-Sister"
 # site/ 的發布白名單，兩邊都算：這裡列的每一個都要在，site/ 裡也不能有沒列的。
 # 每一頁都是 template，各自要展開全部 token、各自對 persona manifest。
 PAGES = ("index.html", "en/index.html")
-STATIC = ("styles.css", "site.js")
+STATIC = ("styles.css", "site.js", "flow.css", "flow.js")
 TOKENS = {
     "__VERSION__",
     "__TAG__",

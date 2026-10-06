@@ -1335,6 +1335,25 @@ footer {
   }
 }
 
+/* Flow diagrams use this page's tokens. The first story needs its own top
+   gap: flow.css only separates adjacent .fd-story blocks. */
+.fd {
+  --fd-surface: var(--cream);
+  --fd-edge: var(--line);
+  --fd-text: var(--ink);
+  --fd-faint: var(--ink-soft);
+  --fd-accent: var(--berry);
+  --fd-accent-ink: color-mix(in srgb, var(--berry) 60%, var(--ink));
+  --fd-warn: var(--berry-dark);
+  --fd-info: color-mix(in srgb, var(--mint) 40%, var(--ink));
+  --fd-font: inherit;
+}
+
+.memory-section > .fd-story,
+.skills-section > .fd-story {
+  margin-top: 3.25rem;
+}
+
 @media (prefers-reduced-motion: reduce) {
   html {
     scroll-behavior: auto;
