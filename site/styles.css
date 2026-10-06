@@ -943,6 +943,11 @@ nav a:focus-visible {
   font-family: "Cascadia Code", "SFMono-Regular", Consolas, monospace;
 }
 
+.fd-note code {
+  font-family: "Cascadia Code", "SFMono-Regular", Consolas, monospace;
+  white-space: nowrap;
+}
+
 .skill-path {
   background: var(--paper-deep);
   border-radius: 10px;
