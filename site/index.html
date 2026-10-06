@@ -161,58 +161,57 @@
             <p>有證據、值得打斷、沒有超過預算，才開口。其他時間，她待在桌面角落。</p>
           </article>
         </div>
-        <div class="fd-story">
-          <h3>看一眼怎麼留下</h3>
-          <p>本機記錄開著的時候，她看一眼、抄下文字、寫進一列，然後再來一次。</p>
+        <div class="fd-story" id="fd-sec-look">
+          <h3>看完，再看一次</h3>
+          <p>本機記錄要先開著。她把看到的寫下來，隔一下再看。</p>
           <figure class="fd" data-fd="{&quot;columns&quot;:[[0],[1],[2]],&quot;core&quot;:1,&quot;loop&quot;:true}">
             <ol class="fd-legend">
-            <li class="fd-node" data-step="0" data-tone="neutral" data-icon="eye"><span class="fd-head"><span class="fd-chip"></span><span class="fd-step" aria-hidden="true">01</span></span><p class="fd-title">再看一眼</p><p class="fd-note">下一眼至少隔 400 毫秒，沒人動時最多盲 5 秒。</p><span class="fd-link" aria-hidden="true"></span></li>
-            <li class="fd-node" data-step="1" data-tone="accent" data-icon="search"><span class="fd-head"><span class="fd-chip"></span><span class="fd-step" aria-hidden="true">02</span></span><p class="fd-title">抄下文字</p><p class="fd-note">本機 OCR 和本機規則抄下電話、金額、網址，這一步不叫模型。</p><span class="fd-link" aria-hidden="true"></span></li>
-            <li class="fd-node" data-step="2" data-tone="info" data-icon="database"><span class="fd-head"><span class="fd-chip"></span><span class="fd-step" aria-hidden="true">03</span></span><p class="fd-title">寫進資料庫</p><p class="fd-note">文字寫進 SQLite，變化幀只有簽了畫面保存才留圖。</p></li>
+            <li class="fd-node" data-step="0" data-tone="neutral" data-icon="eye"><span class="fd-head"><span class="fd-chip"></span><span class="fd-step" aria-hidden="true">01</span></span><p class="fd-title">等一下再看</p><p class="fd-note">每次至少隔 400 毫秒。沒人碰鍵盤或滑鼠的話，最久 5 秒也會再看。</p><span class="fd-link" aria-hidden="true"></span></li>
+            <li class="fd-node" data-step="1" data-tone="accent" data-icon="search"><span class="fd-head"><span class="fd-chip"></span><span class="fd-step" aria-hidden="true">02</span></span><p class="fd-title">讀成文字</p><p class="fd-note">Windows 用系統 OCR，Ubuntu 用 Tesseract，macOS 用 Vision。</p><span class="fd-link" aria-hidden="true"></span></li>
+            <li class="fd-node" data-step="2" data-tone="info" data-icon="database"><span class="fd-head"><span class="fd-chip"></span><span class="fd-step" aria-hidden="true">03</span></span><p class="fd-title">寫進一列</p><p class="fd-note">文字寫進 SQLite。畫面有變化，要簽了畫面保存才留圖。</p></li>
             </ol>
-            <ul class="fd-ticks"><li>下一眼至少隔 400 毫秒</li><li>閒置最多盲 5 秒</li><li>截圖要簽畫面保存</li></ul>
-            <figcaption>本機記錄開著時，每一拍看畫面、用本機 OCR 抄字、寫進 SQLite，然後再來。沒人動可以略過一眼，但最多盲 5 秒。變化幀的圖只有簽了畫面保存才留。</figcaption>
+            <ul class="fd-ticks"><li>至少隔 400 毫秒</li><li>5 秒內一定再看</li><li>留圖要先簽</li></ul>
+            <figcaption>這一圈不叫模型。電話、金額和網址是本機規則從畫面的字裡抓的。</figcaption>
           </figure>
         </div>
-        <div class="fd-story">
-          <h3>一個問題怎麼答</h3>
-          <p>簽了 CLI 解讀之後，你選的那支 CLI 先決定怎麼查。AI-Sister 在這台電腦查完，再把句子交回同一支。</p>
-          <figure class="fd" data-fd="{&quot;columns&quot;:[[0],[1],[2],[3]],&quot;core&quot;:2,&quot;sinks&quot;:[4]}">
+        <div class="fd-story" id="fd-sec-question">
+          <h3>查詢留在這台電腦</h3>
+          <p>要先簽 CLI 解讀。你選的 CLI 想查詢、寫句子，搜尋本身在這台電腦的 SQLite 裡跑。</p>
+          <figure class="fd" data-fd="{&quot;columns&quot;:[[0],[1],[2],[3]],&quot;core&quot;:2}">
             <ol class="fd-legend">
-            <li class="fd-node" data-step="0" data-tone="neutral" data-icon="chat"><span class="fd-head"><span class="fd-chip"></span><span class="fd-step" aria-hidden="true">01</span></span><p class="fd-title">提出問題</p><p class="fd-note">你打一個問題，送出去的副本最多 2 KiB。</p><span class="fd-link" aria-hidden="true"></span></li>
-            <li class="fd-node" data-step="1" data-tone="info" data-icon="route"><span class="fd-head"><span class="fd-chip"></span><span class="fd-step" aria-hidden="true">02</span></span><p class="fd-title">規劃查詢</p><p class="fd-note">選定的 CLI 回 1 到 3 條自然語言查詢。</p><span class="fd-link" aria-hidden="true"></span></li>
-            <li class="fd-node" data-step="2" data-tone="accent" data-icon="database"><span class="fd-head"><span class="fd-chip"></span><span class="fd-step" aria-hidden="true">03</span></span><p class="fd-title">本機代查</p><p class="fd-note">AI-Sister 在 SQLite 查這些句子，最多交回 18 筆命中。</p><span class="fd-link" aria-hidden="true"></span></li>
-            <li class="fd-node" data-step="3" data-tone="info" data-icon="spark"><span class="fd-head"><span class="fd-chip"></span><span class="fd-step" aria-hidden="true">04</span></span><p class="fd-title">寫成句子</p><p class="fd-note">同一支 CLI 可以回 1 到 6 句，沒有命中或有一句不合契約就整份不用。</p><span class="fd-link" aria-hidden="true"></span></li>
-            <li class="fd-node" data-step="4" data-tone="neutral" data-icon="doc"><span class="fd-head"><span class="fd-chip"></span><span class="fd-step" aria-hidden="true">05</span></span><p class="fd-title">附上出處</p><p class="fd-note">留下的每一句都引用這次的 fact、chunk 或 card，證據留在這台電腦。</p></li>
+            <li class="fd-node" data-step="0" data-tone="neutral" data-icon="chat"><span class="fd-head"><span class="fd-chip"></span><span class="fd-step" aria-hidden="true">01</span></span><p class="fd-title">你先問</p><p class="fd-note">送出去的問題最多 2 KiB。</p><span class="fd-link" aria-hidden="true"></span></li>
+            <li class="fd-node" data-step="1" data-tone="info" data-icon="route"><span class="fd-head"><span class="fd-chip"></span><span class="fd-step" aria-hidden="true">02</span></span><p class="fd-title">想好怎麼查</p><p class="fd-note">CLI 回 1 到 3 條查詢，用一般的說法寫。</p><span class="fd-link" aria-hidden="true"></span></li>
+            <li class="fd-node" data-step="2" data-tone="accent" data-icon="database"><span class="fd-head"><span class="fd-chip"></span><span class="fd-step" aria-hidden="true">03</span></span><p class="fd-title">在這裡查</p><p class="fd-note">SQLite 在這台電腦跑。最多交回 18 筆來源，整包不超過 24 KiB。</p><span class="fd-link" aria-hidden="true"></span></li>
+            <li class="fd-node" data-step="3" data-tone="info" data-icon="spark"><span class="fd-head"><span class="fd-chip"></span><span class="fd-step" aria-hidden="true">04</span></span><p class="fd-title">寫成句子</p><p class="fd-note">本機沒有能引用的，就不請它寫。寫出來的 1 到 6 句，有一句不行就整份不留。</p></li>
             </ol>
-            <ul class="fd-ticks"><li>查詢是 1 到 3 條</li><li>最多交回 18 筆</li><li>留下的句子都有出處</li></ul>
-            <figcaption>簽過 CLI 解讀的問題，由選定的 CLI 規劃成 1 到 3 條查詢。AI-Sister 在本機 SQLite 查，最多交回 18 筆命中，圍欄內資料合計最多 24 KiB。同一支 CLI 再寫 1 到 6 句，留下的每一句都引用這次的 fact、chunk 或 card。CLI 拿不到資料庫路徑、SQL 或畫面檔。</figcaption>
+            <ul class="fd-ticks"><li>1 到 3 條查詢</li><li>來源最多 18 筆</li><li>一句不行就整份不用</li></ul>
+            <figcaption>留下的句子要引用這次的 fact、chunk 或 card。CLI 拿不到資料庫路徑、SQL 或畫面檔。</figcaption>
           </figure>
         </div>
-        <div class="fd-story">
-          <h3>問題交給哪一支</h3>
-          <p>設定頁列出四支 CLI。每一題用你最後設定完成的那一支，其餘這題不呼叫。</p>
+        <div class="fd-story" id="fd-sec-cli">
+          <h3>用你最後設好的</h3>
+          <p>可以接四支 CLI，每一題只叫你最後設好的那支。</p>
           <figure class="fd" data-fd="{&quot;columns&quot;:[[0],[1]],&quot;core&quot;:1,&quot;lanes&quot;:[&quot;Claude Code&quot;,&quot;Codex CLI&quot;,&quot;Gemini CLI&quot;,&quot;Grok CLI&quot;],&quot;selectedLane&quot;:0}">
             <ol class="fd-legend">
-            <li class="fd-node" data-step="0" data-tone="neutral" data-icon="chat"><span class="fd-head"><span class="fd-chip"></span><span class="fd-step" aria-hidden="true">01</span></span><p class="fd-title">打一句問題</p><p class="fd-note">這一題會再讀你最後存下的那一支，程式不替你指定廠商。</p><span class="fd-link" aria-hidden="true"></span></li>
-            <li class="fd-node" data-step="1" data-tone="accent" data-icon="route"><span class="fd-head"><span class="fd-chip"></span><span class="fd-step" aria-hidden="true">02</span></span><p class="fd-title">用最後那支</p><p class="fd-note">亮著的是最後設定完成的那一支，這裡點亮 Claude Code 只是舉例。</p></li>
+            <li class="fd-node" data-step="0" data-tone="neutral" data-icon="chat"><span class="fd-head"><span class="fd-chip"></span><span class="fd-step" aria-hidden="true">01</span></span><p class="fd-title">打一句進去</p><p class="fd-note">會再讀一次你存下的選擇，程式自己不挑廠商。</p><span class="fd-link" aria-hidden="true"></span></li>
+            <li class="fd-node" data-step="1" data-tone="accent" data-icon="route"><span class="fd-head"><span class="fd-chip"></span><span class="fd-step" aria-hidden="true">02</span></span><p class="fd-title">就叫那支</p><p class="fd-note">亮著的是你設完的那支，Claude Code 亮在這裡只是舉例。</p></li>
             </ol>
-            <ul class="fd-ticks"><li>設定列出這四支</li><li>用最後設定完成的</li><li>其餘這題不呼叫</li></ul>
-            <figcaption>設定可以接上 Claude Code、Codex CLI、Gemini CLI 或 Grok CLI。打進去的問題只交給你最後設定完成的那一支。亮著的膠囊是那個選擇，這裡點亮 Claude Code 只是舉例。</figcaption>
+            <ul class="fd-ticks"><li>四支都能接</li><li>只跑最後設好的</li><li>其他的不叫</li></ul>
+            <figcaption>沒有預設廠商。亮起來的是你設好的那支，不是推薦。</figcaption>
           </figure>
         </div>
-        <div class="fd-story">
-          <h3>她什麼時候可以開口</h3>
-          <p>主動開口要過守門員。寬盒子上的條是當天的點數預算。</p>
+        <div class="fd-story" id="fd-sec-speak">
+          <h3>開口前先過一關</h3>
+          <p>她自己想說的話，要先過守門員這關。長條是今天剩下的點數。</p>
           <figure class="fd" data-fd="{&quot;columns&quot;:[[0,1,2],[3]],&quot;core&quot;:3,&quot;meter&quot;:true}">
             <ol class="fd-legend">
-            <li class="fd-node" data-step="0" data-tone="neutral" data-icon="eye"><span class="fd-head"><span class="fd-chip"></span><span class="fd-step" aria-hidden="true">01</span></span><p class="fd-title">要有證據</p><p class="fd-note">候選要有證據 ref，沒有就不能開口。</p><span class="fd-link" aria-hidden="true"></span></li>
-            <li class="fd-node" data-step="1" data-tone="info" data-icon="check"><span class="fd-head"><span class="fd-chip"></span><span class="fd-step" aria-hidden="true">02</span></span><p class="fd-title">分數夠高</p><p class="fd-note">預設最低分是 0.25，低於這個分數就先按住。</p><span class="fd-link" aria-hidden="true"></span></li>
-            <li class="fd-node" data-step="2" data-tone="warn" data-icon="wallet"><span class="fd-head"><span class="fd-chip"></span><span class="fd-step" aria-hidden="true">03</span></span><p class="fd-title">還有預算</p><p class="fd-note">預設一天 5 點，卡片 2 點，一行 1 點，微光 0 點。</p><span class="fd-link" aria-hidden="true"></span></li>
-            <li class="fd-node" data-step="3" data-tone="accent" data-icon="bell"><span class="fd-head"><span class="fd-chip"></span><span class="fd-step" aria-hidden="true">04</span></span><p class="fd-title">守門員</p><p class="fd-note">必須正在錄，而且不在安靜時段。</p></li>
+            <li class="fd-node" data-step="0" data-tone="neutral" data-icon="eye"><span class="fd-head"><span class="fd-chip"></span><span class="fd-step" aria-hidden="true">01</span></span><p class="fd-title">先要有證據</p><p class="fd-note">沒有附上證據，這句就不說。</p><span class="fd-link" aria-hidden="true"></span></li>
+            <li class="fd-node" data-step="1" data-tone="info" data-icon="check"><span class="fd-head"><span class="fd-chip"></span><span class="fd-step" aria-hidden="true">02</span></span><p class="fd-title">分數要夠</p><p class="fd-note">預設要到 0.25，不到就先按住。</p><span class="fd-link" aria-hidden="true"></span></li>
+            <li class="fd-node" data-step="2" data-tone="warn" data-icon="wallet"><span class="fd-head"><span class="fd-chip"></span><span class="fd-step" aria-hidden="true">03</span></span><p class="fd-title">點數還有</p><p class="fd-note">卡片要 2 點，一行要 1 點，微光不用點。</p><span class="fd-link" aria-hidden="true"></span></li>
+            <li class="fd-node" data-step="3" data-tone="accent" data-icon="bell"><span class="fd-head"><span class="fd-chip"></span><span class="fd-step" aria-hidden="true">04</span></span><p class="fd-title">這才說出口</p><p class="fd-note">正在錄，而且不在預設安靜時段 22:00 到 08:00。</p></li>
             </ol>
-            <ul class="fd-ticks"><li>必須有證據 ref</li><li>預設門檻是 0.25</li><li>預設一天 5 點</li></ul>
-            <figcaption>守門員會按住沒有證據 ref、低於預設 0.25 分、或會超過預設一天 5 點的那一句。卡片 2 點，一行 1 點，微光 0 點。必須正在錄。預設安靜時段是 22:00 到 08:00，多數類別在第一次錄製後的前 14 天會先按住，同一類預設還有 120 分鐘冷卻。</figcaption>
+            <ul class="fd-ticks"><li>要有證據</li><li>門檻是 0.25</li><li>一天 5 點</li></ul>
+            <figcaption>第一次錄製後的 14 天裡，多數類別先不說。同一類講過之後，預設再等 120 分鐘。</figcaption>
           </figure>
         </div>
       </section>
@@ -295,24 +294,24 @@
         </div>
       </section>
 
-      <div class="section">
-        <div class="fd-story">
-          <h3>什麼可以離開這台電腦</h3>
-          <p>畫面和資料庫留在這台電腦。後面兩扇門可以送文字，各要自己的同意。</p>
+      <section class="section">
+        <div class="fd-story" id="fd-sec-leave">
+          <h3>文字只走兩扇門</h3>
+          <p>畫面和資料庫留在這台電腦。每一扇門都要自己的簽名。</p>
           <figure class="fd" data-fd="{&quot;columns&quot;:[[0,1],[2],[3,4]],&quot;core&quot;:2,&quot;boundaryAfter&quot;:1}">
             <ol class="fd-legend">
-            <li class="fd-node" data-step="0" data-tone="neutral" data-icon="window"><span class="fd-head"><span class="fd-chip"></span><span class="fd-step" aria-hidden="true">01</span></span><p class="fd-title">畫面留本地</p><p class="fd-note">截圖和 OCR 文字只寫在這台電腦，沒有像素被上傳。</p><span class="fd-link" aria-hidden="true"></span></li>
-            <li class="fd-node" data-step="1" data-tone="neutral" data-icon="database"><span class="fd-head"><span class="fd-chip"></span><span class="fd-step" aria-hidden="true">02</span></span><p class="fd-title">資料留本地</p><p class="fd-note">SQLite 和事實留在本機，查詢不會把資料庫檔送走。</p><span class="fd-link" aria-hidden="true"></span></li>
-            <li class="fd-node" data-step="2" data-tone="warn" data-icon="shield"><span class="fd-head"><span class="fd-chip"></span><span class="fd-step" aria-hidden="true">03</span></span><p class="fd-title">核對同意</p><p class="fd-note">CLI 解讀和 Azure 朗讀是兩張分開的簽名，讀不到就當成沒簽。</p><span class="fd-link" aria-hidden="true"></span></li>
-            <li class="fd-node" data-step="3" data-tone="info" data-icon="terminal"><span class="fd-head"><span class="fd-chip"></span><span class="fd-step" aria-hidden="true">04</span></span><p class="fd-title">CLI 文字門</p><p class="fd-note">簽了 CLI 解讀，問題和命中文字才可以交給選定的 CLI。</p><span class="fd-link" aria-hidden="true"></span></li>
-            <li class="fd-node" data-step="4" data-tone="info" data-icon="music"><span class="fd-head"><span class="fd-chip"></span><span class="fd-step" aria-hidden="true">05</span></span><p class="fd-title">Azure 朗讀</p><p class="fd-note">Azure 朗讀簽了而且設定開著，才送出新答案的正文。</p></li>
+            <li class="fd-node" data-step="0" data-tone="neutral" data-icon="window"><span class="fd-head"><span class="fd-chip"></span><span class="fd-step" aria-hidden="true">01</span></span><p class="fd-title">畫面留下</p><p class="fd-note">截圖和 OCR 文字只寫在這台電腦，像素不上傳。</p><span class="fd-link" aria-hidden="true"></span></li>
+            <li class="fd-node" data-step="1" data-tone="neutral" data-icon="database"><span class="fd-head"><span class="fd-chip"></span><span class="fd-step" aria-hidden="true">02</span></span><p class="fd-title">資料留下</p><p class="fd-note">查詢時不會把 SQLite 檔送出去。</p><span class="fd-link" aria-hidden="true"></span></li>
+            <li class="fd-node" data-step="2" data-tone="warn" data-icon="shield"><span class="fd-head"><span class="fd-chip"></span><span class="fd-step" aria-hidden="true">03</span></span><p class="fd-title">先對簽名</p><p class="fd-note">CLI 解讀和 Azure 朗讀分開簽，讀不到就當成沒簽。</p><span class="fd-link" aria-hidden="true"></span></li>
+            <li class="fd-node" data-step="3" data-tone="info" data-icon="terminal"><span class="fd-head"><span class="fd-chip"></span><span class="fd-step" aria-hidden="true">04</span></span><p class="fd-title">交給 CLI</p><p class="fd-note">CLI 解讀簽了，問題和命中文字才可以交給那支 CLI。</p><span class="fd-link" aria-hidden="true"></span></li>
+            <li class="fd-node" data-step="4" data-tone="info" data-icon="music"><span class="fd-head"><span class="fd-chip"></span><span class="fd-step" aria-hidden="true">05</span></span><p class="fd-title">Azure 朗讀</p><p class="fd-note">要簽過，設定也要開，送出的只有新答案的正文。</p></li>
             </ol>
-            <ul class="fd-ticks"><li>像素留在這台電腦</li><li>兩張同意，兩扇門</li><li>讀不到就當成沒簽</li></ul>
-          <ul class="fd-zones"><li>這台電腦</li><li>同意界線</li><li>外面</li></ul>
-            <figcaption>截圖、OCR 文字和 SQLite 留在這台電腦。CLI 解讀簽了，問題和命中文字才交給選定的 CLI。Azure 朗讀簽了而且設定開著，才把新答案正文交給 Azure。兩張都讀不到就當成沒簽。畫面檔不走這兩扇門。</figcaption>
+            <ul class="fd-ticks"><li>像素留在這台電腦</li><li>一扇門一張簽名</li><li>讀不到就當沒簽</li></ul>
+          <ul class="fd-zones"><li>留在這裡</li><li>簽名</li><li>送出去</li></ul>
+            <figcaption>畫面檔不走這兩扇門。</figcaption>
           </figure>
         </div>
-      </div>
+      </section>
 
       <section class="section skills-section" id="skills">
         <div class="section-heading">
@@ -348,17 +347,17 @@
           Skill 只在你明確要求查 AI-Sister 記憶時執行；不會簽同意、開錄、刪除或操作電腦。
           查詢回傳的文字與來源欄位會進入目前的 agent 對話，不包含截圖位元組。
         </p>
-        <div class="fd-story">
-          <h3>agent 怎麼問她</h3>
-          <p>Claude Code 和 Codex 叫的是同一條本機指令。回來的是文字和來源欄位，不是截圖。</p>
+        <div class="fd-story" id="fd-sec-skill">
+          <h3>從 agent 問她</h3>
+          <p>Claude Code 和 Codex 在這台電腦跑同一條指令。回來的是文字，不是截圖。</p>
           <figure class="fd" data-fd="{&quot;columns&quot;:[[0],[1],[2]],&quot;core&quot;:1}">
             <ol class="fd-legend">
-            <li class="fd-node" data-step="0" data-tone="neutral" data-icon="terminal"><span class="fd-head"><span class="fd-chip"></span><span class="fd-step" aria-hidden="true">01</span></span><p class="fd-title">叫起技能</p><p class="fd-note">你輸入 /ai-sister-memory 或 $ai-sister-memory，再說要找哪一段。</p><span class="fd-link" aria-hidden="true"></span></li>
-            <li class="fd-node" data-step="1" data-tone="accent" data-icon="search"><span class="fd-head"><span class="fd-chip"></span><span class="fd-step" aria-hidden="true">02</span></span><p class="fd-title">本機查詢</p><p class="fd-note">第一次跑 sister query --limit 10 --json，結果被截斷時可以再問一次。</p><span class="fd-link" aria-hidden="true"></span></li>
-            <li class="fd-node" data-step="2" data-tone="info" data-icon="doc"><span class="fd-head"><span class="fd-chip"></span><span class="fd-step" aria-hidden="true">03</span></span><p class="fd-title">帶回文字</p><p class="fd-note">時間、app、視窗標題，以及 frame 或 chunk 編號會回來，沒有截圖位元組。</p></li>
+            <li class="fd-node" data-step="0" data-tone="neutral" data-icon="terminal"><span class="fd-head"><span class="fd-chip"></span><span class="fd-step" aria-hidden="true">01</span></span><p class="fd-title">叫出技能</p><p class="fd-note">Claude Code 是 /ai-sister-memory，Codex 是 $ai-sister-memory。</p><span class="fd-link" aria-hidden="true"></span></li>
+            <li class="fd-node" data-step="1" data-tone="accent" data-icon="search"><span class="fd-head"><span class="fd-chip"></span><span class="fd-step" aria-hidden="true">02</span></span><p class="fd-title">在本機跑</p><p class="fd-note">在這台電腦跑 sister query，先要 10 筆。少掉的列可能改變答案，才再問一次。</p><span class="fd-link" aria-hidden="true"></span></li>
+            <li class="fd-node" data-step="2" data-tone="info" data-icon="doc"><span class="fd-head"><span class="fd-chip"></span><span class="fd-step" aria-hidden="true">03</span></span><p class="fd-title">文字回來</p><p class="fd-note">回來的是時間、app、視窗標題和 frame 或 chunk 編號。</p></li>
             </ol>
-            <ul class="fd-ticks"><li>第一次最多 10 筆</li><li>帶回文字和來源</li><li>不含截圖位元組</li></ul>
-            <figcaption>你請 Claude Code 或 Codex 查自己的 AI-Sister 記憶時，skill 在本機跑 sister query --limit 10 --json。回覆可以有文字、時間、app、視窗標題，以及 frame 或 chunk 編號，不含截圖位元組。它不簽同意、不開錄、不刪除、不操作電腦。查詢紀錄開關開著時，問題會另外寫在這台電腦。</figcaption>
+            <ul class="fd-ticks"><li>第一次要 10 筆</li><li>回來文字和編號</li><li>不給截圖</li></ul>
+            <figcaption>它只會查，不會簽同意、開錄、刪記憶或操作電腦。查詢紀錄開著時，問題也只存在這台電腦。</figcaption>
           </figure>
         </div>
       </section>
